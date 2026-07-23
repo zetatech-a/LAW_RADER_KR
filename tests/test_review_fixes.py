@@ -30,18 +30,27 @@ class _PagedScraper(BaseScraper):
         ][:limit]
 
 
-def test_collect_stops_at_seen_id():
-    # 1페이지에 이미 본 'b' 가 있으면 2페이지로 넘어가지 않는다
+def test_collect_stops_when_page_fully_seen():
+    # 1페이지 전체가 이미 본 글이면(경계 통과) 다음 페이지로 넘어가지 않는다
     sc = _PagedScraper([["a", "b"], ["c", "d"]])
-    got = [p.post_id for p in sc.collect(limit=10, seen_ids={"b"}, max_pages=5)]
+    got = [p.post_id for p in sc.collect(limit=10, seen_ids={"a", "b"}, max_pages=5)]
     assert got == ["a", "b"]
 
 
-def test_collect_paginates_until_seen():
-    # 1페이지가 전부 신규면 다음 페이지까지 넘겨서 누락을 막는다
-    sc = _PagedScraper([["a", "b"], ["c", "seen"], ["e"]])
-    got = [p.post_id for p in sc.collect(limit=10, seen_ids={"seen"}, max_pages=5)]
-    assert got == ["a", "b", "c", "seen"]
+def test_collect_paginates_until_page_fully_seen():
+    # 1페이지에 신규가 하나라도 있으면 계속 넘겨서, 전부 seen 인 페이지에서 멈춘다
+    sc = _PagedScraper([["a", "b"], ["c", "d"], ["seen1", "seen2"]])
+    got = [p.post_id for p in sc.collect(limit=10, seen_ids={"seen1", "seen2"}, max_pages=5)]
+    assert got == ["a", "b", "c", "d", "seen1", "seen2"]
+
+
+def test_collect_does_not_stop_on_pinned_seen():
+    # 고정공지 'pin' 이 매 페이지 상단에 seen 으로 있어도 페이지네이션이 멈추면 안 된다.
+    # (P1) 예전 'any seen' 조건이면 1페이지에서 멈춰 2페이지 신규 'c','d' 를 놓쳤다.
+    sc = _PagedScraper([["pin", "a", "b"], ["pin", "c", "d"], ["pin", "old1", "old2"]])
+    got = [p.post_id for p in sc.collect(limit=10, seen_ids={"pin", "old1", "old2"}, max_pages=5)]
+    # 'c','d' 까지 도달해야 하고, 전부 seen 인 3페이지에서 멈춘다
+    assert "c" in got and "d" in got
 
 
 def test_collect_stops_when_no_progress():
@@ -62,6 +71,36 @@ def test_list_page_url_appends_param():
     sc = _PagedScraper([[]])
     assert sc._list_page_url(1) == "http://x/list"
     assert "pageIndex=3" in sc._list_page_url(3)
+
+
+class _EmptyScraper(BaseScraper):
+    """HTTP 는 성공했지만 파싱이 0건인 상황을 흉내낸다."""
+
+    def __init__(self, source, fetcher):
+        super().__init__(source, fetcher)
+
+    def fetch_list(self, limit, page=1):
+        return []
+
+
+def test_all_empty_parse_fails_run(tmp_path, monkeypatch):
+    # 모든 소스가 HTTP 성공하지만 파싱 0건이면 all-failed 가드가 실패(exit 1)로 잡아야 한다.
+    import src.main as main_mod
+
+    # 대상 소스를 미리 baseline 처리(빈 기준선 방지 로직을 우회해 '정상 운영 중'을 흉내)
+    from src.state import State
+
+    state_path = tmp_path / "seen.json"
+    st = State(state_path)
+    st.mark_seen("fss_press", ["old1", "old2"], baselined=True)
+    st.save()
+
+    monkeypatch.setattr(main_mod, "build_scraper", lambda src, fetcher: _EmptyScraper(src, fetcher))
+
+    rc = main_mod.run(
+        ["--only", "fss_press", "--state", str(state_path), "--dry-run"]
+    )
+    assert rc == 1
 
 
 class _FakeResp:

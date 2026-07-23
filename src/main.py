@@ -87,8 +87,15 @@ def run(argv=None) -> int:
             errors.append(f"{src.key}: {e}")
             continue
 
-        succeeded += 1
         current_ids = [p.post_id for p in listing]
+
+        # HTTP 는 성공했지만 파서가 0건을 반환하면(마크업/AJAX 변경 등) '성공'으로 세지
+        # 않는다. 그래야 전 소스가 빈 결과인 파싱 전면장애를 all-failed 가드가 잡아낸다.
+        # (이 게시판들은 정상 시 항상 목록이 있으므로 0건 = 이상 신호)
+        if current_ids:
+            succeeded += 1
+        else:
+            log.warning("[%s] HTTP 성공했으나 파싱 0건 — 파서/마크업 확인 필요", src.key)
 
         # 최초 실행: 기준선만 기록하고 메일 생략.
         # 단, 0건이면(일시 오류·셀렉터 불일치·AJAX 미로딩 가능) 기준선을 잡지 않는다.

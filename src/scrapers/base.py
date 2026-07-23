@@ -57,24 +57,40 @@ class BaseScraper:
         """이미 본 글(seen_ids)에 닿을 때까지 페이지를 넘겨가며 목록을 모은다.
 
         중단 조건(누락 방지 + 무한루프 방지):
-          - 이번 페이지에 seen_ids 에 있는 글이 하나라도 있으면(그 아래는 이미 봄) 중단
+          - 이번 페이지의 글이 '전부' 이미 본 것이면(경계 통과) 중단.
+            ※ '하나라도 seen' 이 아니라 '전부 seen' 이어야 한다. 상단 고정(pinned)
+              공지는 매 페이지에 seen 으로 남아 있으므로, 하나라도 걸리면 멈추게 하면
+              고정공지 때문에 1페이지에서 멈춰 백로그를 놓친다.
           - 새 글이 더 늘지 않으면(페이지 파라미터 무시 등) 중단
-          - max_pages 도달 시 중단
+          - max_pages 도달 시 중단 → 백로그가 남았을 수 있으므로 경고
         """
         collected: list[Post] = []
         collected_ids: set[str] = set()
+        hit_boundary = False
         for page in range(1, max(1, max_pages) + 1):
             batch = self.fetch_list(limit, page=page)
             if not batch:
+                hit_boundary = True  # 더 볼 페이지가 없음 = 백로그 소진
                 break
             fresh = [p for p in batch if p.post_id not in collected_ids]
             if not fresh:
-                break  # 진전 없음
+                hit_boundary = True  # 진전 없음(같은 목록 반복 등) = 사실상 소진
+                break
             for p in fresh:
                 collected_ids.add(p.post_id)
                 collected.append(p)
-            if any(p.post_id in seen_ids for p in batch):
-                break  # 이미 본 지점에 도달 → 더 볼 필요 없음
+            if all(p.post_id in seen_ids for p in batch):
+                hit_boundary = True  # 페이지 전체가 이미 본 글 → 경계 통과
+                break
+        if not hit_boundary:
+            # max_pages 를 다 쓰고도 '전부 seen' 경계에 닿지 못함 → 아직 더 오래된
+            # 미확인 글이 남아 있을 수 있다(장기 미실행 후 대량 신규 등).
+            log.warning(
+                "[%s] max_pages(%d) 도달했으나 경계 미도달 — 백로그가 더 남아있을 수 있음. "
+                "장기 미실행 후 대량 신규라면 config 의 max_pages 를 일시 상향해 백필하세요.",
+                self.key,
+                max_pages,
+            )
         return collected
 
     def _list_page_url(self, page: int) -> str:
