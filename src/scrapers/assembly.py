@@ -27,7 +27,10 @@ _DETAIL_BASE = "https://likms.assembly.go.kr/bill/billDetail.do"
 
 
 class AssemblyBillScraper(BaseScraper):
-    def fetch_list(self, limit: int) -> list[Post]:
+    # 계류의안 목록은 AJAX 로드라 GET 페이지네이션이 무의미 → 단일 페이지만.
+    PAGE_PARAM = None
+
+    def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
         resp = self.fetcher.get(self.list_url)
         html = self.fetcher.text(resp)
         soup = BeautifulSoup(html, "lxml")

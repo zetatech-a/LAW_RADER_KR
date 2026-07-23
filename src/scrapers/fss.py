@@ -15,6 +15,7 @@ from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
 from bs4 import BeautifulSoup
 
+from ..fetcher import AttachmentTooLarge
 from ..models import Attachment, Post
 from .base import BaseScraper, clean_text
 
@@ -24,6 +25,9 @@ _NUM = re.compile(r"\d{2,}")
 
 
 class FssBoardScraper(BaseScraper):
+    # eGovFrame 목록 페이지 번호 파라미터(라이브 검증 필요)
+    PAGE_PARAM = "pageIndex"
+
     def __init__(self, source, fetcher):
         super().__init__(source, fetcher)
         parsed = urlparse(self.list_url)
@@ -31,8 +35,8 @@ class FssBoardScraper(BaseScraper):
         # list.do → view.do
         self._view_url = self.list_url.split("?")[0].replace("list.do", "view.do")
 
-    def fetch_list(self, limit: int) -> list[Post]:
-        resp = self.fetcher.get(self.list_url)
+    def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
+        resp = self.fetcher.get(self._list_page_url(page))
         html = self.fetcher.text(resp)
         soup = BeautifulSoup(html, "lxml")
         posts = self._parse_list(soup)
@@ -141,5 +145,7 @@ class FssBoardScraper(BaseScraper):
                 continue  # 복원 불가한 onclick 첨부는 다운로드 생략(링크만)
             try:
                 a.data = self.fetcher.download(a.url, referer=post.url)
+            except AttachmentTooLarge as e:
+                log.info("[%s] 첨부 용량 초과 — 링크만 첨부 %s: %s", self.key, a.filename, e)
             except Exception as e:  # noqa: BLE001
                 log.warning("[%s] 첨부 다운로드 실패 %s: %s", self.key, a.url, e)
