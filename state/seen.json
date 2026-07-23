@@ -1,1 +1,86 @@
-{}
+{
+  "fsc_press": {
+    "seen": [
+      "path:87397",
+      "path:87394",
+      "path:87393",
+      "path:87388",
+      "path:87367",
+      "path:87366",
+      "path:87361",
+      "path:87359",
+      "path:87357",
+      "path:87356"
+    ],
+    "baselined": true
+  },
+  "fsc_legislation": {
+    "seen": [],
+    "baselined": true
+  },
+  "fss_press": {
+    "seen": [
+      "219319",
+      "219315",
+      "219306",
+      "219297",
+      "219296",
+      "219291",
+      "219290",
+      "219273",
+      "219260",
+      "219255"
+    ],
+    "baselined": true
+  },
+  "fss_admin_guidance": {
+    "seen": [
+      "200491"
+    ],
+    "baselined": true
+  },
+  "fss_rule_amendment": {
+    "seen": [
+      "200489"
+    ],
+    "baselined": true
+  },
+  "fss_sanction": {
+    "seen": [
+      "202400649",
+      "202500653",
+      "202500568",
+      "202500516",
+      "202500255",
+      "202400534",
+      "202500608",
+      "202200354",
+      "202500659",
+      "202500616"
+    ],
+    "baselined": true
+  },
+  "fss_mgmt_notice": {
+    "seen": [
+      "202500516",
+      "202400534",
+      "202200354",
+      "202400801",
+      "202600088",
+      "202600130",
+      "202400536",
+      "202500601",
+      "202600178",
+      "202500038"
+    ],
+    "baselined": true
+  },
+  "better_reply": {
+    "seen": [],
+    "baselined": true
+  },
+  "assembly_bill": {
+    "seen": [],
+    "baselined": true
+  }
+}
