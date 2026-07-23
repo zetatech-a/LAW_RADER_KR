@@ -103,4 +103,15 @@ scripts/send_test_email.py
   - 또는 브라우저 개발자도구로 실제 목록 POST 엔드포인트를 확인해 반영하거나, Playwright 렌더링으로 전환합니다.
 - **접속 IP 차단:** 일부 한국 정부 사이트는 해외(GitHub Actions는 미국) IP를 차단할 수 있습니다. 그럴 경우 국내 IP의 **self-hosted runner** 또는 개인 서버 cron으로 실행을 옮기면 됩니다(코드는 환경 독립적이라 그대로 사용 가능).
 
-먼저 `--dry-run --debug` 로 한 소스씩 확인하며 셀렉터를 다듬은 뒤 정식 가동하시길 권장합니다.
+### 라이브 검증 방법 (권장 첫 단계)
+
+정식 가동 전, 실제 사이트에서 파서와 페이지 파라미터가 동작하는지 먼저 확인하세요. 메일·상태변경 없이 점검만 합니다.
+
+- **GitHub Actions에서 (가장 쉬움):** Actions 탭 → **"Verify sources (live)"** → **Run workflow**. 실행이 끝나면 `verify-results` 아티팩트로 **검증 리포트(`verify_report.txt`)와 원본 HTML(`debug/`)** 을 내려받을 수 있습니다.
+- **로컬에서:** 인터넷이 되는 환경에서
+  ```bash
+  python scripts/verify_sources.py                 # 전체
+  python scripts/verify_sources.py --only fss_press # 특정 소스
+  ```
+
+검증 리포트는 소스별로 **① 목록 건수 ② 제목 샘플 ③ 페이지네이션 작동 여부 ④ 본문/첨부 추출 여부** 를 보여줍니다. 0건이거나 페이지네이션이 "무시된 듯"으로 나오는 소스는 `debug/<key>_list.txt` 원본을 열어 실제 셀렉터/파라미터명을 확인한 뒤 해당 스크래퍼를 조정하면 됩니다.

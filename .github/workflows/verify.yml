@@ -1,0 +1,43 @@
+name: Verify sources (live)
+
+# 라이브 검증 전용 워크플로우.
+# 대상 사이트 파서/페이지 파라미터가 실제로 동작하는지 GitHub 러너에서 확인한다.
+# 메일을 보내지 않고 state 도 바꾸지 않으며, 결과 로그와 debug/ 원본 HTML 을
+# 아티팩트로 업로드한다. Actions 탭에서 "Run workflow" 로 수동 실행.
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "특정 소스만 검증(쉼표구분 key, 비우면 전체)"
+        required: false
+        default: ""
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run verification
+        run: |
+          python scripts/verify_sources.py --only "${{ github.event.inputs.only }}" \
+            | tee verify_report.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-results
+          path: |
+            verify_report.txt
+            debug/
+          if-no-files-found: warn
+          retention-days: 7
