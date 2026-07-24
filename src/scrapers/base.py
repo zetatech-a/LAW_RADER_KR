@@ -74,21 +74,40 @@ class BaseScraper:
         return
 
     # --- 페이지네이션 수집 ---
-    def collect(self, limit: int, seen_ids: set[str], max_pages: int) -> list[Post]:
-        """이미 본 글(seen_ids)에 닿을 때까지 페이지를 넘겨가며 목록을 모은다.
+    def collect(
+        self,
+        limit: int,
+        seen_ids: set[str],
+        max_pages: int,
+        backfill: bool = False,
+    ) -> tuple[list[Post], bool]:
+        """이미 본 글(seen_ids) 경계에 닿을 때까지 페이지를 넘겨가며 목록을 모은다.
+
+        반환: (수집된 글, 경계도달여부).
+        경계도달여부=False 는 max_pages 를 다 쓰고도 경계에 닿지 못했다는 뜻(백로그
+        잔여 가능)으로, 호출부가 다음 실행에 backfill=True 로 이어받게 한다.
 
         중단 조건(누락 방지 + 무한루프 방지):
           - 이번 페이지의 글이 '전부' 이미 본 것이면(경계 통과) 중단.
-            ※ '하나라도 seen' 이 아니라 '전부 seen' 이어야 한다. 상단 고정(pinned)
-              공지는 매 페이지에 seen 으로 남아 있으므로, 하나라도 걸리면 멈추게 하면
-              고정공지 때문에 1페이지에서 멈춰 백로그를 놓친다.
+            ※ 상단 고정(pinned)공지는 매 페이지에 seen 으로 남으므로 '하나라도 seen'
+              이 아니라 '전부 seen' 이어야 멈춘다.
           - 새 글이 더 늘지 않으면(페이지 파라미터 무시 등) 중단
-          - max_pages 도달 시 중단 → 백로그가 남았을 수 있으므로 경고
+          - max_pages 도달 시 중단(경계 미도달로 간주)
+
+        backfill=True(직전 실행이 cap 에 걸려 백로그가 남은 경우): 이미 본 prefix
+        (전부 seen 인 앞쪽 페이지들)는 멈추지 않고 건너뛰며, 아직 신규를 하나도
+        못 만난 동안의 '전부 seen' 페이지는 경계로 보지 않는다. 신규를 만난 뒤의
+        '전부 seen' 페이지에서 비로소 경계로 판단해 멈춘다.
         """
         collected: list[Post] = []
         collected_ids: set[str] = set()
+        saw_unseen = False
         hit_boundary = False
-        for page in range(1, max(1, max_pages) + 1):
+        unseen_pages = 0
+        budget = max(1, max_pages)
+        # prefix 스킵을 포함한 절대 페이지 상한(무한루프 방지). 신규 수집 예산과 별개.
+        hard_cap = budget * 10
+        for page in range(1, hard_cap + 1):
             batch = self.fetch_list(limit, page=page)
             if not batch:
                 hit_boundary = True  # 더 볼 페이지가 없음 = 백로그 소진
@@ -97,22 +116,32 @@ class BaseScraper:
             if not fresh:
                 hit_boundary = True  # 진전 없음(같은 목록 반복 등) = 사실상 소진
                 break
+            page_all_seen = all(p.post_id in seen_ids for p in batch)
+            # 백필 중 아직 신규를 못 만난 '전부 seen' 페이지 = 이미 본 prefix → 예산 없이 스킵
+            skip_prefix = page_all_seen and backfill and not saw_unseen
             for p in fresh:
-                collected_ids.add(p.post_id)
-                collected.append(p)
-            if all(p.post_id in seen_ids for p in batch):
-                hit_boundary = True  # 페이지 전체가 이미 본 글 → 경계 통과
+                collected_ids.add(p.post_id)  # no-progress 가드용으로 항상 기록
+                if not skip_prefix:
+                    collected.append(p)
+                    if p.post_id not in seen_ids:
+                        saw_unseen = True
+            if page_all_seen:
+                if skip_prefix:
+                    continue  # prefix 통과 중 → 계속
+                hit_boundary = True  # 신규 이후의 '전부 seen' = 경계 통과
                 break
+            # 신규가 있는 페이지 → 이번 실행 수집 예산 차감
+            unseen_pages += 1
+            if unseen_pages >= budget:
+                break  # 예산 소진(경계 미도달 → 다음 실행에 backfill 로 이어감)
         if not hit_boundary:
-            # max_pages 를 다 쓰고도 '전부 seen' 경계에 닿지 못함 → 아직 더 오래된
-            # 미확인 글이 남아 있을 수 있다(장기 미실행 후 대량 신규 등).
             log.warning(
-                "[%s] max_pages(%d) 도달했으나 경계 미도달 — 백로그가 더 남아있을 수 있음. "
-                "장기 미실행 후 대량 신규라면 config 의 max_pages 를 일시 상향해 백필하세요.",
+                "[%s] 수집 예산(max_pages=%d) 소진, 경계 미도달 — 백로그 잔여. "
+                "다음 실행에 이어서(backfill) 계속 수집합니다.",
                 self.key,
                 max_pages,
             )
-        return collected
+        return collected, hit_boundary
 
     def _list_page_url(self, page: int) -> str:
         """PAGE_PARAM 을 이용해 list_url 에 페이지 번호를 붙인다."""

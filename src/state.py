@@ -49,6 +49,14 @@ class State:
         if baselined:
             entry["baselined"] = True
 
+    def backfill_pending(self, source_key: str) -> bool:
+        """직전 실행이 max_pages 에 걸려 백로그가 남았는지 여부."""
+        return self._data.get(source_key, {}).get("backfill_pending", False)
+
+    def set_backfill_pending(self, source_key: str, pending: bool) -> None:
+        entry = self._data.setdefault(source_key, {"seen": [], "baselined": False})
+        entry["backfill_pending"] = pending
+
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(

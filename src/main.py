@@ -71,13 +71,16 @@ def run(argv=None) -> int:
         try:
             scraper = build_scraper(src, fetcher)
             baselined = state.is_baselined(src.key)
+            reached_boundary = True
             if baselined:
-                # 이미 기준선이 있는 소스: 이미 본 글에 닿을 때까지 페이지를 넘겨 수집
-                # (평상시엔 첫 페이지에서 곧바로 멈춤 → 요청 1회)
-                listing = scraper.collect(
+                # 이미 기준선이 있는 소스: 이미 본 글 경계에 닿을 때까지 페이지를 넘겨 수집
+                # (평상시엔 첫 페이지에서 곧바로 멈춤 → 요청 1회).
+                # 직전 실행이 cap 에 걸렸으면(backfill) 이어서 남은 백로그를 계속 수집.
+                listing, reached_boundary = scraper.collect(
                     cfg.fetch.list_limit,
                     state.seen_ids(src.key),
                     cfg.fetch.max_pages,
+                    backfill=state.backfill_pending(src.key),
                 )
             else:
                 # 최초 실행: 기준선 수립용으로 1페이지만
@@ -118,6 +121,11 @@ def run(argv=None) -> int:
         # 공지처럼 계속 노출되는 글이 500개 상한에 밀려 제거→재발송되는 일을 막는다.
         if current_ids:
             state.mark_seen(src.key, current_ids)
+
+        # cap 에 걸려 경계 미도달이면 백로그가 남은 것 → 다음 실행에 backfill 로 이어받는다.
+        state.set_backfill_pending(src.key, not reached_boundary)
+        if not reached_boundary:
+            log.info("[%s] 백로그 잔여 — 다음 실행에 이어서 수집(backfill)", src.key)
 
         if not new_posts:
             log.info("[%s] 신규 없음 (목록 %d건 확인)", src.key, len(listing))
