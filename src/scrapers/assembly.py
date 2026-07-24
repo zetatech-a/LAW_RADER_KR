@@ -29,11 +29,12 @@ log = logging.getLogger(__name__)
 
 _DETAIL = "https://likms.assembly.go.kr/bill/billDetail.do?billId={bill_id}"
 
-# 응답 레코드에서 값을 찾을 때 시도할 필드명 후보
+# 응답 레코드에서 값을 찾을 때 시도할 필드명 후보(명세서 출력값 기준 + 변형 대비)
 _ID_FIELDS = ("BILL_ID", "billId", "BILL_NO", "billNo")
 _NAME_FIELDS = ("BILL_NAME", "BILL_NM", "billName", "TITLE", "billNm")
 _DATE_FIELDS = ("PROPOSE_DT", "PPSL_DT", "proposeDt", "PROC_DT", "REGIST_DT")
 _PROPOSER_FIELDS = ("PROPOSER", "RST_PROPOSER", "proposer", "PPSR")
+_URL_FIELDS = ("LINK_URL", "linkUrl", "DETAIL_URL")
 
 
 class AssemblyBillScraper(BaseScraper):
@@ -44,8 +45,9 @@ class AssemblyBillScraper(BaseScraper):
         ex = source.extra or {}
         self.endpoint = ex.get("api_endpoint", "https://open.assembly.go.kr/portal/openapi")
         self.service = ex.get("api_service", "")
-        self.age = str(ex.get("age", "22"))
-        self.page_size = int(ex.get("page_size", 30))
+        # AGE 는 계류의안 서비스의 요청인자가 아니므로 명시 설정된 경우에만 전송
+        self.age = str(ex["age"]) if ex.get("age") not in (None, "") else ""
+        self.page_size = int(ex.get("page_size", 100))
         self.api_key = os.environ.get("ASSEMBLY_API_KEY", "")
 
     def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
@@ -67,8 +69,9 @@ class AssemblyBillScraper(BaseScraper):
             "Type": "json",
             "pIndex": str(max(1, page)),
             "pSize": str(min(self.page_size, limit) if limit else self.page_size),
-            "AGE": self.age,
         }
+        if self.age:
+            params["AGE"] = self.age
         try:
             resp = self.fetcher.get(url, params=params, referer="https://open.assembly.go.kr/")
             data = resp.json()
@@ -95,13 +98,16 @@ class AssemblyBillScraper(BaseScraper):
             seen.add(bill_id)
             proposer = clean_text(self._first(row, _PROPOSER_FIELDS))
             title = f"{name} ({proposer})" if proposer else name
+            # 공식 상세 URL(LINK_URL)이 있으면 사용, 없으면 billDetail 로 구성
+            link = clean_text(self._first(row, _URL_FIELDS))
+            url = link if link.startswith("http") else _DETAIL.format(bill_id=bill_id)
             posts.append(
                 Post(
                     source_key=self.key,
                     source_name=self.name,
                     post_id=bill_id,
                     title=title,
-                    url=_DETAIL.format(bill_id=bill_id),
+                    url=url,
                     date=clean_text(self._first(row, _DATE_FIELDS)),
                 )
             )

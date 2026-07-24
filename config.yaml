@@ -95,9 +95,10 @@ sources:
     type: assembly_bill
     enabled: true
     list_url: "https://likms.assembly.go.kr/bill/bi/bill/state/mooringBillPage.do"
-    # ↓ 발급받은 API 에 맞게 조정. api_service 는 '의안 목록' 서비스명.
-    #   (키 입력 후 verify 를 한 번 돌려 응답을 확인해 확정하세요)
+    # 명세서 기준: '법률안 심사 및 처리(계류의안)' 서비스
+    #   요청주소 .../portal/openapi/nwbqublzajtcqpdae
+    #   출력필드: BILL_ID, BILL_NO, BILL_NAME, PROPOSER, RST_PROPOSER, PROPOSE_DT, LINK_URL 등
+    #   (AGE 는 이 서비스의 요청인자가 아니라 보내도 무시됨 — 계류의안만 반환)
     api_endpoint: "https://open.assembly.go.kr/portal/openapi"
-    api_service: "nzmimeepazxkubdpn"
-    age: "22"
-    page_size: 30
+    api_service: "nwbqublzajtcqpdae"
+    page_size: 100
