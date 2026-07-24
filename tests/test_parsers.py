@@ -149,3 +149,56 @@ def test_assembly_openapi_envelope_parsing(monkeypatch):
     assert posts[0].url.endswith("billId=PRC_A1")
     assert posts[0].date == "2026-07-01"
     assert posts[1].title == "두번째안"          # 제안자 없으면 이름만
+
+
+def test_assembly_error_envelope_raises(monkeypatch, tmp_path):
+    """RESULT 가 에러 코드(인증/쿼터 등)면 [] 로 삼키지 말고 예외를 던져야 한다."""
+    import pytest
+    from src.scrapers.assembly import AssemblyBillScraper
+
+    src = SourceConfig(
+        key="assembly_bill", name="a", type="assembly_bill",
+        list_url="https://likms.assembly.go.kr/bill/",
+        extra={"api_service": "svc"},
+    )
+    monkeypatch.setenv("ASSEMBLY_API_KEY", "dummy")
+    monkeypatch.chdir(tmp_path)  # _dump_debug 가 debug/ 를 tmp 에 쓰도록
+    sc = AssemblyBillScraper(src, fetcher=None)
+
+    err = {"RESULT": {"CODE": "INFO-300", "MESSAGE": "인증키 사용 제한"}}
+
+    class _R:
+        def json(self):
+            return err
+
+    class _F:
+        def get(self, *a, **k):
+            return _R()
+    sc.fetcher = _F()
+
+    with pytest.raises(RuntimeError):
+        sc.fetch_list(30, page=1)
+
+
+def test_assembly_no_data_returns_empty(monkeypatch, tmp_path):
+    """INFO-200(데이터 없음)은 정상적인 빈 목록(예외 아님)."""
+    from src.scrapers.assembly import AssemblyBillScraper
+
+    src = SourceConfig(
+        key="assembly_bill", name="a", type="assembly_bill",
+        list_url="https://likms.assembly.go.kr/bill/", extra={"api_service": "svc"},
+    )
+    monkeypatch.setenv("ASSEMBLY_API_KEY", "dummy")
+    monkeypatch.chdir(tmp_path)
+    sc = AssemblyBillScraper(src, fetcher=None)
+
+    class _R:
+        def json(self):
+            return {"RESULT": {"CODE": "INFO-200", "MESSAGE": "데이터 없음"}}
+
+    class _F:
+        def get(self, *a, **k):
+            return _R()
+    sc.fetcher = _F()
+
+    assert sc.fetch_list(30, page=1) == []

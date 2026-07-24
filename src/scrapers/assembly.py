@@ -83,11 +83,21 @@ class AssemblyBillScraper(BaseScraper):
             # 인증키가 없는 sanitize 된 예외로 바꿔 던진다(from None 으로 원본 체인 숨김).
             raise RuntimeError(f"Open API 요청 실패: {type(e).__name__}") from None
 
+        # RESULT 코드 확인: 정상(INFO-000)·데이터없음(INFO-200)만 빈 목록으로 허용하고,
+        # 인증키/서비스/쿼터 등 에러 코드는 예외로 전파한다([] 로 삼키면 collect 가
+        # '목록 끝'으로 오인한다).
+        code = self._result_code(data)
+        if code and code not in ("INFO-000", "INFO-200"):
+            self._dump_debug("list", json.dumps(data, ensure_ascii=False, indent=2))
+            raise RuntimeError(f"Open API 오류 응답(RESULT={code})")
+
         rows = self._rows(data)
         if not rows:
+            # 인증키/서비스명이 틀리면 흔히 여기로 온다(코드 없이 빈 응답). 진단용 덤프.
             log.warning(
-                "[%s] Open API 응답에서 목록을 찾지 못함 — 서비스명/인증키/필드 확인 필요. 디버그 덤프.",
+                "[%s] Open API 응답에서 목록을 찾지 못함(RESULT=%s) — 서비스명/인증키 확인. 디버그 덤프.",
                 self.key,
+                code or "없음",
             )
             self._dump_debug("list", json.dumps(data, ensure_ascii=False, indent=2))
             return []
@@ -116,6 +126,21 @@ class AssemblyBillScraper(BaseScraper):
                 )
             )
         return posts[:limit]
+
+    @staticmethod
+    def _result_code(data) -> str:
+        """응답 봉투 어디에 있든 RESULT.CODE 를 찾아 반환(없으면 '')."""
+        stack = [data]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                res = node.get("RESULT")
+                if isinstance(res, dict) and res.get("CODE"):
+                    return str(res["CODE"])
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        return ""
 
     @staticmethod
     def _rows(data) -> list:

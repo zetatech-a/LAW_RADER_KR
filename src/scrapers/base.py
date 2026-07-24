@@ -21,15 +21,13 @@ class CollectResult:
     """collect() 결과.
 
     - posts: 이번에 새로 발견한(seen 에 없던) 글들(메일 대상).
-    - reached_boundary: 이미 본 글 경계(또는 목록 끝)에 도달했는지. False 면 백로그가
-      남아 다음 실행에 next_page 부터 이어서(backfill) 수집해야 한다.
-    - next_page: 백로그가 남았을 때 다음 실행이 이어서 요청할 페이지 번호.
+    - reached_boundary: 이미 본 글 경계(또는 목록 끝)에 도달했는지. False 면 한 번의
+      실행으로 감당할 수 없는 대량 신규(장기 미가동 후 등)라는 뜻 — 경고를 남긴다.
     - scanned: 이번에 실제로 조회한 글 수(중복 제외). 0 이면 파싱 실패 신호.
     """
 
     posts: list[Post] = field(default_factory=list)
     reached_boundary: bool = True
-    next_page: int = 1
     scanned: int = 0
 
 _WS = re.compile(r"[ \t\r\f\v]+")
@@ -102,38 +100,28 @@ class BaseScraper:
         return
 
     # --- 페이지네이션 수집 ---
-    def collect(
-        self,
-        limit: int,
-        seen_ids: set[str],
-        max_pages: int,
-        start_page: int = 1,
-    ) -> CollectResult:
-        """start_page 부터 최대 max_pages 페이지를 훑어 신규 글을 모은다.
+    def collect(self, limit: int, seen_ids: set[str], max_pages: int) -> CollectResult:
+        """1페이지부터 최대 max_pages 페이지를 훑어 '신규(seen 에 없는)' 글을 모은다.
 
-        페이지 커서(start_page) 방식이라, 한 번에 다 못 가져온 백로그는 호출부가
-        result.next_page 를 저장해 다음 실행에 '이어서' 요청한다(매번 1페이지부터
-        다시 훑지 않음). 덕분에 임의 깊이의 백로그도 천장 없이 여러 실행에 걸쳐
-        수집되고, 이미 처리한 prefix 를 결과에 담지 않아 seen 상한에 앵커가 밀려나는
-        문제도 없다.
+        한 번의 실행에서 이미 본 글 경계까지 훑는다. 평상시엔 신규가 없거나 소수라
+        1~2페이지에서 곧 멈춘다(max_pages 는 실질적으로 '장기 미가동 후 따라잡기'
+        깊이 상한일 뿐, 평상시 비용은 없다).
 
         중단(경계 도달):
           - 목록 끝(빈 페이지)                → reached_boundary=True
           - 페이지 전체가 이미 본 글(seen)     → reached_boundary=True
           - 진전 없음(페이지 파라미터 무시 등) → reached_boundary=True
-        max_pages 페이지를 다 훑어도 위에 안 걸리면 reached_boundary=False 이고
-        next_page 부터 이어서 수집한다.
+        max_pages 안에 경계에 못 닿으면 reached_boundary=False 로, 한 실행으로 감당 못 할
+        대량 신규(장기 미가동 등)라는 뜻이며 경고를 남긴다. (설계상 상한: 30분 간격의
+        저빈도 게시판에서 한 실행 범위를 넘는 신규 유입은 사실상 발생하지 않는다.)
 
-        주의: 페이지 fetch 실패는 예외로 전파되어야 한다(빈 결과로 삼키면 '끝'으로
-        오인해 커서가 초기화된다). API 스크래퍼는 오류 시 [] 대신 예외를 던진다.
+        주의: 페이지 fetch 실패는 예외로 전파되어야 한다(빈 결과로 삼키면 '목록 끝'으로
+        오인한다). API 스크래퍼는 오류 시 [] 대신 예외를 던진다.
         """
         posts: list[Post] = []
         scanned_ids: set[str] = set()
         reached_boundary = False
-        pages_done = 0
-        start = max(1, start_page)
-        for offset in range(max(1, max_pages)):
-            page = start + offset
+        for page in range(1, max(1, max_pages) + 1):
             batch = self.fetch_list(limit, page=page)
             if not batch:
                 reached_boundary = True  # 목록 끝
@@ -146,23 +134,18 @@ class BaseScraper:
                 scanned_ids.add(p.post_id)
                 if p.post_id not in seen_ids:
                     posts.append(p)
-            pages_done += 1
             if all(p.post_id in seen_ids for p in batch):
                 reached_boundary = True  # 페이지 전체가 이미 본 글 → 경계 통과
                 break
         if not reached_boundary:
             log.warning(
-                "[%s] max_pages(%d) 소진, 경계 미도달 — 백로그 잔여. 다음 실행에 "
-                "%d페이지부터 이어서 수집합니다.",
+                "[%s] max_pages(%d) 내에 경계 미도달 — 한 실행 범위를 넘는 대량 신규. "
+                "장기 미가동 후라면 config 의 max_pages 를 일시 상향해 재실행하세요.",
                 self.key,
                 max_pages,
-                start + pages_done,
             )
         return CollectResult(
-            posts=posts,
-            reached_boundary=reached_boundary,
-            next_page=start + pages_done,
-            scanned=len(scanned_ids),
+            posts=posts, reached_boundary=reached_boundary, scanned=len(scanned_ids)
         )
 
     def _list_page_url(self, page: int) -> str:

@@ -64,45 +64,13 @@ def test_collect_stops_when_no_progress():
     assert r.reached_boundary is True
 
 
-def test_collect_backlog_sets_next_page():
-    # cap 을 넘는 백로그: 경계 미도달 → reached_boundary=False, next_page 로 이어감
+def test_collect_backlog_over_cap_warns_not_boundary():
+    # max_pages 안에 경계 미도달(한 실행 범위 초과 대량 신규) → reached_boundary=False.
     pages = [[f"p{n}i{j}" for j in range(2)] for n in range(10)]  # 전부 신규
     sc = _PagedScraper(pages)
     r = sc.collect(limit=10, seen_ids=set(), max_pages=3)
-    assert len(r.posts) == 6            # 3페이지 * 2건
-    assert r.reached_boundary is False  # 백로그 잔여
-    assert r.next_page == 4             # 다음 실행은 4페이지부터
-
-
-def test_backfill_resumes_by_page_cursor():
-    # 백로그가 cap 을 넘어 여러 실행에 걸쳐, 페이지 커서로 이어서 남김없이 수집한다.
-    pages = [["n1", "n2"], ["n3", "n4"], ["b1", "b2"], ["b3", "b4"], ["c1", "c2"]]
-    sc = _PagedScraper(pages)
-    seen = set()
-    all_new = []
-
-    # run1: 1~2p, 경계 미도달, next_page=3
-    r1 = sc.collect(limit=10, seen_ids=seen, max_pages=2, start_page=1)
-    assert [p.post_id for p in r1.posts] == ["n1", "n2", "n3", "n4"]
-    assert r1.reached_boundary is False and r1.next_page == 3
-    all_new += [p.post_id for p in r1.posts]
-    seen |= set(all_new)
-
-    # run2: 3페이지부터 이어서 → 3~4p, next_page=5
-    r2 = sc.collect(limit=10, seen_ids=seen, max_pages=2, start_page=r1.next_page)
-    assert [p.post_id for p in r2.posts] == ["b1", "b2", "b3", "b4"]
-    assert r2.reached_boundary is False and r2.next_page == 5
-    all_new += [p.post_id for p in r2.posts]
-    seen |= set(all_new)
-
-    # run3: 5페이지부터 → 5p 수집 후 6p 없음(목록 끝) → 경계 도달, 백필 종료
-    r3 = sc.collect(limit=10, seen_ids=seen, max_pages=2, start_page=r2.next_page)
-    assert [p.post_id for p in r3.posts] == ["c1", "c2"]
-    assert r3.reached_boundary is True
-    all_new += [p.post_id for p in r3.posts]
-
-    # 전체 10건을 중복·누락 없이 수집
-    assert all_new == ["n1", "n2", "n3", "n4", "b1", "b2", "b3", "b4", "c1", "c2"]
+    assert len(r.posts) == 6            # 3페이지 * 2건만 이번에 수집
+    assert r.reached_boundary is False  # 경계 미도달(운영 경고 대상)
 
 
 def test_collect_propagates_fetch_error():
@@ -115,7 +83,7 @@ def test_collect_propagates_fetch_error():
 
     sc = _Failing([["a", "b"], ["c", "d"]])
     with pytest.raises(RuntimeError):
-        sc.collect(limit=10, seen_ids=set(), max_pages=5, start_page=1)
+        sc.collect(limit=10, seen_ids=set(), max_pages=5)
 
 
 def test_list_page_url_appends_param():

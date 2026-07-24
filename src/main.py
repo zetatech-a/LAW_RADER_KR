@@ -71,23 +71,10 @@ def run(argv=None) -> int:
         try:
             scraper = build_scraper(src, fetcher)
             baselined = state.is_baselined(src.key)
-            if baselined:
-                # 직전 실행이 cap 에 걸렸으면(backfill) 저장된 페이지부터 이어서, 아니면 1p.
-                start_page = (
-                    state.backfill_page(src.key)
-                    if state.backfill_pending(src.key)
-                    else 1
-                )
-                result = scraper.collect(
-                    cfg.fetch.list_limit,
-                    state.seen_ids(src.key),
-                    cfg.fetch.max_pages,
-                    start_page=start_page,
-                )
-            else:
-                # 최초 실행: 기준선을 collect 와 같은 페이지 깊이만큼 잡는다(메일 생략).
-                # 1페이지만 잡으면 다음 실행에 2페이지 이하의 옛 글을 신규로 오인해 폭탄.
-                result = scraper.collect(cfg.fetch.list_limit, set(), cfg.fetch.max_pages)
+            # 기준선 소스는 seen 과 대조해 신규만, 최초 실행은 빈 seen 으로 전 범위를
+            # 기준선으로 기록. 어느 쪽이든 1페이지부터 경계까지 한 번에 훑는다.
+            seen = state.seen_ids(src.key) if baselined else set()
+            result = scraper.collect(cfg.fetch.list_limit, seen, cfg.fetch.max_pages)
         except Exception as e:  # noqa: BLE001  — 한 소스 실패가 전체를 막지 않도록
             log.error("[%s] 목록 수집 실패: %s", src.key, e)
             errors.append(f"{src.key}: {e}")
@@ -117,15 +104,6 @@ def run(argv=None) -> int:
             continue
 
         new_posts = result.posts  # collect 가 이미 seen 과 대조해 신규만 반환
-
-        # 경계 미도달이면 백로그가 남은 것 → 다음 실행에 next_page 부터 이어서 수집.
-        state.set_backfill(
-            src.key, pending=not result.reached_boundary, page=result.next_page
-        )
-        if not result.reached_boundary:
-            log.info(
-                "[%s] 백로그 잔여 — 다음 실행 %d페이지부터 이어서 수집", src.key, result.next_page
-            )
 
         if not new_posts:
             log.info("[%s] 신규 없음 (조회 %d건)", src.key, result.scanned)
