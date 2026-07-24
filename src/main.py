@@ -71,56 +71,42 @@ def run(argv=None) -> int:
         try:
             scraper = build_scraper(src, fetcher)
             baselined = state.is_baselined(src.key)
-            if baselined:
-                # 이미 기준선이 있는 소스: 이미 본 글에 닿을 때까지 페이지를 넘겨 수집
-                # (평상시엔 첫 페이지에서 곧바로 멈춤 → 요청 1회)
-                listing = scraper.collect(
-                    cfg.fetch.list_limit,
-                    state.seen_ids(src.key),
-                    cfg.fetch.max_pages,
-                )
-            else:
-                # 최초 실행: 기준선 수립용으로 1페이지만
-                listing = scraper.fetch_list(cfg.fetch.list_limit)
+            # 기준선 소스는 seen 과 대조해 신규만, 최초 실행은 빈 seen 으로 전 범위를
+            # 기준선으로 기록. 어느 쪽이든 1페이지부터 경계까지 한 번에 훑는다.
+            seen = state.seen_ids(src.key) if baselined else set()
+            result = scraper.collect(cfg.fetch.list_limit, seen, cfg.fetch.max_pages)
         except Exception as e:  # noqa: BLE001  — 한 소스 실패가 전체를 막지 않도록
             log.error("[%s] 목록 수집 실패: %s", src.key, e)
             errors.append(f"{src.key}: {e}")
             continue
 
-        current_ids = [p.post_id for p in listing]
-
         # HTTP 는 성공했지만 파서가 0건을 반환하면(마크업/AJAX 변경 등) '성공'으로 세지
         # 않는다. 그래야 전 소스가 빈 결과인 파싱 전면장애를 all-failed 가드가 잡아낸다.
-        # (이 게시판들은 정상 시 항상 목록이 있으므로 0건 = 이상 신호)
-        if current_ids:
+        if result.scanned > 0:
             succeeded += 1
         else:
             log.warning("[%s] HTTP 성공했으나 파싱 0건 — 파서/마크업 확인 필요", src.key)
 
-        # 최초 실행: 기준선만 기록하고 메일 생략.
-        # 단, 0건이면(일시 오류·셀렉터 불일치·AJAX 미로딩 가능) 기준선을 잡지 않는다.
-        # 잘못된 빈 기준선은 이후 수집이 되기 시작할 때 전량을 '신규'로 오인해 폭탄이 된다.
+        # 최초 실행: 기준선만 기록하고 메일 생략. 단, 0건이면(일시 오류·셀렉터 불일치·
+        # AJAX 미로딩 가능) 기준선을 잡지 않는다(잘못된 빈 기준선은 이후 폭탄이 된다).
         if not baselined:
-            if not current_ids:
+            if result.scanned == 0:
                 log.warning(
                     "[%s] 최초 실행인데 0건 — 기준선 보류(다음 실행에 재시도). "
                     "지속되면 debug 덤프로 셀렉터/AJAX 확인 필요.",
                     src.key,
                 )
             else:
-                log.info("[%s] 최초 실행 — 기준선 %d건 기록(메일 생략)", src.key, len(current_ids))
-                state.mark_seen(src.key, current_ids, baselined=True)
+                log.info("[%s] 최초 실행 — 기준선 %d건 기록(메일 생략)", src.key, result.scanned)
+                state.mark_seen(
+                    src.key, [p.post_id for p in result.posts], baselined=True
+                )
             continue
 
-        new_posts = [p for p in listing if state.is_new(src.key, p.post_id)]
-
-        # 현재 목록에 있는 글은 모두 seen 앞쪽으로 갱신한다. 이렇게 하면 상단 고정
-        # 공지처럼 계속 노출되는 글이 500개 상한에 밀려 제거→재발송되는 일을 막는다.
-        if current_ids:
-            state.mark_seen(src.key, current_ids)
+        new_posts = result.posts  # collect 가 이미 seen 과 대조해 신규만 반환
 
         if not new_posts:
-            log.info("[%s] 신규 없음 (목록 %d건 확인)", src.key, len(listing))
+            log.info("[%s] 신규 없음 (조회 %d건)", src.key, result.scanned)
             continue
 
         log.info("[%s] 신규 %d건 발견 — 상세 수집", src.key, len(new_posts))
@@ -130,6 +116,8 @@ def run(argv=None) -> int:
             except Exception as e:  # noqa: BLE001
                 log.warning("[%s] enrich 실패 %s: %s", src.key, p.url, e)
 
+        # 신규를 seen 에 기록(메일 성공 후 state.save() 로 확정). 실패 시 저장 안 되어 재시도.
+        state.mark_seen(src.key, [p.post_id for p in new_posts])
         posts_by_source[src.name] = new_posts
 
     total = sum(len(v) for v in posts_by_source.values())

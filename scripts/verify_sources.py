@@ -56,8 +56,10 @@ def verify_source(scraper, list_limit, do_enrich):
         return report, page1
 
     # --- 2페이지(페이지네이션 작동 확인) ---
-    page_param = getattr(scraper, "PAGE_PARAM", None)
-    if page_param:
+    # HTML(PAGE_PARAM)뿐 아니라 POST/API 로 page 인자 페이지네이션하는 소스(SUPPORTS_
+    # PAGINATION=True)도 실제로 2페이지를 요청해 오프셋 무시 여부까지 검증한다.
+    if scraper.paginates:
+        how = getattr(scraper, "PAGE_PARAM", None) or "page/offset"
         try:
             page2 = scraper.fetch_list(list_limit, page=2)
             ids1 = {p.post_id for p in page1}
@@ -67,7 +69,7 @@ def verify_source(scraper, list_limit, do_enrich):
             elif ids2 - ids1:
                 report["pagination"] = f"{OK} 2페이지가 1페이지와 다름(작동)"
             else:
-                report["pagination"] = f"{WARN} 2페이지가 1페이지와 동일(PAGE_PARAM='{page_param}' 무시된 듯)"
+                report["pagination"] = f"{WARN} 2페이지가 1페이지와 동일({how} 무시된 듯)"
         except Exception as e:  # noqa: BLE001
             report["pagination"] = f"{WARN} 2페이지 수집 실패: {e}"
     else:
@@ -121,13 +123,7 @@ def main(argv=None):
         print(f"\n[{src.key}] {src.name}")
         report, page1 = verify_source(scraper, cfg.fetch.list_limit, not args.no_enrich)
         reports.append(report)
-
-        # 목록 원본 덤프(0건이 아니어도 참고용으로 남김)
-        try:
-            html = fetcher.text(fetcher.get(scraper._list_page_url(1)))
-            scraper._dump_debug("list", html)
-        except Exception:  # noqa: BLE001
-            pass
+        # 0건 소스의 원본(HTML/JSON) 덤프는 각 스크래퍼가 내부에서 처리한다.
 
         print(f"  상태: {report['status']}")
         if "detail" in report:

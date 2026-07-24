@@ -42,6 +42,7 @@
 | `SMTP_PASSWORD` | 발급받은 앱 비밀번호 16자리 |
 | `MAIL_FROM` | 발신 표시 주소(보통 `SMTP_USER`와 동일) |
 | `MAIL_TO` | **수신자**. 여러 명은 `,` 또는 `;` 로 구분 |
+| `ASSEMBLY_API_KEY` | 계류의안 수집용 열린국회정보(open.assembly.go.kr) API 인증키. 미설정 시 계류의안만 건너뜀 |
 
 ### 3) 수신자 설정
 수신자 주소는 **저장소에 커밋하지 않습니다.** `MAIL_TO` Secret(여러 명은 `a@x.com, b@y.com`)으로만 지정하세요. 로컬 실행 시에는 `.env` 의 `MAIL_TO` 를 사용합니다(`.env` 는 커밋 제외).

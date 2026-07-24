@@ -33,38 +33,57 @@ class _PagedScraper(BaseScraper):
 def test_collect_stops_when_page_fully_seen():
     # 1페이지 전체가 이미 본 글이면(경계 통과) 다음 페이지로 넘어가지 않는다
     sc = _PagedScraper([["a", "b"], ["c", "d"]])
-    got = [p.post_id for p in sc.collect(limit=10, seen_ids={"a", "b"}, max_pages=5)]
-    assert got == ["a", "b"]
+    r = sc.collect(limit=10, seen_ids={"a", "b"}, max_pages=5)
+    assert [p.post_id for p in r.posts] == []   # a,b 는 seen → 신규 없음
+    assert r.reached_boundary is True
+    assert r.scanned == 2                        # 2페이지로 안 넘어감
 
 
 def test_collect_paginates_until_page_fully_seen():
     # 1페이지에 신규가 하나라도 있으면 계속 넘겨서, 전부 seen 인 페이지에서 멈춘다
     sc = _PagedScraper([["a", "b"], ["c", "d"], ["seen1", "seen2"]])
-    got = [p.post_id for p in sc.collect(limit=10, seen_ids={"seen1", "seen2"}, max_pages=5)]
-    assert got == ["a", "b", "c", "d", "seen1", "seen2"]
+    r = sc.collect(limit=10, seen_ids={"seen1", "seen2"}, max_pages=5)
+    assert [p.post_id for p in r.posts] == ["a", "b", "c", "d"]  # 신규만
+    assert r.reached_boundary is True
 
 
 def test_collect_does_not_stop_on_pinned_seen():
     # 고정공지 'pin' 이 매 페이지 상단에 seen 으로 있어도 페이지네이션이 멈추면 안 된다.
-    # (P1) 예전 'any seen' 조건이면 1페이지에서 멈춰 2페이지 신규 'c','d' 를 놓쳤다.
     sc = _PagedScraper([["pin", "a", "b"], ["pin", "c", "d"], ["pin", "old1", "old2"]])
-    got = [p.post_id for p in sc.collect(limit=10, seen_ids={"pin", "old1", "old2"}, max_pages=5)]
-    # 'c','d' 까지 도달해야 하고, 전부 seen 인 3페이지에서 멈춘다
-    assert "c" in got and "d" in got
+    r = sc.collect(limit=10, seen_ids={"pin", "old1", "old2"}, max_pages=5)
+    got = [p.post_id for p in r.posts]
+    assert "c" in got and "d" in got            # 2페이지 신규까지 도달
+    assert r.reached_boundary is True           # 전부 seen 인 3페이지에서 멈춤
 
 
 def test_collect_stops_when_no_progress():
     # 페이지 파라미터가 무시되어 같은 목록만 반복돼도 무한루프에 빠지지 않는다
     sc = _PagedScraper([["a", "b"], ["a", "b"], ["a", "b"]])
-    got = [p.post_id for p in sc.collect(limit=10, seen_ids=set(), max_pages=10)]
-    assert got == ["a", "b"]
+    r = sc.collect(limit=10, seen_ids=set(), max_pages=10)
+    assert [p.post_id for p in r.posts] == ["a", "b"]
+    assert r.reached_boundary is True
 
 
-def test_collect_respects_max_pages():
+def test_collect_backlog_over_cap_warns_not_boundary():
+    # max_pages 안에 경계 미도달(한 실행 범위 초과 대량 신규) → reached_boundary=False.
     pages = [[f"p{n}i{j}" for j in range(2)] for n in range(10)]  # 전부 신규
     sc = _PagedScraper(pages)
-    got = sc.collect(limit=10, seen_ids=set(), max_pages=3)
-    assert len(got) == 6  # 3페이지 * 2건
+    r = sc.collect(limit=10, seen_ids=set(), max_pages=3)
+    assert len(r.posts) == 6            # 3페이지 * 2건만 이번에 수집
+    assert r.reached_boundary is False  # 경계 미도달(운영 경고 대상)
+
+
+def test_collect_propagates_fetch_error():
+    # 페이지 fetch 실패는 예외로 전파되어야 한다([]로 삼키면 '목록 끝'으로 오인).
+    class _Failing(_PagedScraper):
+        def fetch_list(self, limit, page=1):
+            if page >= 2:
+                raise RuntimeError("boom")
+            return super().fetch_list(limit, page)
+
+    sc = _Failing([["a", "b"], ["c", "d"]])
+    with pytest.raises(RuntimeError):
+        sc.collect(limit=10, seen_ids=set(), max_pages=5)
 
 
 def test_list_page_url_appends_param():

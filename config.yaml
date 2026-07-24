@@ -26,10 +26,13 @@ fetch:
   timeout_sec: 30
   # 목록 한 페이지에서 상위 몇 개까지 볼지
   list_limit: 30
-  # 실행 간격 사이 신규가 많이 쌓였을 때, 이미 본 글에 닿을 때까지 넘겨볼 최대 페이지 수.
-  # (평상시엔 신규 위쪽만 보고 곧 멈춤). list_limit×max_pages 를 넘는 대량 백로그
-  # (예: 장기 미실행)에서는 경계 미도달 경고가 뜨며, 그때는 이 값을 일시 상향해 백필한다.
-  max_pages: 10
+  # 한 번의 실행에서 이미 본 글 경계까지 훑을 최대 페이지 수.
+  # 평상시엔 신규가 없거나 소수라 1~2페이지에서 곧 멈추므로 이 값은 사실상
+  # '장기 미가동 후 따라잡기' 깊이 상한일 뿐, 평상시 비용은 없다.
+  # list_limit×max_pages(=기본 600건)를 넘는 대량 신규가 한 실행 사이에 쌓인 경우
+  # (수주 이상 미가동 등 예외적 상황)에는 경고가 남으며, 그때 이 값을 일시 상향해
+  # 재실행하면 나머지를 따라잡는다.
+  max_pages: 20
 
 # -------------------------------------------------------------------------
 # 모니터링 대상. 각 항목의 type 에 따라 src/scrapers 의 파서가 선택됩니다.
@@ -88,8 +91,17 @@ sources:
     list_url: "https://better.fsc.go.kr/fsc_new/replyCase/TotalReplyList.do?stNo=11&muNo=117&muGpNo=75"
 
   # ===== 의안정보시스템 (likms.assembly.go.kr) =====
+  # 계류의안 목록은 열린국회정보(open.assembly.go.kr) Open API 로 수집합니다.
+  # 인증키는 Secret/환경변수 ASSEMBLY_API_KEY 로 주입하세요.
   - key: assembly_bill
     name: "의안정보시스템 · 계류의안"
     type: assembly_bill
     enabled: true
     list_url: "https://likms.assembly.go.kr/bill/bi/bill/state/mooringBillPage.do"
+    # 명세서 기준: '법률안 심사 및 처리(계류의안)' 서비스
+    #   요청주소 .../portal/openapi/nwbqublzajtcqpdae
+    #   출력필드: BILL_ID, BILL_NO, BILL_NAME, PROPOSER, RST_PROPOSER, PROPOSE_DT, LINK_URL 등
+    #   (AGE 는 이 서비스의 요청인자가 아니라 보내도 무시됨 — 계류의안만 반환)
+    api_endpoint: "https://open.assembly.go.kr/portal/openapi"
+    api_service: "nwbqublzajtcqpdae"
+    page_size: 100

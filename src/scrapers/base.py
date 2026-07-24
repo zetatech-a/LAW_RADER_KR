@@ -3,14 +3,32 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+from bs4 import BeautifulSoup
 
 from ..config import SourceConfig
 from ..fetcher import Fetcher
 from ..models import Post
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class CollectResult:
+    """collect() 결과.
+
+    - posts: 이번에 새로 발견한(seen 에 없던) 글들(메일 대상).
+    - reached_boundary: 이미 본 글 경계(또는 목록 끝)에 도달했는지. False 면 한 번의
+      실행으로 감당할 수 없는 대량 신규(장기 미가동 후 등)라는 뜻 — 경고를 남긴다.
+    - scanned: 이번에 실제로 조회한 글 수(중복 제외). 0 이면 파싱 실패 신호.
+    """
+
+    posts: list[Post] = field(default_factory=list)
+    reached_boundary: bool = True
+    scanned: int = 0
 
 _WS = re.compile(r"[ \t\r\f\v]+")
 _MULTINL = re.compile(r"\n{3,}")
@@ -32,10 +50,20 @@ class BaseScraper:
     필요하면 enrich() 로 상세 본문/첨부를 채운다.
     """
 
-    # 목록 페이지네이션에 쓰는 쿼리 파라미터명. 하위 클래스가 지정하면 collect() 가
-    # 여러 페이지를 넘겨가며 수집한다. None 이면 1페이지만.
-    # 주의: 실제 파라미터명은 사이트마다 다를 수 있어 라이브에서 검증이 필요하다.
+    # 목록 페이지네이션에 쓰는 쿼리 파라미터명. HTML 게시판이 지정한다. None 이면
+    # 기본 fetch_list 가 1페이지만 요청. 주의: 파라미터명은 라이브 검증이 필요하다.
     PAGE_PARAM: str | None = None
+
+    # 페이지네이션 지원 여부. None 이면 PAGE_PARAM 유무로 판단한다. POST/API 기반
+    # 스크래퍼처럼 PAGE_PARAM 없이 page 인자로 페이지네이션하는 경우 True 로 명시하면
+    # 라이브 검증기(verify_sources)가 2페이지까지 실제로 검사한다.
+    SUPPORTS_PAGINATION: bool | None = None
+
+    @property
+    def paginates(self) -> bool:
+        if self.SUPPORTS_PAGINATION is not None:
+            return self.SUPPORTS_PAGINATION
+        return bool(self.PAGE_PARAM)
 
     def __init__(self, source: SourceConfig, fetcher: Fetcher):
         self.source = source
@@ -44,8 +72,27 @@ class BaseScraper:
         self.name = source.name
         self.list_url = source.list_url
 
-    # --- 하위 클래스가 구현 ---
-    def fetch_list(self, limit: int, page: int = 1) -> list[Post]:  # pragma: no cover
+    # --- HTML 게시판 공통 목록 수집 ---
+    def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
+        """목록 페이지를 가져와 _parse_list 로 파싱.
+
+        첫 요청이 0건이면(세션 쿠키 미설정으로 인터스티셜을 받는 등) 세션에 쿠키가
+        붙은 상태로 1회 재시도한다. 이래도 0건이면 디버그 덤프를 남긴다.
+        """
+        posts: list[Post] = []
+        html = ""
+        for _attempt in range(2):
+            resp = self.fetcher.get(self._list_page_url(page))
+            html = self.fetcher.text(resp)
+            posts = self._parse_list(BeautifulSoup(html, "lxml"))
+            if posts:
+                break
+        if not posts:
+            log.warning("[%s] 목록 파싱 0건 — 마크업/세션 확인 필요. 디버그 덤프.", self.key)
+            self._dump_debug("list", html)
+        return posts[:limit]
+
+    def _parse_list(self, soup: BeautifulSoup) -> list[Post]:  # pragma: no cover
         raise NotImplementedError
 
     def enrich(self, post: Post) -> None:
@@ -53,45 +100,53 @@ class BaseScraper:
         return
 
     # --- 페이지네이션 수집 ---
-    def collect(self, limit: int, seen_ids: set[str], max_pages: int) -> list[Post]:
-        """이미 본 글(seen_ids)에 닿을 때까지 페이지를 넘겨가며 목록을 모은다.
+    def collect(self, limit: int, seen_ids: set[str], max_pages: int) -> CollectResult:
+        """1페이지부터 최대 max_pages 페이지를 훑어 '신규(seen 에 없는)' 글을 모은다.
 
-        중단 조건(누락 방지 + 무한루프 방지):
-          - 이번 페이지의 글이 '전부' 이미 본 것이면(경계 통과) 중단.
-            ※ '하나라도 seen' 이 아니라 '전부 seen' 이어야 한다. 상단 고정(pinned)
-              공지는 매 페이지에 seen 으로 남아 있으므로, 하나라도 걸리면 멈추게 하면
-              고정공지 때문에 1페이지에서 멈춰 백로그를 놓친다.
-          - 새 글이 더 늘지 않으면(페이지 파라미터 무시 등) 중단
-          - max_pages 도달 시 중단 → 백로그가 남았을 수 있으므로 경고
+        한 번의 실행에서 이미 본 글 경계까지 훑는다. 평상시엔 신규가 없거나 소수라
+        1~2페이지에서 곧 멈춘다(max_pages 는 실질적으로 '장기 미가동 후 따라잡기'
+        깊이 상한일 뿐, 평상시 비용은 없다).
+
+        중단(경계 도달):
+          - 목록 끝(빈 페이지)                → reached_boundary=True
+          - 페이지 전체가 이미 본 글(seen)     → reached_boundary=True
+          - 진전 없음(페이지 파라미터 무시 등) → reached_boundary=True
+        max_pages 안에 경계에 못 닿으면 reached_boundary=False 로, 한 실행으로 감당 못 할
+        대량 신규(장기 미가동 등)라는 뜻이며 경고를 남긴다. (설계상 상한: 30분 간격의
+        저빈도 게시판에서 한 실행 범위를 넘는 신규 유입은 사실상 발생하지 않는다.)
+
+        주의: 페이지 fetch 실패는 예외로 전파되어야 한다(빈 결과로 삼키면 '목록 끝'으로
+        오인한다). API 스크래퍼는 오류 시 [] 대신 예외를 던진다.
         """
-        collected: list[Post] = []
-        collected_ids: set[str] = set()
-        hit_boundary = False
+        posts: list[Post] = []
+        scanned_ids: set[str] = set()
+        reached_boundary = False
         for page in range(1, max(1, max_pages) + 1):
             batch = self.fetch_list(limit, page=page)
             if not batch:
-                hit_boundary = True  # 더 볼 페이지가 없음 = 백로그 소진
+                reached_boundary = True  # 목록 끝
                 break
-            fresh = [p for p in batch if p.post_id not in collected_ids]
-            if not fresh:
-                hit_boundary = True  # 진전 없음(같은 목록 반복 등) = 사실상 소진
+            new_on_page = [p for p in batch if p.post_id not in scanned_ids]
+            if not new_on_page:
+                reached_boundary = True  # 같은 목록 반복(파라미터 무시 등) = 진전 없음
                 break
-            for p in fresh:
-                collected_ids.add(p.post_id)
-                collected.append(p)
+            for p in new_on_page:
+                scanned_ids.add(p.post_id)
+                if p.post_id not in seen_ids:
+                    posts.append(p)
             if all(p.post_id in seen_ids for p in batch):
-                hit_boundary = True  # 페이지 전체가 이미 본 글 → 경계 통과
+                reached_boundary = True  # 페이지 전체가 이미 본 글 → 경계 통과
                 break
-        if not hit_boundary:
-            # max_pages 를 다 쓰고도 '전부 seen' 경계에 닿지 못함 → 아직 더 오래된
-            # 미확인 글이 남아 있을 수 있다(장기 미실행 후 대량 신규 등).
+        if not reached_boundary:
             log.warning(
-                "[%s] max_pages(%d) 도달했으나 경계 미도달 — 백로그가 더 남아있을 수 있음. "
-                "장기 미실행 후 대량 신규라면 config 의 max_pages 를 일시 상향해 백필하세요.",
+                "[%s] max_pages(%d) 내에 경계 미도달 — 한 실행 범위를 넘는 대량 신규. "
+                "장기 미가동 후라면 config 의 max_pages 를 일시 상향해 재실행하세요.",
                 self.key,
                 max_pages,
             )
-        return collected
+        return CollectResult(
+            posts=posts, reached_boundary=reached_boundary, scanned=len(scanned_ids)
+        )
 
     def _list_page_url(self, page: int) -> str:
         """PAGE_PARAM 을 이용해 list_url 에 페이지 번호를 붙인다."""

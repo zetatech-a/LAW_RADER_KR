@@ -27,6 +27,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run verification
+        env:
+          ASSEMBLY_API_KEY: ${{ secrets.ASSEMBLY_API_KEY }}
         run: |
           python scripts/verify_sources.py --only "${{ github.event.inputs.only }}" \
             | tee verify_report.txt

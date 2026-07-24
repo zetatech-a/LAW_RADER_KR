@@ -18,7 +18,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-MAX_PER_SOURCE = 500
+# 소스별 seen ID 보관 상한. 백로그 백필 시 수천 건을 한 세트로 기억해야 커서/신규
+# 판정이 안전하므로 넉넉히 둔다(짧은 문자열이라 용량 부담은 작다).
+MAX_PER_SOURCE = 5000
 
 
 class State:
