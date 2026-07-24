@@ -59,12 +59,6 @@ class BaseScraper:
     # 라이브 검증기(verify_sources)가 2페이지까지 실제로 검사한다.
     SUPPORTS_PAGINATION: bool | None = None
 
-    # 목록이 '추가만 되는(append-only)' 게 아니라 '가변 멤버십'인 소스(예: 계류의안 —
-    # 처리된 항목이 목록에서 빠짐)는 True. 이런 소스는 얕은 기준선으로 잡으면, 항목이
-    # 빠질 때 기준선에 없던 오래된 항목이 위로 올라와 '신규'로 오인되므로, 최초 기준선을
-    # '현재 전체 멤버'로 깊게 잡아야 한다.
-    FULL_BASELINE: bool = False
-
     @property
     def paginates(self) -> bool:
         if self.SUPPORTS_PAGINATION is not None:

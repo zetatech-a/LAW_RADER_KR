@@ -40,8 +40,6 @@ _URL_FIELDS = ("LINK_URL", "linkUrl", "DETAIL_URL")
 class AssemblyBillScraper(BaseScraper):
     PAGE_PARAM = None  # Open API 는 pIndex 로 직접 페이지네이션
     SUPPORTS_PAGINATION = True
-    # 계류의안은 가변 멤버십 목록(처리되면 빠짐) → 최초 기준선을 현재 전체로 깊게 기록
-    FULL_BASELINE = True
 
     def __init__(self, source, fetcher):
         super().__init__(source, fetcher)
@@ -71,7 +69,9 @@ class AssemblyBillScraper(BaseScraper):
             "KEY": self.api_key,
             "Type": "json",
             "pIndex": str(max(1, page)),
-            "pSize": str(min(self.page_size, limit) if limit else self.page_size),
+            # 페이지당 건수는 이 소스의 page_size 를 그대로 쓴다. (전역 list_limit=30 으로
+            # 캡하면 요청 수가 3배로 늘어 대량 조회 시 느려진다)
+            "pSize": str(self.page_size),
         }
         if self.age:
             params["AGE"] = self.age
@@ -127,7 +127,7 @@ class AssemblyBillScraper(BaseScraper):
                     date=clean_text(self._first(row, _DATE_FIELDS)),
                 )
             )
-        return posts[:limit]
+        return posts[: self.page_size]
 
     @staticmethod
     def _result_code(data) -> str:
