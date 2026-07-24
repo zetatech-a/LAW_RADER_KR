@@ -16,6 +16,7 @@ state/seen.json 구조:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 # 소스별 seen ID 보관 상한(짧은 문자열이라 용량 부담은 작다).
@@ -51,8 +52,14 @@ class State:
             entry["baselined"] = True
 
     def save(self) -> None:
+        # 원자적 저장: 임시파일에 먼저 쓰고 flush/fsync 후 os.replace 로 교체한다.
+        # (도중 취소·오류로 대상 파일이 잘린 JSON 으로 남아 다음 실행이 전체 소스를
+        #  재기준선 잡는 일을 막는다)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(self._data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        data = json.dumps(self._data, ensure_ascii=False, indent=2)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)

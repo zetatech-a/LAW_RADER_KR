@@ -57,6 +57,10 @@ def run(argv=None) -> int:
 
     only = {s.strip() for s in args.only.split(",") if s.strip()}
     posts_by_source: dict[str, list[Post]] = {}
+    # 발송 대상 신규 ID (소스별). 메일 성공 후에만 seen 처리한다. 발송 전에 미리
+    # 기록하면, 뒤 소스의 기준선 즉시저장이 이 ID들까지 디스크에 써버려 메일 실패 시
+    # 재발송 없이 영구 누락된다.
+    pending_seen: list[tuple[str, list[str]]] = []
     errors: list[str] = []
     selected = 0   # 실행 대상(활성+선택) 소스 수
     succeeded = 0  # 목록 수집에 성공한 소스 수
@@ -109,9 +113,10 @@ def run(argv=None) -> int:
                 state.mark_seen(
                     src.key, [p.post_id for p in result.posts], baselined=True
                 )
-                # 기준선은 메일과 무관하므로 소스마다 즉시 저장한다. 뒤 소스에서 실패·취소
-                # 되더라도 앞서 잡은 기준선이 보존되어 '최초 실행'이 반복되지 않는다.
-                state.save()
+                # 기준선은 메일과 무관하므로 소스마다 즉시 저장한다(뒤 소스가 실패·취소돼도
+                # 앞 기준선 보존 → 최초 실행 반복 방지). 단 dry-run 에서는 저장하지 않는다.
+                if not args.dry_run:
+                    state.save()
             continue
 
         new_posts = result.posts  # collect 가 이미 seen 과 대조해 신규만 반환
@@ -142,8 +147,8 @@ def run(argv=None) -> int:
             except Exception as e:  # noqa: BLE001
                 log.warning("[%s] enrich 실패 %s: %s", src.key, p.url, e)
 
-        # 신규(초과분 포함)를 모두 seen 에 기록. 메일 성공 후 state.save() 로 확정.
-        state.mark_seen(src.key, all_new_ids)
+        # 신규(초과분 포함)는 '메일 성공 후'에만 seen 처리하도록 보류한다.
+        pending_seen.append((src.key, all_new_ids))
         posts_by_source[src.name] = new_posts
 
     total = sum(len(v) for v in posts_by_source.values())
@@ -164,10 +169,12 @@ def run(argv=None) -> int:
         try:
             send_digest(cfg.email, posts_by_source)
         except Exception as e:  # noqa: BLE001
-            log.error("메일 발송 실패 — state 저장하지 않고 종료(다음 실행에 재시도): %s", e)
+            log.error("메일 발송 실패 — 신규 미확정, 다음 실행에 재시도: %s", e)
             return 1
 
-    # 메일 성공(또는 신규 없음) 시에만 state 확정 저장
+    # 메일 성공(또는 신규 없음) 후에 비로소 발송분을 seen 으로 확정하고 저장한다.
+    for key, ids in pending_seen:
+        state.mark_seen(key, ids)
     state.save()
     log.info("state 저장 완료")
 
