@@ -136,11 +136,11 @@ class FscBoardScraper(BaseScraper):
             resp = self.fetcher.get(post.url, referer=self.list_url)
             html = self.fetcher.text(resp)
             soup = BeautifulSoup(html, "lxml")
+            # FSC 상세는 .board-view-wrap 안에 header/body/foot 구조. 본문은 .body.
             body_el = (
-                soup.select_one(".board-view .content")
+                soup.select_one(".board-view-wrap .body")
+                or soup.select_one(".board-view-wrap .cont")
                 or soup.select_one(".view-cont")
-                or soup.select_one(".bd-view")
-                or soup.select_one(".cont-box")
                 or soup.select_one("#content")
             )
             if body_el:
