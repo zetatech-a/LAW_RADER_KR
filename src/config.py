@@ -33,6 +33,8 @@ class FetchConfig:
     timeout_sec: float
     list_limit: int
     max_pages: int
+    baseline_pages: int
+    max_new_per_source: int
 
 
 @dataclass
@@ -86,7 +88,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         delay_sec=float(fe.get("delay_sec", 1.0)),
         timeout_sec=float(fe.get("timeout_sec", 30.0)),
         list_limit=int(fe.get("list_limit", 30)),
-        max_pages=int(fe.get("max_pages", 20)),
+        max_pages=int(fe.get("max_pages", 10)),
+        baseline_pages=int(fe.get("baseline_pages", 3)),
+        max_new_per_source=int(fe.get("max_new_per_source", 50)),
     )
 
     sources = []

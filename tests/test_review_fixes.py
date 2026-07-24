@@ -122,6 +122,51 @@ def test_all_empty_parse_fails_run(tmp_path, monkeypatch):
     assert rc == 1
 
 
+class _FloodScraper(BaseScraper):
+    """baselined 소스에서 대량 신규가 잡히는 상황(상태 불일치 등)을 흉내낸다."""
+
+    def __init__(self, source, fetcher):
+        super().__init__(source, fetcher)
+        self.enrich_calls = 0
+
+    def fetch_list(self, limit, page=1):
+        if page > 1:
+            return []
+        return [
+            Post(source_key=self.key, source_name=self.name, post_id=f"n{i}",
+                 title=f"t{i}", url=f"http://x/{i}")
+            for i in range(200)
+        ]
+
+    def enrich(self, post):
+        self.enrich_calls += 1
+
+
+def test_flood_cap_limits_enrich(tmp_path, monkeypatch):
+    # 대량 신규(200건)라도 상세수집/발송은 상한(max_new_per_source)까지만,
+    # 단 신규 전체는 seen 처리되어 다음 실행에 재발생하지 않는다.
+    import src.main as main_mod
+    from src.state import State
+
+    state_path = tmp_path / "seen.json"
+    st = State(state_path)
+    st.mark_seen("fss_press", ["seed"], baselined=True)  # 운영 중(baselined) 상태
+    st.save()
+
+    made = {}
+
+    def _factory(src, fetcher):
+        sc = _FloodScraper(src, fetcher)
+        made[src.key] = sc
+        return sc
+
+    monkeypatch.setattr(main_mod, "build_scraper", _factory)
+    rc = main_mod.run(["--only", "fss_press", "--state", str(state_path), "--dry-run"])
+    assert rc == 0
+    # 200건 신규라도 기본 상한(50건)까지만 상세수집(enrich) → 폭주 방지
+    assert made["fss_press"].enrich_calls == 50
+
+
 class _FakeResp:
     def __init__(self, chunks, content_length=None):
         self._chunks = chunks
