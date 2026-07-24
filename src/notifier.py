@@ -140,8 +140,16 @@ def send_digest(cfg: EmailConfig, posts_by_source: dict[str, list[Post]]) -> Non
     with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=60) as server:
         server.starttls()
         server.login(cfg.smtp_user, cfg.smtp_password)
-        # 실제 수신자는 to_addrs(봉투)로만 전달 → To 헤더에 노출되지 않아 서로 안 보임
-        server.send_message(msg, to_addrs=cfg.recipients)
+        # 실제 수신자는 to_addrs(봉투)로만 전달 → To 헤더에 노출되지 않아 서로 안 보임.
+        # send_message 는 '일부' 수신자만 거부되면 예외 대신 거부목록 dict 를 반환한다
+        # (전원 거부 시에는 SMTPRecipientsRefused 예외). 반환값을 무시하면 거부된
+        # 수신자가 알림을 못 받는데도 state 가 저장돼 재시도되지 않으므로 예외로 승격한다.
+        refused = server.send_message(msg, to_addrs=cfg.recipients)
+
+    if refused:
+        # 일부 거부 → 실패로 취급해 state 저장을 막고 다음 실행에 재시도한다.
+        # (성공한 수신자에게는 재발송되어 중복될 수 있으나, 알림 누락보다 낫다)
+        raise RuntimeError(f"일부 수신자에게 발송 실패(재시도 대상): {refused}")
 
     log.info("메일 발송 완료 → %s (%d건)", ", ".join(cfg.recipients), total)
 
