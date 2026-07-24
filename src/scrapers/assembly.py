@@ -40,6 +40,8 @@ _URL_FIELDS = ("LINK_URL", "linkUrl", "DETAIL_URL")
 class AssemblyBillScraper(BaseScraper):
     PAGE_PARAM = None  # Open API 는 pIndex 로 직접 페이지네이션
     SUPPORTS_PAGINATION = True
+    # 계류의안은 가변 멤버십 목록(처리되면 빠짐) → 최초 기준선을 현재 전체로 깊게 기록
+    FULL_BASELINE = True
 
     def __init__(self, source, fetcher):
         super().__init__(source, fetcher)

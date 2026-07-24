@@ -71,10 +71,21 @@ def run(argv=None) -> int:
         try:
             scraper = build_scraper(src, fetcher)
             baselined = state.is_baselined(src.key)
-            # 기준선 소스는 seen 과 대조해 신규만, 최초 실행은 빈 seen 으로 전 범위를
-            # 기준선으로 기록. 어느 쪽이든 1페이지부터 경계까지 한 번에 훑는다.
-            seen = state.seen_ids(src.key) if baselined else set()
-            result = scraper.collect(cfg.fetch.list_limit, seen, cfg.fetch.max_pages)
+            if baselined:
+                # 운영: seen 과 대조해 신규만, 경계까지 최대 max_pages 페이지 훑음.
+                result = scraper.collect(
+                    cfg.fetch.list_limit, state.seen_ids(src.key), cfg.fetch.max_pages
+                )
+            else:
+                # 최초 기준선. append-only 게시판은 얕게(baseline_pages) 잡으면 충분하지만,
+                # 가변 멤버십 소스(FULL_BASELINE=True, 예: 계류의안)는 항목이 빠질 때
+                # 오래된 항목이 신규로 오인되지 않도록 현재 전체를 깊게 기록한다.
+                base_pages = (
+                    cfg.fetch.full_baseline_pages
+                    if scraper.FULL_BASELINE
+                    else cfg.fetch.baseline_pages
+                )
+                result = scraper.collect(cfg.fetch.list_limit, set(), base_pages)
         except Exception as e:  # noqa: BLE001  — 한 소스 실패가 전체를 막지 않도록
             log.error("[%s] 목록 수집 실패: %s", src.key, e)
             errors.append(f"{src.key}: {e}")
@@ -109,6 +120,21 @@ def run(argv=None) -> int:
             log.info("[%s] 신규 없음 (조회 %d건)", src.key, result.scanned)
             continue
 
+        # 폭주 안전장치: 한 번에 비정상적으로 많은 신규가 잡히면(상태 불일치 등) 수백 건의
+        # 상세/첨부를 내려받아 실행이 폭주하는 것을 막는다. 최신 cap 건만 상세수집·발송하고,
+        # 나머지는 seen 처리한다(전부 seen 처리하므로 다음 실행에 재발생하지 않음).
+        cap = cfg.fetch.max_new_per_source
+        all_new_ids = [p.post_id for p in new_posts]
+        if len(new_posts) > cap:
+            log.warning(
+                "[%s] 신규 %d건 — 비정상적 대량(상태 불일치 의심). 최신 %d건만 발송하고 "
+                "나머지는 seen 처리합니다.",
+                src.key,
+                len(new_posts),
+                cap,
+            )
+            new_posts = new_posts[:cap]
+
         log.info("[%s] 신규 %d건 발견 — 상세 수집", src.key, len(new_posts))
         for p in new_posts:
             try:
@@ -116,8 +142,8 @@ def run(argv=None) -> int:
             except Exception as e:  # noqa: BLE001
                 log.warning("[%s] enrich 실패 %s: %s", src.key, p.url, e)
 
-        # 신규를 seen 에 기록(메일 성공 후 state.save() 로 확정). 실패 시 저장 안 되어 재시도.
-        state.mark_seen(src.key, [p.post_id for p in new_posts])
+        # 신규(초과분 포함)를 모두 seen 에 기록. 메일 성공 후 state.save() 로 확정.
+        state.mark_seen(src.key, all_new_ids)
         posts_by_source[src.name] = new_posts
 
     total = sum(len(v) for v in posts_by_source.values())
