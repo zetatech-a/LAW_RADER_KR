@@ -88,8 +88,16 @@ sources:
     list_url: "https://better.fsc.go.kr/fsc_new/replyCase/TotalReplyList.do?stNo=11&muNo=117&muGpNo=75"
 
   # ===== 의안정보시스템 (likms.assembly.go.kr) =====
+  # 계류의안 목록은 열린국회정보(open.assembly.go.kr) Open API 로 수집합니다.
+  # 인증키는 Secret/환경변수 ASSEMBLY_API_KEY 로 주입하세요.
   - key: assembly_bill
     name: "의안정보시스템 · 계류의안"
     type: assembly_bill
     enabled: true
     list_url: "https://likms.assembly.go.kr/bill/bi/bill/state/mooringBillPage.do"
+    # ↓ 발급받은 API 에 맞게 조정. api_service 는 '의안 목록' 서비스명.
+    #   (키 입력 후 verify 를 한 번 돌려 응답을 확인해 확정하세요)
+    api_endpoint: "https://open.assembly.go.kr/portal/openapi"
+    api_service: "nzmimeepazxkubdpn"
+    age: "22"
+    page_size: 30

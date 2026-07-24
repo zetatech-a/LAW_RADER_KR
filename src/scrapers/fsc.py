@@ -31,16 +31,6 @@ _FILE_HINT = ("getfile", "download", "filedown", "/file", "atchfile")
 class FscBoardScraper(BaseScraper):
     PAGE_PARAM = "curPage"
 
-    def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
-        resp = self.fetcher.get(self._list_page_url(page))
-        html = self.fetcher.text(resp)
-        soup = BeautifulSoup(html, "lxml")
-        posts = self._parse_list(soup)
-        if not posts:
-            log.warning("[%s] 목록 파싱 결과 0건 — 마크업 변경 가능성. 디버그 덤프.", self.key)
-            self._dump_debug("list", html)
-        return posts[:limit]
-
     def _parse_list(self, soup: BeautifulSoup) -> list[Post]:
         posts: list[Post] = []
         seen: set[str] = set()

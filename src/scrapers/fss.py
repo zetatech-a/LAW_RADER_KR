@@ -35,16 +35,6 @@ _DATE_ONLY = re.compile(r"^\s*(20\d{2})[.\-/]?(\d{1,2})[.\-/]?(\d{1,2})")
 class FssBoardScraper(BaseScraper):
     PAGE_PARAM = "pageIndex"
 
-    def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
-        resp = self.fetcher.get(self._list_page_url(page))
-        html = self.fetcher.text(resp)
-        soup = BeautifulSoup(html, "lxml")
-        posts = self._parse_list(soup)
-        if not posts:
-            log.warning("[%s] 목록 파싱 0건 — 디버그 덤프.", self.key)
-            self._dump_debug("list", html)
-        return posts[:limit]
-
     def _parse_list(self, soup: BeautifulSoup) -> list[Post]:
         posts: list[Post] = []
         seen: set[str] = set()

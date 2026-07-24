@@ -121,13 +121,7 @@ def main(argv=None):
         print(f"\n[{src.key}] {src.name}")
         report, page1 = verify_source(scraper, cfg.fetch.list_limit, not args.no_enrich)
         reports.append(report)
-
-        # 목록 원본 덤프(0건이 아니어도 참고용으로 남김)
-        try:
-            html = fetcher.text(fetcher.get(scraper._list_page_url(1)))
-            scraper._dump_debug("list", html)
-        except Exception:  # noqa: BLE001
-            pass
+        # 0건 소스의 원본(HTML/JSON) 덤프는 각 스크래퍼가 내부에서 처리한다.
 
         print(f"  상태: {report['status']}")
         if "detail" in report:

@@ -108,3 +108,44 @@ def test_fss_mgmt_notice_file_download_detail():
     assert p.title == "KB증권주식회사"
     assert p.post_id.startswith("file:202500516_12_KB")  # 파일명 기반 안정 ID
     assert "hpdownload" in p.url                          # 상세=파일 URL(enrich 에서 첨부 처리)
+
+
+def test_assembly_openapi_envelope_parsing(monkeypatch):
+    """열린국회 Open API 표준 봉투에서 row 추출 + 필드 폴백 확인."""
+    import os
+    from src.scrapers.assembly import AssemblyBillScraper
+
+    src = SourceConfig(
+        key="assembly_bill", name="a", type="assembly_bill",
+        list_url="https://likms.assembly.go.kr/bill/",
+        extra={"api_service": "svc", "age": "22"},
+    )
+    monkeypatch.setenv("ASSEMBLY_API_KEY", "dummy")
+    sc = AssemblyBillScraper(src, fetcher=None)
+
+    envelope = {
+        "svc": [
+            {"head": [{"list_total_count": 2}, {"RESULT": {"CODE": "INFO-000"}}]},
+            {"row": [
+                {"BILL_ID": "PRC_A1", "BILL_NAME": "테스트법률안", "PROPOSE_DT": "2026-07-01", "RST_PROPOSER": "홍길동"},
+                {"BILL_ID": "PRC_A2", "BILL_NM": "두번째안", "PPSL_DT": "2026-07-02"},
+            ]},
+        ]
+    }
+
+    class _R:
+        def json(self):
+            return envelope
+
+    class _F:
+        def get(self, *a, **k):
+            return _R()
+    sc.fetcher = _F()
+
+    posts = sc.fetch_list(30, page=1)
+    assert len(posts) == 2
+    assert posts[0].post_id == "PRC_A1"
+    assert posts[0].title == "테스트법률안 (홍길동)"
+    assert posts[0].url.endswith("billId=PRC_A1")
+    assert posts[0].date == "2026-07-01"
+    assert posts[1].title == "두번째안"          # 제안자 없으면 이름만

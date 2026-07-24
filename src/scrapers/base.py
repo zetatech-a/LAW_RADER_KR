@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+from bs4 import BeautifulSoup
+
 from ..config import SourceConfig
 from ..fetcher import Fetcher
 from ..models import Post
@@ -44,8 +46,27 @@ class BaseScraper:
         self.name = source.name
         self.list_url = source.list_url
 
-    # --- 하위 클래스가 구현 ---
-    def fetch_list(self, limit: int, page: int = 1) -> list[Post]:  # pragma: no cover
+    # --- HTML 게시판 공통 목록 수집 ---
+    def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
+        """목록 페이지를 가져와 _parse_list 로 파싱.
+
+        첫 요청이 0건이면(세션 쿠키 미설정으로 인터스티셜을 받는 등) 세션에 쿠키가
+        붙은 상태로 1회 재시도한다. 이래도 0건이면 디버그 덤프를 남긴다.
+        """
+        posts: list[Post] = []
+        html = ""
+        for _attempt in range(2):
+            resp = self.fetcher.get(self._list_page_url(page))
+            html = self.fetcher.text(resp)
+            posts = self._parse_list(BeautifulSoup(html, "lxml"))
+            if posts:
+                break
+        if not posts:
+            log.warning("[%s] 목록 파싱 0건 — 마크업/세션 확인 필요. 디버그 덤프.", self.key)
+            self._dump_debug("list", html)
+        return posts[:limit]
+
+    def _parse_list(self, soup: BeautifulSoup) -> list[Post]:  # pragma: no cover
         raise NotImplementedError
 
     def enrich(self, post: Post) -> None:

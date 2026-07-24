@@ -41,6 +41,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
+          ASSEMBLY_API_KEY: ${{ secrets.ASSEMBLY_API_KEY }}
         run: python -m src.main
 
       - name: Commit updated state
