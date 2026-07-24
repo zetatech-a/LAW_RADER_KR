@@ -34,6 +34,7 @@ class FetchConfig:
     list_limit: int
     max_pages: int
     baseline_pages: int
+    full_baseline_pages: int
     max_new_per_source: int
 
 
@@ -90,6 +91,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         list_limit=int(fe.get("list_limit", 30)),
         max_pages=int(fe.get("max_pages", 10)),
         baseline_pages=int(fe.get("baseline_pages", 3)),
+        full_baseline_pages=int(fe.get("full_baseline_pages", 200)),
         max_new_per_source=int(fe.get("max_new_per_source", 50)),
     )
 

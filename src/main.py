@@ -77,12 +77,15 @@ def run(argv=None) -> int:
                     cfg.fetch.list_limit, state.seen_ids(src.key), cfg.fetch.max_pages
                 )
             else:
-                # 최초 실행: 기준선을 '얕게'(baseline_pages) 기록. 전체 아카이브를 훑어
-                # 수백 건을 기록/발송하지 않도록. 이미 있는 글을 신규로 오인하지 않을
-                # 만큼의 버퍼면 충분하다.
-                result = scraper.collect(
-                    cfg.fetch.list_limit, set(), cfg.fetch.baseline_pages
+                # 최초 기준선. append-only 게시판은 얕게(baseline_pages) 잡으면 충분하지만,
+                # 가변 멤버십 소스(FULL_BASELINE=True, 예: 계류의안)는 항목이 빠질 때
+                # 오래된 항목이 신규로 오인되지 않도록 현재 전체를 깊게 기록한다.
+                base_pages = (
+                    cfg.fetch.full_baseline_pages
+                    if scraper.FULL_BASELINE
+                    else cfg.fetch.baseline_pages
                 )
+                result = scraper.collect(cfg.fetch.list_limit, set(), base_pages)
         except Exception as e:  # noqa: BLE001  — 한 소스 실패가 전체를 막지 않도록
             log.error("[%s] 목록 수집 실패: %s", src.key, e)
             errors.append(f"{src.key}: {e}")

@@ -122,6 +122,30 @@ def test_all_empty_parse_fails_run(tmp_path, monkeypatch):
     assert rc == 1
 
 
+class _PagedFull(_PagedScraper):
+    """가변 멤버십 소스(계류의안)처럼 최초 기준선을 전체로 잡아야 하는 스크래퍼."""
+
+    FULL_BASELINE = True
+
+
+def test_full_baseline_records_all_for_mutable_source(tmp_path, monkeypatch):
+    # FULL_BASELINE 소스는 얕은 baseline_pages(3)가 아니라 목록 끝까지 전체를 기록한다.
+    import src.main as main_mod
+    from src.state import State
+
+    state_path = tmp_path / "seen.json"  # 비어 있음 → 최초 실행(미baseline)
+    pages = [[f"b{n}_{j}" for j in range(30)] for n in range(10)]  # 10페이지 × 30 = 300
+    sc = _PagedFull(pages)
+    monkeypatch.setattr(main_mod, "build_scraper", lambda src, fetcher: sc)
+
+    rc = main_mod.run(["--only", "assembly_bill", "--state", str(state_path)])
+    assert rc == 0
+    st = State(state_path)
+    assert st.is_baselined("assembly_bill")
+    # 3페이지(90)가 아니라 전체 300건을 기준선으로 기록
+    assert len(st.seen_ids("assembly_bill")) == 300
+
+
 class _FloodScraper(BaseScraper):
     """baselined 소스에서 대량 신규가 잡히는 상황(상태 불일치 등)을 흉내낸다."""
 
