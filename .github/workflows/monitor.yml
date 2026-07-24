@@ -44,7 +44,10 @@ jobs:
           ASSEMBLY_API_KEY: ${{ secrets.ASSEMBLY_API_KEY }}
         run: python -m src.main
 
+      # 모니터가 실패·취소되더라도 그때까지 기록된 기준선/신규 상태를 저장소에 반영해,
+      # 다음 실행이 '최초 실행'을 반복하지 않도록 항상 커밋한다.
       - name: Commit updated state
+        if: always()
         run: |
           if [[ -n "$(git status --porcelain state/)" ]]; then
             git config user.name  "github-actions[bot]"

@@ -68,6 +68,7 @@ def run(argv=None) -> int:
             continue
         selected += 1
 
+        log.info("[%s] 수집 시작 (%s)", src.key, src.name)
         try:
             scraper = build_scraper(src, fetcher)
             baselined = state.is_baselined(src.key)
@@ -77,15 +78,11 @@ def run(argv=None) -> int:
                     cfg.fetch.list_limit, state.seen_ids(src.key), cfg.fetch.max_pages
                 )
             else:
-                # 최초 기준선. append-only 게시판은 얕게(baseline_pages) 잡으면 충분하지만,
-                # 가변 멤버십 소스(FULL_BASELINE=True, 예: 계류의안)는 항목이 빠질 때
-                # 오래된 항목이 신규로 오인되지 않도록 현재 전체를 깊게 기록한다.
-                base_pages = (
-                    cfg.fetch.full_baseline_pages
-                    if scraper.FULL_BASELINE
-                    else cfg.fetch.baseline_pages
+                # 최초 기준선: 얕게(baseline_pages) 기록. 이미 있는 글을 신규로 오인하지
+                # 않을 버퍼면 충분하고, 전체 아카이브를 훑어 실행이 폭주하지 않도록 한다.
+                result = scraper.collect(
+                    cfg.fetch.list_limit, set(), cfg.fetch.baseline_pages
                 )
-                result = scraper.collect(cfg.fetch.list_limit, set(), base_pages)
         except Exception as e:  # noqa: BLE001  — 한 소스 실패가 전체를 막지 않도록
             log.error("[%s] 목록 수집 실패: %s", src.key, e)
             errors.append(f"{src.key}: {e}")
@@ -112,6 +109,9 @@ def run(argv=None) -> int:
                 state.mark_seen(
                     src.key, [p.post_id for p in result.posts], baselined=True
                 )
+                # 기준선은 메일과 무관하므로 소스마다 즉시 저장한다. 뒤 소스에서 실패·취소
+                # 되더라도 앞서 잡은 기준선이 보존되어 '최초 실행'이 반복되지 않는다.
+                state.save()
             continue
 
         new_posts = result.posts  # collect 가 이미 seen 과 대조해 신규만 반환

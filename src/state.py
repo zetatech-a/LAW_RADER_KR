@@ -18,9 +18,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-# 소스별 seen ID 보관 상한. 가변 멤버십 소스(계류의안)는 현재 전체 멤버를 기준선으로
-# 기억해야 하므로(수천 건) 넉넉히 둔다(짧은 문자열이라 용량 부담은 작다).
-MAX_PER_SOURCE = 20000
+# 소스별 seen ID 보관 상한(짧은 문자열이라 용량 부담은 작다).
+MAX_PER_SOURCE = 5000
 
 
 class State:
