@@ -40,12 +40,9 @@ class BetterReplyScraper(BaseScraper):
             resp = self.fetcher.post(_AJAX_URL, data=payload, referer=self.list_url)
             data = resp.json()
         except Exception as e:  # noqa: BLE001
-            log.warning("[%s] 목록 POST/JSON 실패: %s", self.key, e)
-            try:
-                self._dump_debug("list", self.fetcher.text(resp))  # type: ignore[has-type]
-            except Exception:  # noqa: BLE001
-                pass
-            return []
+            # 전송/JSON 오류는 예외로 전파(빈 결과로 삼키면 collect 가 '목록 끝'으로
+            # 오인해 백필 커서를 초기화하고 이후 페이지를 영구히 건너뛴다).
+            raise RuntimeError(f"회신사례 목록 POST 실패: {type(e).__name__}") from e
 
         records = self._records(data)
         if not records:

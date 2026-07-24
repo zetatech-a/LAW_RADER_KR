@@ -77,10 +77,11 @@ class AssemblyBillScraper(BaseScraper):
             resp = self.fetcher.get(url, params=params, referer="https://open.assembly.go.kr/")
             data = resp.json()
         except Exception as e:  # noqa: BLE001
-            # 예외 문자열에는 요청 URL(= KEY 쿼리파라미터로 인증키 포함)이 들어갈 수 있으므로
-            # 원본 메시지 대신 예외 유형만 로깅해 인증키 노출을 막는다.
-            log.warning("[%s] Open API 호출/JSON 실패: %s", self.key, type(e).__name__)
-            return []
+            # 전송/JSON 오류는 예외로 전파해야 한다. [] 로 삼키면 collect 가 '목록 끝'으로
+            # 오인해 백필 커서를 초기화하고 이후 페이지를 영구히 건너뛴다.
+            # 단, 원본 예외 문자열에는 요청 URL(= KEY 로 인증키 포함)이 들어갈 수 있으므로
+            # 인증키가 없는 sanitize 된 예외로 바꿔 던진다(from None 으로 원본 체인 숨김).
+            raise RuntimeError(f"Open API 요청 실패: {type(e).__name__}") from None
 
         rows = self._rows(data)
         if not rows:

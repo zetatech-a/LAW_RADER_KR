@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -13,6 +14,23 @@ from ..fetcher import Fetcher
 from ..models import Post
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class CollectResult:
+    """collect() 결과.
+
+    - posts: 이번에 새로 발견한(seen 에 없던) 글들(메일 대상).
+    - reached_boundary: 이미 본 글 경계(또는 목록 끝)에 도달했는지. False 면 백로그가
+      남아 다음 실행에 next_page 부터 이어서(backfill) 수집해야 한다.
+    - next_page: 백로그가 남았을 때 다음 실행이 이어서 요청할 페이지 번호.
+    - scanned: 이번에 실제로 조회한 글 수(중복 제외). 0 이면 파싱 실패 신호.
+    """
+
+    posts: list[Post] = field(default_factory=list)
+    reached_boundary: bool = True
+    next_page: int = 1
+    scanned: int = 0
 
 _WS = re.compile(r"[ \t\r\f\v]+")
 _MULTINL = re.compile(r"\n{3,}")
@@ -89,79 +107,63 @@ class BaseScraper:
         limit: int,
         seen_ids: set[str],
         max_pages: int,
-        backfill: bool = False,
-        anchor: str | None = None,
-    ) -> tuple[list[Post], bool, str | None]:
-        """이미 본 글(seen_ids) 경계에 닿을 때까지 페이지를 넘겨가며 목록을 모은다.
+        start_page: int = 1,
+    ) -> CollectResult:
+        """start_page 부터 최대 max_pages 페이지를 훑어 신규 글을 모은다.
 
-        반환: (수집된 글, 경계도달여부, 이번에 수집한 가장 오래된 신규 ID).
-        경계도달여부=False 는 예산(max_pages)을 다 쓰고도 경계에 닿지 못했다는 뜻으로,
-        호출부가 backfill_pending 과 앵커(가장 오래된 신규 ID)를 저장해 다음 실행에
-        이어받게 한다.
+        페이지 커서(start_page) 방식이라, 한 번에 다 못 가져온 백로그는 호출부가
+        result.next_page 를 저장해 다음 실행에 '이어서' 요청한다(매번 1페이지부터
+        다시 훑지 않음). 덕분에 임의 깊이의 백로그도 천장 없이 여러 실행에 걸쳐
+        수집되고, 이미 처리한 prefix 를 결과에 담지 않아 seen 상한에 앵커가 밀려나는
+        문제도 없다.
 
-        중단 조건(누락 방지 + 무한루프 방지):
-          - 이번 페이지의 글이 '전부' 이미 본 것이고, 앵커를 이미 지났으면(또는 앵커가
-            없으면) 경계로 보고 중단. ※ 상단 고정(pinned)공지는 매 페이지에 seen 으로
-            남으므로 '하나라도 seen' 이 아니라 '전부 seen' 이어야 멈춘다.
-          - 새 글이 더 늘지 않으면(페이지 파라미터 무시 등) 중단
-          - 신규 수집 예산(max_pages 페이지) 소진 시 중단(경계 미도달)
+        중단(경계 도달):
+          - 목록 끝(빈 페이지)                → reached_boundary=True
+          - 페이지 전체가 이미 본 글(seen)     → reached_boundary=True
+          - 진전 없음(페이지 파라미터 무시 등) → reached_boundary=True
+        max_pages 페이지를 다 훑어도 위에 안 걸리면 reached_boundary=False 이고
+        next_page 부터 이어서 수집한다.
 
-        backfill=True 이고 anchor(직전 실행에서 마지막으로 수집한 가장 오래된 신규 ID)가
-        주어지면: 앵커를 만나기 전까지의 '전부 seen' 페이지(이미 처리한 prefix)는 경계로
-        보지 않고 예산 없이 건너뛴다. 앵커를 지난 뒤의 '전부 seen' 페이지에서 비로소
-        경계로 판단한다. 이렇게 하면 백필 도중 상단에 새 글이 끼어들어도(saw_unseen 이
-        일찍 켜져도) prefix 를 끝까지 건너뛰어 남은 백로그를 놓치지 않는다.
+        주의: 페이지 fetch 실패는 예외로 전파되어야 한다(빈 결과로 삼키면 '끝'으로
+        오인해 커서가 초기화된다). API 스크래퍼는 오류 시 [] 대신 예외를 던진다.
         """
-        collected: list[Post] = []
-        collected_ids: set[str] = set()
-        oldest_unseen: str | None = None
-        # 앵커가 없으면(일반 실행) 처음부터 경계 판정을 켠다.
-        passed_anchor = anchor is None
-        hit_boundary = False
-        unseen_pages = 0
-        budget = max(1, max_pages)
-        # prefix 스킵을 포함한 절대 페이지 상한(무한루프 방지). 신규 수집 예산과 별개.
-        hard_cap = budget * 10
-        for page in range(1, hard_cap + 1):
+        posts: list[Post] = []
+        scanned_ids: set[str] = set()
+        reached_boundary = False
+        pages_done = 0
+        start = max(1, start_page)
+        for offset in range(max(1, max_pages)):
+            page = start + offset
             batch = self.fetch_list(limit, page=page)
             if not batch:
-                hit_boundary = True  # 더 볼 페이지가 없음 = 백로그 소진
+                reached_boundary = True  # 목록 끝
                 break
-            fresh = [p for p in batch if p.post_id not in collected_ids]
-            if not fresh:
-                hit_boundary = True  # 진전 없음(같은 목록 반복 등) = 사실상 소진
+            new_on_page = [p for p in batch if p.post_id not in scanned_ids]
+            if not new_on_page:
+                reached_boundary = True  # 같은 목록 반복(파라미터 무시 등) = 진전 없음
                 break
-            # 경계 판정은 '이 페이지 진입 시점'의 앵커통과 상태로 한다. 앵커가 들어있는
-            # 페이지 자체는 아직 경계로 보지 않아야(앵커 '뒤'의 백로그를 놓치지 않도록)
-            # 하므로, 앵커통과 표시는 이 페이지 처리 후 다음 페이지부터 반영한다.
-            armed = passed_anchor
-            page_all_seen = all(p.post_id in seen_ids for p in batch)
-            page_had_unseen = False
-            for p in fresh:
-                collected_ids.add(p.post_id)
-                collected.append(p)  # 현재 목록 갱신(refresh)용으로 seen 도 포함
+            for p in new_on_page:
+                scanned_ids.add(p.post_id)
                 if p.post_id not in seen_ids:
-                    oldest_unseen = p.post_id
-                    page_had_unseen = True
-            if not passed_anchor and anchor is not None and any(p.post_id == anchor for p in batch):
-                passed_anchor = True  # 다음 페이지부터 경계 판정
-            if page_all_seen:
-                if not armed:
-                    continue  # 앵커 이전(또는 앵커 페이지) prefix 통과 중 → 예산 없이 계속
-                hit_boundary = True  # 경계 통과
+                    posts.append(p)
+            pages_done += 1
+            if all(p.post_id in seen_ids for p in batch):
+                reached_boundary = True  # 페이지 전체가 이미 본 글 → 경계 통과
                 break
-            if page_had_unseen:
-                unseen_pages += 1
-                if unseen_pages >= budget:
-                    break  # 예산 소진(경계 미도달 → 다음 실행에 backfill 로 이어감)
-        if not hit_boundary:
+        if not reached_boundary:
             log.warning(
-                "[%s] 수집 예산(max_pages=%d) 소진, 경계 미도달 — 백로그 잔여. "
-                "다음 실행에 이어서(backfill) 계속 수집합니다.",
+                "[%s] max_pages(%d) 소진, 경계 미도달 — 백로그 잔여. 다음 실행에 "
+                "%d페이지부터 이어서 수집합니다.",
                 self.key,
                 max_pages,
+                start + pages_done,
             )
-        return collected, hit_boundary, oldest_unseen
+        return CollectResult(
+            posts=posts,
+            reached_boundary=reached_boundary,
+            next_page=start + pages_done,
+            scanned=len(scanned_ids),
+        )
 
     def _list_page_url(self, page: int) -> str:
         """PAGE_PARAM 을 이용해 list_url 에 페이지 번호를 붙인다."""

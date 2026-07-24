@@ -18,7 +18,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-MAX_PER_SOURCE = 500
+# 소스별 seen ID 보관 상한. 백로그 백필 시 수천 건을 한 세트로 기억해야 커서/신규
+# 판정이 안전하므로 넉넉히 둔다(짧은 문자열이라 용량 부담은 작다).
+MAX_PER_SOURCE = 5000
 
 
 class State:
@@ -53,17 +55,17 @@ class State:
         """직전 실행이 max_pages 에 걸려 백로그가 남았는지 여부."""
         return self._data.get(source_key, {}).get("backfill_pending", False)
 
-    def backfill_anchor(self, source_key: str) -> str | None:
-        """백필 재개 지점(직전 실행에서 마지막으로 수집한 가장 오래된 신규 ID)."""
-        return self._data.get(source_key, {}).get("backfill_anchor")
+    def backfill_page(self, source_key: str) -> int:
+        """백필 재개 시 이어서 요청할 페이지 번호(기본 1)."""
+        return int(self._data.get(source_key, {}).get("backfill_page", 1))
 
-    def set_backfill(self, source_key: str, *, pending: bool, anchor: str | None) -> None:
+    def set_backfill(self, source_key: str, *, pending: bool, page: int) -> None:
         entry = self._data.setdefault(source_key, {"seen": [], "baselined": False})
         entry["backfill_pending"] = pending
         if pending:
-            entry["backfill_anchor"] = anchor
+            entry["backfill_page"] = int(page)
         else:
-            entry.pop("backfill_anchor", None)
+            entry.pop("backfill_page", None)
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
