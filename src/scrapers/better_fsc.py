@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
@@ -20,8 +21,9 @@ _AJAX_URL = "https://better.fsc.go.kr/fsc_new/replyCase/selectReplyCaseTotalRepl
 
 
 class BetterReplyScraper(BaseScraper):
-    # POST 기반이라 collect() 페이지네이션은 start 오프셋으로 직접 처리
+    # POST(start 오프셋) 기반 페이지네이션 — PAGE_PARAM 은 없지만 page 인자로 페이지네이션.
     PAGE_PARAM = None
+    SUPPORTS_PAGINATION = True
 
     def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
         start = (max(1, page) - 1) * limit
@@ -88,10 +90,14 @@ class BetterReplyScraper(BaseScraper):
             v = rec.get(k)
             if v not in (None, ""):
                 return f"{k}:{v}"
-        # 폴백: 제목+일자 조합
+        # 폴백: 제목+일자의 '결정적' 해시. Python 의 내장 hash() 는 프로세스마다 시드가
+        # 달라(PYTHONHASHSEED) 실행 때마다 값이 바뀌므로, 같은 글이 매번 신규로 오인된다.
         t = str(rec.get("title", "")).strip()
         d = str(rec.get("replyRegDate", "")).strip()
-        return f"h:{hash((t, d))}" if t else ""
+        if not t:
+            return ""
+        digest = hashlib.md5(f"{t}|{d}".encode("utf-8")).hexdigest()[:16]
+        return f"h:{digest}"
 
     def enrich(self, post: Post) -> None:
         # 상세가 JS 함수라 단순 수집 불가 — 제목/구분/일자/링크만 통지

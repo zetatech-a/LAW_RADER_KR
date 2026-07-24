@@ -53,9 +53,17 @@ class State:
         """직전 실행이 max_pages 에 걸려 백로그가 남았는지 여부."""
         return self._data.get(source_key, {}).get("backfill_pending", False)
 
-    def set_backfill_pending(self, source_key: str, pending: bool) -> None:
+    def backfill_anchor(self, source_key: str) -> str | None:
+        """백필 재개 지점(직전 실행에서 마지막으로 수집한 가장 오래된 신규 ID)."""
+        return self._data.get(source_key, {}).get("backfill_anchor")
+
+    def set_backfill(self, source_key: str, *, pending: bool, anchor: str | None) -> None:
         entry = self._data.setdefault(source_key, {"seen": [], "baselined": False})
         entry["backfill_pending"] = pending
+        if pending:
+            entry["backfill_anchor"] = anchor
+        else:
+            entry.pop("backfill_anchor", None)
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

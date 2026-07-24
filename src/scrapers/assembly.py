@@ -39,6 +39,7 @@ _URL_FIELDS = ("LINK_URL", "linkUrl", "DETAIL_URL")
 
 class AssemblyBillScraper(BaseScraper):
     PAGE_PARAM = None  # Open API 는 pIndex 로 직접 페이지네이션
+    SUPPORTS_PAGINATION = True
 
     def __init__(self, source, fetcher):
         super().__init__(source, fetcher)
@@ -76,7 +77,9 @@ class AssemblyBillScraper(BaseScraper):
             resp = self.fetcher.get(url, params=params, referer="https://open.assembly.go.kr/")
             data = resp.json()
         except Exception as e:  # noqa: BLE001
-            log.warning("[%s] Open API 호출/JSON 실패: %s", self.key, e)
+            # 예외 문자열에는 요청 URL(= KEY 쿼리파라미터로 인증키 포함)이 들어갈 수 있으므로
+            # 원본 메시지 대신 예외 유형만 로깅해 인증키 노출을 막는다.
+            log.warning("[%s] Open API 호출/JSON 실패: %s", self.key, type(e).__name__)
             return []
 
         rows = self._rows(data)

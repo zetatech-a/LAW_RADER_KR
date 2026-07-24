@@ -72,19 +72,25 @@ def run(argv=None) -> int:
             scraper = build_scraper(src, fetcher)
             baselined = state.is_baselined(src.key)
             reached_boundary = True
+            oldest_unseen = None
             if baselined:
                 # 이미 기준선이 있는 소스: 이미 본 글 경계에 닿을 때까지 페이지를 넘겨 수집
                 # (평상시엔 첫 페이지에서 곧바로 멈춤 → 요청 1회).
-                # 직전 실행이 cap 에 걸렸으면(backfill) 이어서 남은 백로그를 계속 수집.
-                listing, reached_boundary = scraper.collect(
+                # 직전 실행이 cap 에 걸렸으면(backfill) 앵커부터 이어서 남은 백로그를 수집.
+                listing, reached_boundary, oldest_unseen = scraper.collect(
                     cfg.fetch.list_limit,
                     state.seen_ids(src.key),
                     cfg.fetch.max_pages,
                     backfill=state.backfill_pending(src.key),
+                    anchor=state.backfill_anchor(src.key),
                 )
             else:
-                # 최초 실행: 기준선 수립용으로 1페이지만
-                listing = scraper.fetch_list(cfg.fetch.list_limit)
+                # 최초 실행: 기준선을 collect 와 같은 페이지 깊이만큼 잡는다(메일 생략).
+                # 1페이지만 잡으면 다음 실행에 collect 가 2페이지 이하의 옛 글을 신규로
+                # 오인해 대량 발송하는 문제가 생긴다.
+                listing, _, _ = scraper.collect(
+                    cfg.fetch.list_limit, set(), cfg.fetch.max_pages
+                )
         except Exception as e:  # noqa: BLE001  — 한 소스 실패가 전체를 막지 않도록
             log.error("[%s] 목록 수집 실패: %s", src.key, e)
             errors.append(f"{src.key}: {e}")
@@ -123,7 +129,9 @@ def run(argv=None) -> int:
             state.mark_seen(src.key, current_ids)
 
         # cap 에 걸려 경계 미도달이면 백로그가 남은 것 → 다음 실행에 backfill 로 이어받는다.
-        state.set_backfill_pending(src.key, not reached_boundary)
+        # 이때 이번에 수집한 가장 오래된 신규 ID 를 앵커로 저장해, 다음 실행이 그 지점부터
+        # 이어서 수집하도록 한다(도중에 새 글이 끼어들어도 경계를 오판하지 않도록).
+        state.set_backfill(src.key, pending=not reached_boundary, anchor=oldest_unseen)
         if not reached_boundary:
             log.info("[%s] 백로그 잔여 — 다음 실행에 이어서 수집(backfill)", src.key)
 
