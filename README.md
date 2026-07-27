@@ -1,5 +1,9 @@
 # LAW_RADER_KR
 
+**RADER** stands for **Regulatory Alert Detection & Email Reporter**.
+
+Note: RADER is an intentional acronym, not a misspelling of RADAR.
+
 한국 금융 규제·입법 관련 게시판을 주기적으로 확인해, **새로 올라온 글의 URL·내용·첨부파일을 이메일로 자동 발송**하는 모니터링 프로그램입니다.
 
 ## 모니터링 대상 (9곳)
