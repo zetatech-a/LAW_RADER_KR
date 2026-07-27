@@ -12,7 +12,7 @@ email:
   # 여러 명은 MAIL_TO 에 쉼표/세미콜론으로 구분. 수신자끼리는 서로 안 보입니다(BCC).
   recipients: []
   # 보내는 사람 표시 이름 (실제 발신 주소는 환경변수 MAIL_FROM / SMTP_USER 로 결정)
-  # 메일함 목록에는 이 이름만, 클릭하면 "LAW RADER <krome000234@gmail.com>" 로 보입니다.
+  # 메일함 목록에는 이 이름만, 클릭하면 "LAW RADER <sender@example.com>" 로 보입니다.
   from_name: "LAW RADER"
   # 메일 제목 접두어
   subject_prefix: "[LAW RADER]"
