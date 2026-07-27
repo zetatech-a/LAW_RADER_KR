@@ -1,6 +1,6 @@
 # LAW_RADER_KR
 
-**RADER** stands for **Regulatory Alert Detection & Email Reporter**.
+**RADER** stands for **R**egulatory **A**lert **D**etection & **E**mail **R**eporter.
 
 Note: RADER is an intentional acronym, not a misspelling of RADAR.
 
