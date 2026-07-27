@@ -17,66 +17,131 @@ def _esc(s: str) -> str:
     return html.escape(s or "")
 
 
-def build_html(posts_by_source: dict[str, list[Post]]) -> str:
-    parts = [
-        "<div style='font-family:Apple SD Gothic Neo,Malgun Gothic,sans-serif;"
-        "font-size:14px;color:#222;line-height:1.6'>"
+# 기관별 강조색(제목 왼쪽 바·배지). 소스명에 포함된 키워드로 판정한다.
+_ACCENTS: tuple[tuple[str, str], ...] = (
+    ("금융위", "#1d4ed8"),   # 파랑
+    ("금감원", "#0f766e"),   # 청록
+    ("금융규제", "#7c3aed"),  # 보라
+    ("의안", "#b45309"),     # 앰버
+)
+_DEFAULT_ACCENT = "#334155"
+
+_FONT = (
+    "-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo','Malgun Gothic',"
+    "'Noto Sans KR',Roboto,'Helvetica Neue',Arial,sans-serif"
+)
+
+
+def _accent(source_name: str) -> str:
+    for key, color in _ACCENTS:
+        if key in source_name:
+            return color
+    return _DEFAULT_ACCENT
+
+
+def _snippet(text: str, limit: int = 220) -> str:
+    s = " ".join((text or "").split())
+    return s[:limit] + " …" if len(s) > limit else s
+
+
+def _card(p: Post, accent: str) -> str:
+    """게시글 1건 카드."""
+    rows = [
+        # 제목
+        f"<a href='{_esc(p.url)}' style='display:block;font-size:15px;font-weight:600;"
+        f"line-height:1.45;color:#0f172a;text-decoration:none'>{_esc(p.title)}</a>"
     ]
-    total = sum(len(v) for v in posts_by_source.values())
-    parts.append(f"<h2 style='margin:0 0 4px'>신규 게시물 {total}건</h2>")
-    parts.append(
-        "<p style='color:#666;margin:0 0 16px'>모니터링 대상 사이트에 새로 등록된 항목입니다.</p>"
+
+    if p.date:
+        rows.append(
+            f"<div style='margin:6px 0 0;font-size:12px;color:#94a3b8'>"
+            f"{_esc(p.date)}</div>"
+        )
+
+    if p.body:
+        rows.append(
+            f"<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
+            f"{_esc(_snippet(p.body))}</div>"
+        )
+
+    if p.attachments:
+        chips = []
+        for a in p.attachments:
+            note = "" if a.data else " · 링크"
+            chips.append(
+                f"<a href='{_esc(a.url)}' style='display:inline-block;margin:4px 6px 0 0;"
+                f"padding:4px 10px;background:#f1f5f9;border:1px solid #e2e8f0;"
+                f"border-radius:999px;font-size:12px;color:#334155;text-decoration:none'>"
+                f"📎 {_esc(a.filename)}{note}</a>"
+            )
+        rows.append("<div style='margin:8px 0 0'>" + "".join(chips) + "</div>")
+
+    rows.append(
+        f"<div style='margin:10px 0 0'>"
+        f"<a href='{_esc(p.url)}' style='font-size:12px;font-weight:600;color:{accent};"
+        f"text-decoration:none'>원문 보기 &rsaquo;</a></div>"
     )
+
+    return (
+        "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
+        "style='border-collapse:separate;margin:0 0 10px'><tr>"
+        f"<td style='padding:14px 16px;background:#ffffff;border:1px solid #e2e8f0;"
+        f"border-left:3px solid {accent};border-radius:8px'>"
+        + "".join(rows)
+        + "</td></tr></table>"
+    )
+
+
+def build_html(posts_by_source: dict[str, list[Post]]) -> str:
+    total = sum(len(v) for v in posts_by_source.values())
+    src_count = sum(1 for v in posts_by_source.values() if v)
+
+    parts = [
+        f"<div style=\"margin:0;padding:24px 12px;background:#f1f5f9;font-family:{_FONT}\">",
+        "<table role='presentation' align='center' width='100%' cellpadding='0' "
+        "cellspacing='0' style='max-width:640px;margin:0 auto;border-collapse:collapse'>",
+        # ── 헤더
+        "<tr><td style='padding:22px 24px;background:#0f172a;border-radius:10px 10px 0 0'>"
+        "<div style='font-size:11px;letter-spacing:1.6px;color:#94a3b8;"
+        "font-weight:600'>LAW RADAR KR</div>"
+        "<div style='margin:6px 0 0;font-size:20px;font-weight:700;color:#ffffff'>"
+        f"신규 게시물 {total}건</div>"
+        "<div style='margin:4px 0 0;font-size:13px;color:#cbd5e1'>"
+        f"{src_count}개 기관에서 새로 등록되었습니다</div>"
+        "</td></tr>",
+        "<tr><td style='padding:18px 16px 6px;background:#f8fafc'>",
+    ]
 
     for source_name, posts in posts_by_source.items():
         if not posts:
             continue
+        accent = _accent(source_name)
+        # ── 기관 헤더
         parts.append(
-            f"<h3 style='margin:20px 0 8px;padding-bottom:4px;"
-            f"border-bottom:2px solid #1a4b8c;color:#1a4b8c'>"
-            f"{_esc(source_name)} <span style='color:#888;font-weight:normal'>"
-            f"({len(posts)}건)</span></h3>"
+            "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
+            "style='border-collapse:collapse;margin:10px 0 8px'><tr>"
+            f"<td style='font-size:13px;font-weight:700;color:{accent}'>"
+            f"{_esc(source_name)}</td>"
+            f"<td align='right' style='font-size:11px;font-weight:600;color:{accent}'>"
+            f"{len(posts)}건</td></tr>"
+            f"<tr><td colspan='2' style='padding-top:6px;border-bottom:1px solid #e2e8f0'>"
+            "</td></tr></table>"
         )
         for p in posts:
-            parts.append("<div style='margin:0 0 14px;padding:0 0 0 4px'>")
-            parts.append(
-                f"<a href='{_esc(p.url)}' style='font-weight:600;color:#1155cc;"
-                f"text-decoration:none;font-size:15px'>{_esc(p.title)}</a>"
-            )
-            if p.date:
-                parts.append(
-                    f"<span style='color:#999;margin-left:8px;font-size:12px'>"
-                    f"{_esc(p.date)}</span>"
-                )
-            if p.body:
-                snippet = p.body.strip().replace("\n", " ")
-                if len(snippet) > 400:
-                    snippet = snippet[:400] + " …"
-                parts.append(
-                    f"<div style='color:#444;margin:4px 0'>{_esc(snippet)}</div>"
-                )
-            if p.attachments:
-                links = []
-                for a in p.attachments:
-                    tag = f"📎 <a href='{_esc(a.url)}'>{_esc(a.filename)}</a>"
-                    if a.data is None:
-                        tag += " <span style='color:#999'>(첨부 실패·링크만)</span>"
-                    links.append(tag)
-                parts.append(
-                    "<div style='color:#555;font-size:12px;margin:2px 0'>"
-                    + " &nbsp; ".join(links)
-                    + "</div>"
-                )
-            parts.append(
-                f"<div style='font-size:12px;color:#999'>{_esc(p.url)}</div>"
-            )
-            parts.append("</div>")
+            parts.append(_card(p, accent))
 
+    parts.append("</td></tr>")
+    # ── 푸터
     parts.append(
-        "<hr style='border:none;border-top:1px solid #eee;margin:20px 0'>"
-        "<p style='color:#aaa;font-size:11px'>LAW RADAR KR · 자동 발송 메일</p>"
+        "<tr><td style='padding:16px 24px 22px;background:#f8fafc;"
+        "border-radius:0 0 10px 10px;border-top:1px solid #e2e8f0'>"
+        "<div style='font-size:11px;line-height:1.7;color:#94a3b8'>"
+        "이 메일은 금융위원회·금융감독원·금융규제포털·의안정보시스템의 신규 게시물을 "
+        "자동 수집해 발송합니다.<br>첨부파일은 원문 그대로이며, 용량이 큰 파일은 링크로만 "
+        "제공됩니다."
+        "</div></td></tr>"
     )
-    parts.append("</div>")
+    parts.append("</table></div>")
     return "".join(parts)
 
 
