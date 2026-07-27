@@ -37,7 +37,9 @@ class Fetcher:
         delay: float = 1.0,
         max_download_bytes: int = 0,
     ):
-        self.timeout = timeout
+        # (연결, 응답) 타임아웃. 연결이 막힌 사이트(해외 IP 차단 등)에서 30초씩 대기하지
+        # 않도록 연결 단계는 짧게 끊는다 — 연결이 되는 사이트는 영향 없음.
+        self.timeout = (min(8.0, timeout), timeout)
         self.delay = delay
         # 첨부 다운로드 상한(0=무제한). 상한 초과 시 AttachmentTooLarge 발생.
         self.max_download_bytes = max_download_bytes
@@ -52,7 +54,10 @@ class Fetcher:
         )
         retry = Retry(
             total=3,
-            backoff_factor=1.5,
+            # 연결 자체가 막힌 경우는 재시도해도 대부분 실패하므로 1회만(실행 시간 절약).
+            # 일시적 오류(5xx/429)나 응답 지연은 기존대로 여러 번 재시도한다.
+            connect=1,
+            backoff_factor=1.0,
             status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=frozenset(["GET", "POST"]),
         )
