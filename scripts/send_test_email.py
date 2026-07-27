@@ -16,7 +16,7 @@ from src.notifier import send_digest
 cfg = load_config("config.yaml")
 demo = Post(
     source_key="test",
-    source_name="LAW RADAR 설정 테스트",
+    source_name="LAW RADER 설정 테스트",
     post_id="0",
     title="테스트 메일 — 이 메일이 보이면 SMTP 설정이 정상입니다.",
     url="https://www.fsc.go.kr/no010101",

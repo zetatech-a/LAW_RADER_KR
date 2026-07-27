@@ -112,7 +112,7 @@ def main(argv=None):
     only = {s.strip() for s in args.only.split(",") if s.strip()}
 
     print("=" * 70)
-    print("LAW RADAR KR — 소스 라이브 검증")
+    print("LAW RADER KR — 소스 라이브 검증")
     print("=" * 70)
 
     reports = []

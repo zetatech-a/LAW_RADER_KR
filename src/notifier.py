@@ -103,7 +103,7 @@ def build_html(posts_by_source: dict[str, list[Post]]) -> str:
         # ── 헤더
         "<tr><td style='padding:22px 24px;background:#0f172a;border-radius:10px 10px 0 0'>"
         "<div style='font-size:11px;letter-spacing:1.6px;color:#94a3b8;"
-        "font-weight:600'>LAW RADAR KR</div>"
+        "font-weight:600'>LAW RADER KR</div>"
         "<div style='margin:6px 0 0;font-size:20px;font-weight:700;color:#ffffff'>"
         f"신규 게시물 {total}건</div>"
         "<div style='margin:4px 0 0;font-size:13px;color:#cbd5e1'>"
