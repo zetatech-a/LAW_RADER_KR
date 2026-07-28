@@ -2,7 +2,7 @@
 
 **RADER** stands for **R**egulatory **A**lert **D**etection & **E**mail **R**eporter.
 
-Note: RADER is an intentional acronym, not a misspelling of RADAR.
+Note: RADER is an intentional acronym, not a misspelling of RADER.
 
 한국 금융 규제·입법 관련 게시판을 주기적으로 확인해, **새로 올라온 글의 URL·내용·첨부파일을 이메일로 자동 발송**하는 모니터링 프로그램입니다.
 
@@ -58,7 +58,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 
 ### 4) 실행
 - 자동: 위 스케줄에 따라 실행 (`.github/workflows/monitor.yml`)
-- 수동: 저장소 **Actions 탭 → LAW RADAR KR monitor → Run workflow**
+- 수동: 저장소 **Actions 탭 → LAW RADER KR monitor → Run workflow**
 
 > 처음 가동할 때는 수동 실행 1회로 기준선을 잡습니다. 이때는 **메일이 오지 않는 것이 정상**이며(로그에 `기준선 N건 기록(메일 생략)`), 그 다음 실행부터 신규 글만 발송됩니다.
 

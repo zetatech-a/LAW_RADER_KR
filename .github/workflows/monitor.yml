@@ -1,4 +1,4 @@
-name: LAW RADAR KR monitor
+name: LAW RADER KR monitor
 
 # 실행 시각(KST 09:07–18:07, 월~금, 15분 간격)
 # GitHub Actions cron 은 UTC 기준. KST = UTC+9.

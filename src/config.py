@@ -72,8 +72,8 @@ def load_config(path: str | Path = "config.yaml") -> Config:
 
     email = EmailConfig(
         recipients=recipients,
-        from_name=em.get("from_name", "LAW RADAR KR"),
-        subject_prefix=em.get("subject_prefix", "[LAW RADAR]"),
+        from_name=em.get("from_name", "LAW RADER KR"),
+        subject_prefix=em.get("subject_prefix", "[LAW RADER]"),
         max_attach_mb=int(em.get("max_attach_mb", 15)),
         smtp_host=_env("SMTP_HOST", "smtp.gmail.com"),
         smtp_port=int(_env("SMTP_PORT", "587")),
