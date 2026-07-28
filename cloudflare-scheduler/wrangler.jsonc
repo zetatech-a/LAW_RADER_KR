@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "law-rader-kr-scheduler",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-28",
+  "workers_dev": false,
+  "vars": {
+    "GITHUB_OWNER": "zetatech-a",
+    "GITHUB_REPO": "LAW_RADER_KR",
+    "GITHUB_WORKFLOW": "monitor.yml",
+    "GITHUB_REF": "main"
+  },
+  "triggers": {
+    "crons": [
+      "7,22,37,52 0-8 * * MON-FRI",
+      "7 9 * * MON-FRI"
+    ]
+  }
+}
