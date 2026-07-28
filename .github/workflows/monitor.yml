@@ -34,6 +34,7 @@ concurrency:
 
 jobs:
   monitor:
+    if: ${{ github.event_name != 'schedule' || vars.CLOUDFLARE_SCHEDULER_ENABLED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Log trigger metadata
