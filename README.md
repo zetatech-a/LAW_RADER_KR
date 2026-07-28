@@ -89,7 +89,7 @@ npm run check
 npm run dev
 
 # 별도 터미널에서 Scheduled Handler 호출
-curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=7%2C22%2C37%2C52+0-8+*+*+MON-FRI"
+curl "http://localhost:8787/__scheduled?cron=7%2C22%2C37%2C52+0-8+*+*+MON-FRI"
 ```
 
 `.dev.vars`는 `.gitignore`에 포함된 로컬 Secret 파일이며 저장소에 커밋하지 않습니다. 실제 PAT 값도 README나 다른 추적 파일에 기록하지 않습니다.
