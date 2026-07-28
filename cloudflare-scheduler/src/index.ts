@@ -59,6 +59,7 @@ export default {
         Accept: "application/vnd.github+json",
         Authorization: `Bearer ${env.GITHUB_TOKEN}`,
         "Content-Type": "application/json",
+	"User-Agent": "law-rader-kr-scheduler",
         "X-GitHub-Api-Version": "2026-03-10",
       },
       body: JSON.stringify({
