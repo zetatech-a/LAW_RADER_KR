@@ -105,7 +105,7 @@ def build_html(posts_by_source: dict[str, list[Post]]) -> str:
 
     parts = [
         f"<div style=\"margin:0;padding:20px 16px;background:#f1f5f9;font-family:{_FONT}\">",
-        "<table role='presentation' align='left' width='100%' cellpadding='0' "
+        "<table role='presentation' width='100%' cellpadding='0' "
         "cellspacing='0' style='max-width:900px;border-collapse:collapse'>",
         # ── 헤더
         "<tr><td style='padding:22px 24px;background:#0f172a;border-radius:10px 10px 0 0'>"
