@@ -92,14 +92,21 @@ def _card(p: Post, accent: str) -> str:
     )
 
 
+def _agency(source_name: str) -> str:
+    """소스명('금감원 · 검사결과 제재')에서 기관명만 뽑는다."""
+    return source_name.split("·")[0].strip() or source_name
+
+
 def build_html(posts_by_source: dict[str, list[Post]]) -> str:
     total = sum(len(v) for v in posts_by_source.values())
-    src_count = sum(1 for v in posts_by_source.values() if v)
+    # 게시판 수가 아니라 '기관' 수를 센다(같은 기관의 게시판 여러 개 = 1개 기관).
+    agencies = {_agency(name) for name, posts in posts_by_source.items() if posts}
+    src_count = len(agencies)
 
     parts = [
-        f"<div style=\"margin:0;padding:24px 12px;background:#f1f5f9;font-family:{_FONT}\">",
-        "<table role='presentation' align='center' width='100%' cellpadding='0' "
-        "cellspacing='0' style='max-width:640px;margin:0 auto;border-collapse:collapse'>",
+        f"<div style=\"margin:0;padding:20px 16px;background:#f1f5f9;font-family:{_FONT}\">",
+        "<table role='presentation' width='100%' cellpadding='0' "
+        "cellspacing='0' style='max-width:900px;border-collapse:collapse'>",
         # ── 헤더
         "<tr><td style='padding:22px 24px;background:#0f172a;border-radius:10px 10px 0 0'>"
         "<div style='font-size:11px;letter-spacing:1.6px;color:#94a3b8;"
