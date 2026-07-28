@@ -5,3 +5,8 @@ venv/
 .env
 debug/
 *.log
+cloudflare-scheduler/node_modules/
+cloudflare-scheduler/.dev.vars
+cloudflare-scheduler/.dev.vars.*
+cloudflare-scheduler/.wrangler/
+cloudflare-scheduler/worker-configuration.d.ts

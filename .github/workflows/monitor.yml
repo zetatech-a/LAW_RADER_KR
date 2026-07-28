@@ -1,17 +1,28 @@
 name: LAW RADER KR monitor
 
-# 실행 시각(KST 09:07–18:07, 월~금, 15분 간격)
-# GitHub Actions cron 은 UTC 기준. KST = UTC+9.
-#   09:07–17:52 KST  → 00:07–08:52 UTC  :  '7,22,37,52 0-8 * * 1-5'
-#   18:07 KST        → 09:07 UTC        :  '7 9 * * 1-5'
-# 정시(:00)·반시(:30)는 전 세계 워크플로가 몰려 지연·스킵이 잦으므로 한산한 분으로
-# 오프셋을 준다. GitHub 예약 실행은 밀리거나 아예 스킵될 수 있어(무보장) 간격을
-# 15분으로 좁혀, 한 슬롯이 스킵돼도 곧 다음 기회가 오도록 한다.
+# Cloudflare 실운영 검증 전 임시 fallback이며, 검증 후 별도 커밋에서 제거할 예정입니다.
+run-name: >-
+  LAW RADER KR monitor (${{ inputs.trigger_source || github.event_name }} / ${{ inputs.scheduled_for || 'unscheduled' }})
+
 on:
   schedule:
     - cron: "7,22,37,52 0-8 * * 1-5"
     - cron: "7 9 * * 1-5"
-  workflow_dispatch: {}   # 수동 실행 버튼
+  workflow_dispatch:
+    inputs:
+      trigger_source:
+        description: "워크플로 실행 요청 출처"
+        required: false
+        default: "manual"
+        type: string
+      scheduled_for:
+        description: "외부 스케줄러 기준 실행 예정 시각"
+        required: false
+        type: string
+      cron_expression:
+        description: "실행에 사용된 Cron 표현식"
+        required: false
+        type: string
 
 # state/seen.json 을 커밋해 저장소에 신규 판별 기준을 유지
 permissions:
@@ -25,6 +36,19 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     steps:
+      - name: Log trigger metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_SOURCE: ${{ inputs.trigger_source || github.event_name }}
+          SCHEDULED_FOR: ${{ inputs.scheduled_for || 'not-provided' }}
+          CRON_EXPRESSION: ${{ inputs.cron_expression || 'not-provided' }}
+        run: |
+          echo "event_name=${EVENT_NAME}"
+          echo "trigger_source=${TRIGGER_SOURCE}"
+          echo "scheduled_for=${SCHEDULED_FOR}"
+          echo "cron_expression=${CRON_EXPRESSION}"
+          echo "job_started_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
