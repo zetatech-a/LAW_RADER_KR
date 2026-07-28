@@ -25,7 +25,8 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 
 ## 동작 방식
 
-1. **월~금 09:07–18:07 (KST), 15분 간격**으로 GitHub Actions가 실행됩니다.
+1. **Cloudflare Cron Trigger**가 월~금 09:07–18:07 (KST), 15분 간격으로 GitHub `workflow_dispatch` API에 예약 실행을 요청합니다.
+   GitHub-hosted runner가 요청을 받아 Python 모니터(`python -m src.main`)를 실행합니다. Cloudflare는 예약 요청만 담당하며 Python을 실행하지 않습니다.
 2. 각 게시판 목록을 수집해 **이전에 못 본 새 글**만 골라냅니다.
    - 어떤 소스를 **처음** 볼 때는 현재 목록을 "기준선"으로만 저장하고 메일을 보내지 않습니다(과거 글 폭탄 방지). 그 다음 실행부터 진짜 신규만 발송합니다.
    - 주말·공휴일에 올라온 글은 **다음 실행(월요일 첫 회차)에 모아서** 발송됩니다. "이미 본 글 ID" 기준이라 시간과 무관합니다.
@@ -57,10 +58,54 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 여러 명에게 보내도 **수신자끼리는 서로의 주소를 볼 수 없습니다**(BCC 방식). 메일함에는 발신자가 `LAW RADER` 로 표시됩니다.
 
 ### 4) 실행
-- 자동: 위 스케줄에 따라 실행 (`.github/workflows/monitor.yml`)
+- 자동: Cloudflare Cron → GitHub `workflow_dispatch` → GitHub-hosted runner → Python 모니터 순서로 실행
 - 수동: 저장소 **Actions 탭 → LAW RADER KR monitor → Run workflow**
 
 > 처음 가동할 때는 수동 실행 1회로 기준선을 잡습니다. 이때는 **메일이 오지 않는 것이 정상**이며(로그에 `기준선 N건 기록(메일 생략)`), 그 다음 실행부터 신규 글만 발송됩니다.
+
+## Cloudflare 예약 실행 설정
+
+Worker 설정은 `cloudflare-scheduler/`의 독립 npm 프로젝트에 있습니다. 두 Cron Trigger는 UTC 기준이며 다음 KST 시각에 대응합니다.
+
+| Cloudflare Cron (UTC) | KST 실행 예정 시각 |
+|---|---|
+| `7,22,37,52 0-8 * * MON-FRI` | 월~금 09:07~17:52, 15분 간격 |
+| `7 9 * * MON-FRI` | 월~금 18:07 |
+
+Dispatch 입력은 `trigger_source`(요청 출처), `scheduled_for`(Cloudflare가 기록한 UTC 예정 시각), `cron_expression`(실행된 Cron 표현식)입니다. 이 값과 job 단계가 실제 시작된 UTC 시각은 Actions 실행 이름과 로그에서 확인할 수 있습니다. GitHub-hosted runner의 실제 시작은 예약 시각보다 늦을 수 있습니다.
+
+Fine-grained PAT는 대상 저장소 `zetatech-a/LAW_RADER_KR`만 선택하고 **Actions: Read and write** 저장소 권한을 부여합니다. PAT 값은 코드나 설정 파일이 아닌 Cloudflare Secret `GITHUB_TOKEN`으로 저장합니다. `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_WORKFLOW`, `GITHUB_REF`는 `wrangler.jsonc`의 일반 변수입니다.
+
+로컬 준비와 Scheduled Trigger 테스트:
+
+Cloudflare Scheduler 개발 및 배포에는 Node.js 22 이상이 필요합니다.
+
+```bash
+cd cloudflare-scheduler
+npm install
+npm run check
+
+# .dev.vars에는 GITHUB_TOKEN만 설정
+npm run dev
+
+# 별도 터미널에서 Scheduled Handler 호출
+curl "http://localhost:8787/__scheduled?cron=7%2C22%2C37%2C52+0-8+*+*+MON-FRI"
+```
+
+`.dev.vars`는 `.gitignore`에 포함된 로컬 Secret 파일이며 저장소에 커밋하지 않습니다. 실제 PAT 값도 README나 다른 추적 파일에 기록하지 않습니다.
+
+최초 운영 배포 시 `--secrets-file`을 사용해 Worker 코드와 `.dev.vars`의 Secret을 함께 배포합니다. 로그인과 배포는 계정을 확인한 뒤 운영자가 수행해야 합니다.
+
+```bash
+cd cloudflare-scheduler
+npx wrangler login
+npx wrangler whoami
+npm run deploy -- --secrets-file .dev.vars
+```
+
+이미 배포된 Worker의 토큰만 교체하려면 `npx wrangler secret put GITHUB_TOKEN`을 사용할 수 있습니다. 이 명령을 실행하면 Secret을 반영한 새 Worker 버전이 즉시 배포됩니다.
+
+현재 `.github/workflows/monitor.yml`의 기존 GitHub `schedule` 두 개는 Cloudflare 실운영 검증 전 임시 fallback으로 유지합니다. 검증 완료 후 별도 변경에서 제거합니다.
 
 ## 주요 설정값 (`config.yaml`)
 
@@ -74,7 +119,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 
 ## 알려진 한계
 
-- **예약 실행 지연:** GitHub 호스티드 러너의 스케줄은 부하에 따라 수십 분~수 시간 밀리거나 건너뛸 수 있습니다. 혼잡한 정시(`:00`)·반시(`:30`)를 피해 `:07`/`:22`/`:37`/`:52` 로 오프셋을 두고 간격을 15분으로 좁혀 스킵 영향을 줄였지만, 완전히 없앨 수는 없습니다.
+- **예약 실행 지연:** Cloudflare가 예약 시각에 Dispatch를 요청해도 GitHub-hosted runner의 실제 시작 시각은 부하에 따라 늦을 수 있으며 정확한 시작 시각은 보장되지 않습니다.
 - **해외 IP 접속 제한:** `fsc.go.kr`·`better.fsc.go.kr`·`open.assembly.go.kr` 는 시간대에 따라 GitHub 러너(해외 IP)에서 연결이 되지 않아 해당 회차에 건너뛸 수 있습니다(로그에 `ConnectTimeout`). 금융감독원(`fss.or.kr`) 5개 소스는 안정적으로 수집됩니다.
   - 연결 실패는 소스별로 격리되어 나머지 소스 수집에는 영향이 없고, 건너뛴 글은 **접속이 되는 다음 회차에 신규로 잡혀 발송**됩니다.
   - 완전히 해결하려면 국내 IP에서 실행해야 합니다(self-hosted runner 또는 국내 서버 cron). 코드는 환경 독립적이라 그대로 사용 가능합니다.
@@ -119,8 +164,9 @@ python -m pytest -q
 ```
 config.yaml                 # 수신자·발송옵션·모니터링 대상 목록
 .github/workflows/
-  monitor.yml               # 정기 실행(수집→메일→state 커밋)
+  monitor.yml               # Dispatch 실행(수집→메일→state 커밋)
   verify.yml                # 수동 소스 점검
+cloudflare-scheduler/       # Cron Trigger 및 GitHub Dispatch Worker
 src/
   main.py                   # 오케스트레이션(수집→신규판별→enrich→메일→저장)
   config.py  fetcher.py     # 설정 로딩 / HTTP 세션(재시도·한글 인코딩·첨부 용량 제한)
