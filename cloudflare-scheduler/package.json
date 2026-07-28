@@ -1,0 +1,19 @@
+{
+  "name": "law-rader-cloudflare-scheduler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "types": "wrangler types worker-configuration.d.ts --include-env=false",
+    "check": "npm run types && tsc --noEmit",
+    "dev": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "wrangler": "^4.0.0"
+  }
+}
