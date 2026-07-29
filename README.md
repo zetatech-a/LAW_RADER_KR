@@ -57,6 +57,8 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 | `SMTP_PORT` | `587` (기본값과 같으면 생략 가능) |
 | `MAIL_FROM` | 발신 표시 주소(보통 `SMTP_USER`와 동일) |
 
+> 필수 Secret(`SMTP_USER`·`SMTP_PASSWORD`·`MAIL_TO`)이 하나라도 비어 있으면 실행이 **AI 요약을 호출하기 전에** 실패로 끝납니다. 어차피 보낼 수 없는 메일에 Gemini 무료 할당량을 쓰지 않기 위함이며, 신규 글은 미확정으로 남아 설정을 채운 다음 실행에 그대로 발송됩니다.
+
 ### 3) 수신자 설정
 수신자 주소는 **저장소에 커밋하지 않습니다.** `MAIL_TO` Secret(여러 명은 `a@x.com, b@y.com`)으로만 지정하세요. 로컬 실행 시에는 `.env` 의 `MAIL_TO` 를 사용합니다(`.env` 는 커밋 제외).
 여러 명에게 보내도 **수신자끼리는 서로의 주소를 볼 수 없습니다**(BCC 방식). 메일함에는 발신자가 `LAW RADER` 로 표시됩니다.

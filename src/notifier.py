@@ -229,16 +229,29 @@ def build_text(posts_by_source: dict[str, list[Post]]) -> str:
     return "\n".join(lines)
 
 
+def missing_email_settings(cfg: EmailConfig) -> list[str]:
+    """발송에 반드시 필요한데 비어 있는 설정 이름들. 비었으면 발송 가능."""
+    missing = []
+    if not cfg.smtp_user:
+        missing.append("SMTP_USER")
+    if not cfg.smtp_password:
+        missing.append("SMTP_PASSWORD")
+    if not cfg.recipients:
+        missing.append("MAIL_TO(또는 config.yaml 의 email.recipients)")
+    return missing
+
+
 def send_digest(cfg: EmailConfig, posts_by_source: dict[str, list[Post]]) -> None:
     total = sum(len(v) for v in posts_by_source.values())
     if total == 0:
         log.info("신규 없음 — 메일 발송 생략")
         return
 
-    if not (cfg.smtp_user and cfg.smtp_password and cfg.recipients):
+    missing = missing_email_settings(cfg)
+    if missing:
         raise RuntimeError(
-            "SMTP 설정이 비어 있습니다. SMTP_USER / SMTP_PASSWORD 환경변수와 "
-            "config.yaml 의 recipients 를 확인하세요."
+            f"SMTP 설정이 비어 있습니다: {', '.join(missing)}. "
+            "환경변수/Secrets 와 config.yaml 을 확인하세요."
         )
 
     # 제목: 가장 많은 소스명 + 총 건수

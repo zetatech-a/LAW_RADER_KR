@@ -23,7 +23,7 @@ import sys
 from .config import load_config
 from .fetcher import Fetcher
 from .models import Post
-from .notifier import send_digest
+from .notifier import missing_email_settings, send_digest
 from .scrapers import build_scraper
 from .state import State
 from .summarizer import summarize_posts
@@ -163,6 +163,20 @@ def run(argv=None) -> int:
     if selected > 0 and succeeded == 0:
         log.error("선택된 소스 %d개가 모두 실패 — 실패 종료. 오류: %s", selected, "; ".join(errors))
         return 1
+
+    # 어차피 못 보낼 메일이면 LLM 을 호출하기 전에 멈춘다. 발송 실패는 신규를 seen 으로
+    # 확정하지 않으므로, 설정이 빠진 채 방치되면 매 실행이 같은 글을 다시 요약하며
+    # 무료 할당량과 시간예산만 반복 소모한다. (--dry-run 은 원래 발송하지 않으므로 제외)
+    if total > 0 and not args.dry_run:
+        missing = missing_email_settings(cfg.email)
+        if missing:
+            log.error(
+                "메일 설정 누락(%s) — 발송이 불가능하므로 요약·발송을 건너뜁니다. "
+                "신규 %d건은 미확정으로 남아 설정 후 다음 실행에 발송됩니다.",
+                ", ".join(missing),
+                total,
+            )
+            return 1
 
     # 본문이 있는 글은 LLM 으로 3줄 요약해 메일에 싣는다. 요약이 실패하면 summary 가
     # 빈 채로 남고 notifier 가 기존 원문 발췌로 되돌아가므로, 발송 자체는 막지 않는다.

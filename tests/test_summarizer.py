@@ -9,9 +9,9 @@ from copy import deepcopy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.config import LLMConfig, load_config
+from src.config import EmailConfig, LLMConfig, load_config
 from src.models import Post
-from src.notifier import build_html, build_text
+from src.notifier import build_html, build_text, missing_email_settings, send_digest
 from src.summarizer import Summarizer, summarize_posts
 
 
@@ -250,14 +250,38 @@ def test_summarize_all_skips_calls_when_budget_too_small():
     assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
 
 
-def test_throttle_wait_bounded_by_deadline():
-    # RPM 간격(60초)이 남은 예산보다 길어도 예산만큼만 기다린다.
+def test_throttle_wait_bounded_by_deadline_and_rechecks_after():
+    # RPM 간격(60초)이 남은 예산보다 길면, 예산만큼만 기다린 뒤 '대기 후' 마감을
+    # 다시 확인해 요청을 열지 않아야 한다. 대기 전에 계산한 낡은 타임아웃으로
+    # 소켓을 열면 예산을 넘겨 버린다.
     s = Summarizer(_cfg(rpm=1))
-    _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}')) for _ in range(2)])
+    sess = _stub(
+        s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}')) for _ in range(2)]
+    )
     s.summarize(_post())            # 첫 호출로 _last_call 설정
     started = time.monotonic()
-    s.summarize(_post(), started + 0.5)
-    assert time.monotonic() - started < 2.0   # 60초를 통째로 자지 않는다
+    try:
+        s.summarize(_post(), started + 0.3)
+    except RuntimeError as e:
+        assert "예산" in str(e)
+    else:
+        raise AssertionError("간격 대기로 예산이 소진되면 요청을 열지 않아야 한다")
+    assert len(sess.sent) == 1                # 두 번째 요청은 열리지 않음
+    assert time.monotonic() - started < 2.0   # 60초를 통째로 자지도 않음
+
+
+def test_throttle_does_not_penalize_abandoned_call():
+    # 예산 초과로 포기한 호출은 _last_call 을 갱신하지 않으므로, 다음 호출이
+    # 공연히 한 간격을 더 기다리지 않는다.
+    s = Summarizer(_cfg(rpm=600))   # 간격 0.1초
+    _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}')) for _ in range(2)])
+    s.summarize(_post())
+    before = s._last_call
+    try:
+        s.summarize(_post(), time.monotonic() - 1.0)   # 이미 마감 지남
+    except RuntimeError:
+        pass
+    assert s._last_call == before   # 보내지 않은 요청은 간격 기준을 옮기지 않는다
 
 
 def test_max_posts_counts_only_eligible_bodies():
@@ -447,6 +471,120 @@ def test_generate_sends_api_key_and_prompt():
     assert "증권사 내부통제 개선방안" in prompt
     assert "금융위 · 보도자료" in prompt
     assert body["generationConfig"]["responseMimeType"] == "application/json"
+
+
+# --- 발송 설정 사전 검증 (LLM 호출 전에 걸러야 하는 조건) ---
+
+
+def _email_cfg(**over) -> EmailConfig:
+    base = dict(
+        recipients=["a@example.com"],
+        from_name="LAW RADER",
+        subject_prefix="[LAW RADER]",
+        max_attach_mb=15,
+        smtp_host="smtp.example.com",
+        smtp_port=587,
+        smtp_user="sender@example.com",
+        smtp_password="pw",
+        mail_from="sender@example.com",
+    )
+    base.update(over)
+    return EmailConfig(**base)
+
+
+def test_missing_email_settings_detects_each_field():
+    assert missing_email_settings(_email_cfg()) == []
+    assert missing_email_settings(_email_cfg(smtp_user="")) == ["SMTP_USER"]
+    assert missing_email_settings(_email_cfg(smtp_password="")) == ["SMTP_PASSWORD"]
+    assert "MAIL_TO" in missing_email_settings(_email_cfg(recipients=[]))[0]
+    # 여러 개가 빠지면 전부 알려준다(한 번에 고칠 수 있도록)
+    assert len(missing_email_settings(_email_cfg(smtp_user="", recipients=[]))) == 2
+
+
+def test_send_digest_reports_missing_settings():
+    p = _post()
+    try:
+        send_digest(_email_cfg(smtp_password=""), {p.source_name: [p]})
+    except RuntimeError as e:
+        assert "SMTP_PASSWORD" in str(e)
+    else:
+        raise AssertionError("설정이 비면 발송을 시도하지 않아야 한다")
+
+
+def test_send_digest_skips_check_when_nothing_to_send():
+    # 신규가 없으면 설정이 비어 있어도 조용히 통과(기존 동작 유지)
+    send_digest(_email_cfg(smtp_user="", smtp_password="", recipients=[]), {})
+
+
+def _run_with_one_new_post(tmp_path, monkeypatch, dry_run=False):
+    """신규 1건이 잡힌 상태로 main.run() 을 돌리고 (반환코드, 요약호출수) 를 준다."""
+    from src import main as main_mod
+    from src.scrapers.base import CollectResult
+    from src.state import State
+
+    state_path = tmp_path / "seen.json"
+    st = State(state_path)
+    st.mark_seen("fss_press", ["old"], baselined=True)
+    st.save()
+
+    fresh = _post(source_key="fss_press", source_name="금감원 · 보도자료", post_id="new1")
+
+    class _FakeScraper:
+        def collect(self, limit, seen_ids, max_pages):
+            return CollectResult(posts=[fresh], reached_boundary=True, scanned=1)
+
+        def enrich(self, post):
+            return None
+
+    calls = {"summarize": 0, "send": 0}
+    monkeypatch.setattr(main_mod, "build_scraper", lambda src, fetcher: _FakeScraper())
+    monkeypatch.setattr(
+        main_mod, "summarize_posts",
+        lambda cfg, posts: calls.__setitem__("summarize", calls["summarize"] + 1),
+    )
+    monkeypatch.setattr(
+        main_mod, "send_digest",
+        lambda cfg, posts: calls.__setitem__("send", calls["send"] + 1),
+    )
+
+    argv = ["--state", str(state_path), "--only", "fss_press"]
+    if dry_run:
+        argv.append("--dry-run")
+    return main_mod.run(argv), calls
+
+
+def test_run_skips_llm_when_mail_settings_missing(tmp_path, monkeypatch):
+    # 발송이 불가능한 설정이면 Gemini 를 부르기 전에 멈춰야 한다. 그러지 않으면
+    # 실패로 신규가 미확정으로 남아 매 실행마다 같은 글을 다시 요약한다.
+    for var in ("SMTP_USER", "SMTP_PASSWORD", "MAIL_TO", "MAIL_FROM"):
+        monkeypatch.delenv(var, raising=False)
+
+    rc, calls = _run_with_one_new_post(tmp_path, monkeypatch)
+    assert rc == 1
+    assert calls["summarize"] == 0
+    assert calls["send"] == 0
+
+
+def test_run_summarizes_when_mail_settings_present(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMTP_USER", "sender@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "pw")
+    monkeypatch.setenv("MAIL_TO", "to@example.com")
+
+    rc, calls = _run_with_one_new_post(tmp_path, monkeypatch)
+    assert rc == 0
+    assert calls["summarize"] == 1
+    assert calls["send"] == 1
+
+
+def test_run_dry_run_still_summarizes_without_mail_settings(tmp_path, monkeypatch):
+    # --dry-run 은 원래 발송하지 않으므로 기존대로 요약을 확인할 수 있어야 한다.
+    for var in ("SMTP_USER", "SMTP_PASSWORD", "MAIL_TO", "MAIL_FROM"):
+        monkeypatch.delenv(var, raising=False)
+
+    rc, calls = _run_with_one_new_post(tmp_path, monkeypatch, dry_run=True)
+    assert rc == 0
+    assert calls["summarize"] == 1
+    assert calls["send"] == 0
 
 
 # --- 메일 렌더 ---

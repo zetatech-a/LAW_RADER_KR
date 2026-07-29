@@ -224,7 +224,11 @@ class Summarizer:
         last_error = ""
         attempt = 0
         while attempt <= self.cfg.max_retries:
-            # 남은 예산 안으로 이번 요청을 가둔다. 예산이 다 됐으면 새 소켓을 열지 않는다.
+            # RPM 간격 대기를 '먼저' 한다. 이 대기가 예산을 다 먹을 수 있으므로,
+            # 타임아웃은 반드시 대기가 끝난 뒤의 남은 시간으로 계산해야 한다.
+            self._throttle(deadline)
+
+            # 대기 중에 마감이 지났으면 새 소켓을 열지 않는다.
             timeout = self.cfg.timeout_sec
             if deadline is not None:
                 remaining = deadline - time.monotonic()
@@ -232,7 +236,7 @@ class Summarizer:
                     raise RuntimeError(last_error or "요약 시간예산 소진")
                 timeout = min(timeout, remaining)
 
-            self._throttle(deadline)
+            self._last_call = time.monotonic()
             resp = self.session.post(
                 url, headers=headers, json=payload, timeout=timeout
             )
@@ -273,19 +277,23 @@ class Summarizer:
         raise RuntimeError(last_error or "Gemini 호출 실패")
 
     def _throttle(self, deadline: float | None = None) -> None:
-        """무료 티어 RPM 을 넘지 않도록 호출 간격을 벌린다.
+        """무료 티어 RPM 을 넘지 않도록 직전 호출로부터 간격을 벌린다.
 
         간격 대기도 시간예산 안에서만 한다 — 예산이 6초 남았는데 RPM 간격으로
-        6초를 통째로 자 버리면 정작 호출은 못 한다.
+        6초를 통째로 자 버리면 정작 호출은 못 한다. 대기 후 예산이 남았는지는
+        호출자(_generate)가 다시 확인한다.
+
+        _last_call 은 실제로 요청을 보낼 때만 갱신한다. 여기서 갱신해 버리면
+        예산 초과로 요청을 포기한 경우에도 다음 호출이 공연히 한 간격을 더 기다린다.
         """
+        if self._min_interval <= 0 or not self._last_call:
+            return
         now = time.monotonic()
-        if self._min_interval > 0 and self._last_call:
-            wait = self._min_interval - (now - self._last_call)
-            if deadline is not None:
-                wait = min(wait, deadline - now)
-            if wait > 0:
-                time.sleep(wait)
-        self._last_call = time.monotonic()
+        wait = self._min_interval - (now - self._last_call)
+        if deadline is not None:
+            wait = min(wait, deadline - now)
+        if wait > 0:
+            time.sleep(wait)
 
     def _parse(self, data: dict) -> list[str]:
         """응답 봉투에서 요약 문장 리스트를 뽑는다."""
