@@ -60,7 +60,7 @@ def test_config_exposes_llm_defaults():
 
 def test_summarize_parses_json_schema_response():
     s = Summarizer(_cfg())
-    s._generate = lambda prompt: _envelope(
+    s._generate = lambda prompt, deadline=None: _envelope(
         '{"summary": ["첫째 줄 요약함", "둘째 줄 요약함", "셋째 줄 요약함"]}'
     )
     assert s.summarize(_post()) == ["첫째 줄 요약함", "둘째 줄 요약함", "셋째 줄 요약함"]
@@ -68,21 +68,21 @@ def test_summarize_parses_json_schema_response():
 
 def test_summarize_truncates_to_configured_lines():
     s = Summarizer(_cfg(lines=3))
-    s._generate = lambda prompt: _envelope('{"summary": ["a", "b", "c", "d", "e"]}')
+    s._generate = lambda prompt, deadline=None: _envelope('{"summary": ["a", "b", "c", "d", "e"]}')
     assert s.summarize(_post()) == ["a", "b", "c"]
 
 
 def test_summarize_falls_back_to_line_parsing():
     # 스키마를 지키지 못한 평문 응답도 불릿을 떼고 줄 단위로 읽어낸다
     s = Summarizer(_cfg())
-    s._generate = lambda prompt: _envelope("- 첫 줄\n• 둘째 줄\n3. 셋째 줄")
+    s._generate = lambda prompt, deadline=None: _envelope("- 첫 줄\n• 둘째 줄\n3. 셋째 줄")
     assert s.summarize(_post()) == ["첫 줄", "둘째 줄", "셋째 줄"]
 
 
 def test_summarize_skips_short_body():
     s = Summarizer(_cfg(min_body_chars=100))
 
-    def _fail(prompt):  # 호출되면 안 됨
+    def _fail(prompt, deadline=None):  # 호출되면 안 됨
         raise AssertionError("짧은 본문에는 API 를 호출하지 않아야 한다")
 
     s._generate = _fail
@@ -93,7 +93,7 @@ def test_summarize_truncates_long_input():
     captured = {}
     s = Summarizer(_cfg(max_input_chars=50))
 
-    def _cap(prompt):
+    def _cap(prompt, deadline=None):
         captured["prompt"] = prompt
         return _envelope('{"summary": ["요약함"]}')
 
@@ -111,7 +111,7 @@ def test_summarize_all_fills_summary_and_survives_failure():
     s = Summarizer(_cfg())
     calls = {"n": 0}
 
-    def _generate(prompt):
+    def _generate(prompt, deadline=None):
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("HTTP 429")
@@ -130,7 +130,7 @@ def test_summarize_all_fills_summary_and_survives_failure():
 def test_parse_keeps_leading_numbers():
     # 목록 표식만 떼고 실제 수치(시행일·금액·비율)는 절대 건드리지 않는다.
     s = Summarizer(_cfg(lines=5))
-    s._generate = lambda prompt: _envelope(
+    s._generate = lambda prompt, deadline=None: _envelope(
         '{"summary": ["2026년 1월부터 시행함", "1조원 규모로 확대함", '
         '"3.5% 인상함", "2) 제재 대상은 5개사임", "- 의견제출 기한은 9월 7일임"]}'
     )
@@ -145,7 +145,7 @@ def test_parse_keeps_leading_numbers():
 
 def test_parse_strips_only_recognized_list_markers():
     s = Summarizer(_cfg(lines=6))
-    s._generate = lambda prompt: _envelope(
+    s._generate = lambda prompt, deadline=None: _envelope(
         "1. 첫째 줄임\n2) 둘째 줄임\n(3) 셋째 줄임\n• 넷째 줄임\n"
         "10.5억원 규모임\n2026.1.1. 시행함"
     )
@@ -157,6 +157,107 @@ def test_parse_strips_only_recognized_list_markers():
         "10.5억원 규모임",   # 마침표 뒤 공백이 없으므로 목록 표식이 아님
         "2026.1.1. 시행함",  # 연도는 두 자리 초과 → 목록 표식이 아님
     ]
+
+
+def test_parse_keeps_negative_numbers():
+    # 하이픈은 음수 부호와 생김새가 같다. 뒤에 공백이 없으면 목록 표식이 아니다.
+    # (부호가 사라지면 '손실'이 '이익'으로 뒤집힌다)
+    s = Summarizer(_cfg(lines=6))
+    s._generate = lambda prompt, deadline=None: _envelope(
+        '{"summary": ["-3.5% 감소함", "-2조원 순손실 기록함", "−1.2%p 하락함", '
+        '"- 영업이익은 3조원임", "—2026년 시행함", "–5% 인하함"]}'
+    )
+    assert s.summarize(_post()) == [
+        "-3.5% 감소함",          # 공백 없는 하이픈 = 음수 부호 → 보존
+        "-2조원 순손실 기록함",
+        "−1.2%p 하락함",         # 유니코드 마이너스는 표식 목록에 없음
+        "영업이익은 3조원임",     # "- " (공백 있음) = 목록 표식 → 제거
+        "—2026년 시행함",        # em dash + 공백 없음 → 보존
+        "–5% 인하함",            # en dash + 공백 없음 → 보존
+    ]
+
+
+def test_parse_still_strips_hyphen_bullets_with_space():
+    s = Summarizer(_cfg(lines=3))
+    s._generate = lambda prompt, deadline=None: _envelope("- 첫째 줄임\n–  둘째 줄임\n— 셋째 줄임")
+    assert s.summarize(_post()) == ["첫째 줄임", "둘째 줄임", "셋째 줄임"]
+
+
+def test_generate_caps_timeout_by_remaining_budget():
+    s = Summarizer(_cfg(timeout_sec=45))
+    sess = _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}'))])
+    deadline = time.monotonic() + 3.0
+    s.summarize(_post(), deadline)
+    # 45초가 아니라 남은 3초 이내로 잘려야 한다
+    assert 0 < sess.timeouts[0] <= 3.0
+
+
+def test_generate_refuses_call_past_deadline():
+    s = Summarizer(_cfg())
+    sess = _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}'))])
+    try:
+        s.summarize(_post(), time.monotonic() - 1.0)
+    except RuntimeError as e:
+        assert "예산" in str(e)
+    else:
+        raise AssertionError("마감이 지났으면 소켓을 열지 않아야 한다")
+    assert sess.sent == []
+
+
+def test_generate_skips_retry_that_would_not_fit_budget():
+    # 백오프 대기가 남은 예산 밖이면 재시도하지 않고 바로 실패로 넘긴다.
+    s = Summarizer(_cfg(max_retries=2, retry_backoff_sec=30))
+    sess = _stub(s, [_FakeResponse(503, text="unavailable") for _ in range(3)])
+    started = time.monotonic()
+    try:
+        s.summarize(_post(), started + 5.0)
+    except RuntimeError:
+        pass
+    assert len(sess.sent) == 1                    # 재시도 없음
+    assert time.monotonic() - started < 5.0       # 30초 백오프를 자지 않음
+
+
+def test_summarize_all_stays_within_budget():
+    # 건수를 다 돌지 않고 예산 안에서 멈춘다(남은 글은 원문 발췌로 발송).
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(50)]
+    s = Summarizer(_cfg(budget_sec=3.0, timeout_sec=45, max_consecutive_failures=0))
+    calls = {"n": 0}
+
+    def _generate(prompt, deadline=None):
+        calls["n"] += 1
+        time.sleep(0.3)
+        return _envelope('{"summary": ["요약함"]}')
+
+    s._generate = _generate
+    started = time.monotonic()
+    s.summarize_all({"금융위 · 보도자료": posts})
+    elapsed = time.monotonic() - started
+
+    assert 0 < calls["n"] < 50           # 몇 건은 요약하되 전부는 아님
+    assert elapsed < 3.5                 # 50건 × 0.3초(=15초)가 아니라 예산 근처
+    assert sum(1 for p in posts if p.summary) == calls["n"]
+    assert any(p.summary == [] for p in posts)   # 남은 글은 원문 발췌로
+
+
+def test_summarize_all_skips_calls_when_budget_too_small():
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(3)]
+    s = Summarizer(_cfg(budget_sec=0.01))
+
+    def _fail(prompt, deadline=None):
+        raise AssertionError("예산이 한 건도 못 담으면 호출하지 않아야 한다")
+
+    s._generate = _fail
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
+
+
+def test_throttle_wait_bounded_by_deadline():
+    # RPM 간격(60초)이 남은 예산보다 길어도 예산만큼만 기다린다.
+    s = Summarizer(_cfg(rpm=1))
+    _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}')) for _ in range(2)])
+    s.summarize(_post())            # 첫 호출로 _last_call 설정
+    started = time.monotonic()
+    s.summarize(_post(), started + 0.5)
+    assert time.monotonic() - started < 2.0   # 60초를 통째로 자지 않는다
 
 
 def test_max_posts_counts_only_eligible_bodies():
@@ -172,7 +273,7 @@ def test_max_posts_counts_only_eligible_bodies():
     s = Summarizer(_cfg(min_body_chars=50, max_posts=2))
     calls = {"n": 0}
 
-    def _generate(prompt):
+    def _generate(prompt, deadline=None):
         calls["n"] += 1
         return _envelope('{"summary": ["요약함"]}')
 
@@ -188,7 +289,7 @@ def test_circuit_breaker_stops_after_consecutive_failures():
     s = Summarizer(_cfg(max_consecutive_failures=3))
     calls = {"n": 0}
 
-    def _generate(prompt):
+    def _generate(prompt, deadline=None):
         calls["n"] += 1
         raise RuntimeError("HTTP 503")
 
@@ -203,7 +304,7 @@ def test_circuit_breaker_resets_on_success():
     s = Summarizer(_cfg(max_consecutive_failures=3))
     calls = {"n": 0}
 
-    def _generate(prompt):
+    def _generate(prompt, deadline=None):
         calls["n"] += 1
         # 실패, 실패, 성공, 실패, 실패, 성공 — 연속 2회를 넘지 않으므로 끝까지 간다
         if calls["n"] % 3 != 0:
@@ -220,7 +321,7 @@ def test_time_budget_stops_summarizing():
     s = Summarizer(_cfg(budget_sec=0.05, max_consecutive_failures=0))
     calls = {"n": 0}
 
-    def _generate(prompt):
+    def _generate(prompt, deadline=None):
         calls["n"] += 1
         time.sleep(0.04)
         return _envelope('{"summary": ["요약함"]}')
@@ -235,7 +336,7 @@ def test_summarize_all_respects_max_posts():
     s = Summarizer(_cfg(max_posts=2))
     calls = {"n": 0}
 
-    def _generate(prompt):
+    def _generate(prompt, deadline=None):
         calls["n"] += 1
         return _envelope('{"summary": ["요약"]}')
 
@@ -257,7 +358,7 @@ def test_summarize_posts_skips_when_disabled():
 
 def test_blocked_response_returns_empty():
     s = Summarizer(_cfg())
-    s._generate = lambda prompt: {"candidates": [{"finishReason": "SAFETY"}]}
+    s._generate = lambda prompt, deadline=None: {"candidates": [{"finishReason": "SAFETY"}]}
     assert s.summarize(_post()) == []
 
 
@@ -280,10 +381,12 @@ class _FakeSession:
     def __init__(self, responses):
         self._responses = list(responses)
         self.sent = []
+        self.timeouts = []
 
     def post(self, url, headers=None, json=None, timeout=None):
         # _generate 는 payload 를 그 자리에서 고쳐 재시도하므로 스냅샷으로 남긴다.
         self.sent.append(deepcopy(json))
+        self.timeouts.append(timeout)
         return self._responses.pop(0)
 
 

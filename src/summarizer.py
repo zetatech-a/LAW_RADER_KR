@@ -29,6 +29,9 @@ log = logging.getLogger(__name__)
 
 _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
+# 이보다 적게 남은 시간예산으로는 호출을 시작하지 않는다(연결조차 못 맺고 끝난다).
+_MIN_CALL_SEC = 2.0
+
 _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가입니다.
 아래는 금융위원회·금융감독원·금융규제포털·의안정보시스템 등에서 수집한 게시물입니다.
 본문에는 사이트 메뉴, 담당부서 안내, 첨부파일 목록 같은 군더더기가 섞여 있을 수 있습니다.
@@ -52,7 +55,13 @@ _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가�
 #   "- ", "• ", "1. ", "2) ", "(3) "  →  제거
 # 문자 단위 lstrip 을 쓰면 "2026년 1월부터", "1조원", "3.5%" 같은 실제 수치가 잘려
 # 금액·시행일이 훼손되므로 반드시 접두사 패턴으로만 제거한다.
-_LIST_PREFIX = re.compile(r"^(?:[-–—•*·▪◦]+\s*|\(?\d{1,2}[.)]\s+)")
+#
+# 하이픈류(- – —)는 음수 부호와 생김새가 같으므로 **뒤에 공백이 있을 때만** 표식으로
+# 본다. 그러지 않으면 "-3.5% 감소함" → "3.5% 감소함", "-2조원 순손실" → "2조원 순손실"
+# 처럼 부호가 사라져 손실이 이익으로 뒤집힌다.
+# 반면 • * · ▪ ◦ 는 부호로 쓰이지 않으므로 공백 없이 붙어도("•3.5% 감소함") 안전하다.
+# 유니코드 마이너스(−, U+2212)는 애초에 표식 목록에 넣지 않는다.
+_LIST_PREFIX = re.compile(r"^(?:[-–—]+\s+|[•*·▪◦]+\s*|\(?\d{1,2}[.)]\s+)")
 
 # 구조화 출력(JSON) 스키마 — 줄바꿈·불릿 파싱에 의존하지 않도록 배열로 받는다.
 _SCHEMA = {
@@ -128,9 +137,12 @@ class Summarizer:
                     len(targets) - i,
                 )
                 break
-            if deadline is not None and time.monotonic() >= deadline:
+            # 예산이 한 번의 호출을 담기에도 모자라면 아예 시작하지 않는다. 시작한
+            # 호출은 아래 summarize→_generate 가 남은 예산으로 타임아웃·재시도를
+            # 제한하므로, 요약 단계 전체가 budget_sec 을 넘지 않는다.
+            if deadline is not None and deadline - time.monotonic() < _MIN_CALL_SEC:
                 log.warning(
-                    "요약 시간예산(%.0f초) 초과 — 중단합니다. 남은 %d건은 원문 발췌로 "
+                    "요약 시간예산(%.0f초) 소진 — 중단합니다. 남은 %d건은 원문 발췌로 "
                     "발송됩니다.",
                     self.cfg.budget_sec,
                     len(targets) - i,
@@ -139,7 +151,7 @@ class Summarizer:
 
             attempted += 1
             try:
-                lines = self.summarize(post)
+                lines = self.summarize(post, deadline)
             except Exception as e:  # noqa: BLE001 — 요약 실패가 메일 발송을 막지 않는다
                 consecutive += 1
                 log.warning("[%s] 요약 실패 %s: %s", post.source_key, post.url, e)
@@ -167,8 +179,12 @@ class Summarizer:
             return ""
         return body[: self.cfg.max_input_chars]
 
-    def summarize(self, post: Post) -> list[str]:
-        """게시글 1건을 요약해 문장 리스트를 돌려준다(실패 시 예외)."""
+    def summarize(self, post: Post, deadline: float | None = None) -> list[str]:
+        """게시글 1건을 요약해 문장 리스트를 돌려준다(실패 시 예외).
+
+        deadline 은 time.monotonic() 기준 마감 시각. 주어지면 이 호출의 타임아웃과
+        재시도가 남은 시간 안으로 제한된다.
+        """
         body = self._prepared_body(post)
         if not body:
             return []
@@ -180,11 +196,11 @@ class Summarizer:
             title=post.title,
             body=body,
         )
-        data = self._generate(prompt)
+        data = self._generate(prompt, deadline)
         return self._parse(data)
 
     # --- 내부 ---
-    def _generate(self, prompt: str) -> dict:
+    def _generate(self, prompt: str, deadline: float | None = None) -> dict:
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {
@@ -208,9 +224,17 @@ class Summarizer:
         last_error = ""
         attempt = 0
         while attempt <= self.cfg.max_retries:
-            self._throttle()
+            # 남은 예산 안으로 이번 요청을 가둔다. 예산이 다 됐으면 새 소켓을 열지 않는다.
+            timeout = self.cfg.timeout_sec
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(last_error or "요약 시간예산 소진")
+                timeout = min(timeout, remaining)
+
+            self._throttle(deadline)
             resp = self.session.post(
-                url, headers=headers, json=payload, timeout=self.cfg.timeout_sec
+                url, headers=headers, json=payload, timeout=timeout
             )
             if resp.status_code == 200:
                 return resp.json()
@@ -234,6 +258,13 @@ class Summarizer:
                 break
             if attempt < self.cfg.max_retries:
                 wait = self.cfg.retry_backoff_sec * (2**attempt)
+                # 백오프 대기 + 최소한의 재요청 시간이 예산 밖이면 재시도를 포기한다.
+                if (
+                    deadline is not None
+                    and time.monotonic() + wait + _MIN_CALL_SEC > deadline
+                ):
+                    log.info("남은 요약 시간예산이 부족해 재시도를 생략합니다")
+                    break
                 log.info("Gemini %s — %.1f초 후 재시도(%d/%d)",
                          resp.status_code, wait, attempt + 1, self.cfg.max_retries)
                 time.sleep(wait)
@@ -241,13 +272,19 @@ class Summarizer:
 
         raise RuntimeError(last_error or "Gemini 호출 실패")
 
-    def _throttle(self) -> None:
-        """무료 티어 RPM 을 넘지 않도록 호출 간격을 벌린다."""
-        if self._min_interval <= 0:
-            return
-        elapsed = time.monotonic() - self._last_call
-        if self._last_call and elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
+    def _throttle(self, deadline: float | None = None) -> None:
+        """무료 티어 RPM 을 넘지 않도록 호출 간격을 벌린다.
+
+        간격 대기도 시간예산 안에서만 한다 — 예산이 6초 남았는데 RPM 간격으로
+        6초를 통째로 자 버리면 정작 호출은 못 한다.
+        """
+        now = time.monotonic()
+        if self._min_interval > 0 and self._last_call:
+            wait = self._min_interval - (now - self._last_call)
+            if deadline is not None:
+                wait = min(wait, deadline - now)
+            if wait > 0:
+                time.sleep(wait)
         self._last_call = time.monotonic()
 
     def _parse(self, data: dict) -> list[str]:
