@@ -9,6 +9,7 @@ from email.utils import formataddr
 
 from .config import EmailConfig
 from .models import Post
+from .snippet import build_fallback_snippet
 
 log = logging.getLogger(__name__)
 
@@ -39,11 +40,6 @@ def _accent(source_name: str) -> str:
     return _DEFAULT_ACCENT
 
 
-def _snippet(text: str, limit: int = 220) -> str:
-    s = " ".join((text or "").split())
-    return s[:limit] + " …" if len(s) > limit else s
-
-
 # HTML·텍스트 두 파트가 같은 문구를 쓰도록 한 곳에 둔다. text/plain 만 보는
 # 수신자에게도 동일한 유의사항이 전달되어야 한다.
 _AI_NOTICE = (
@@ -65,6 +61,7 @@ def _summary_block(p: Post, accent: str) -> str:
     """본문 영역. LLM 3줄 요약이 있으면 그것을, 없으면 원문 발췌를 보여준다.
 
     요약은 LLM 장애·한도 초과로 비어 있을 수 있으므로 원문 발췌 폴백을 남겨 둔다.
+    폴백은 제목 중복과 반복 안내문을 걷어낸 뒤 발췌한다(src/snippet.py).
     """
     if p.summary:
         items = "".join(
@@ -88,7 +85,7 @@ def _summary_block(p: Post, accent: str) -> str:
     if p.body:
         return (
             "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
-            f"{_esc(_snippet(p.body))}</div>"
+            f"{_esc(build_fallback_snippet(p.body, p.title))}</div>"
         )
     return ""
 
@@ -219,7 +216,7 @@ def build_text(posts_by_source: dict[str, list[Post]]) -> str:
                     lines.append(f"      · {s}")
             elif p.body:
                 lines.append("    [원문 발췌]")
-                lines.append(f"      {_snippet(p.body)}")
+                lines.append(f"      {build_fallback_snippet(p.body, p.title)}")
             lines.append(f"    {p.url}")
             for a in p.attachments:
                 lines.append(f"      첨부: {a.filename} ({a.url})")
