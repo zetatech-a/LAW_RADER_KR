@@ -18,7 +18,6 @@ import json
 import logging
 import re
 import time
-from typing import Iterable
 
 import requests
 
@@ -31,6 +30,20 @@ _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:gen
 
 # 이보다 적게 남은 시간예산으로는 호출을 시작하지 않는다(연결조차 못 맺고 끝난다).
 _MIN_CALL_SEC = 2.0
+
+# 연결 단계에 몰아줄 시간 상한(초). 연결이 막힌 환경에서 오래 매달리지 않게 한다.
+_CONNECT_TIMEOUT_CAP = 8.0
+
+
+def _split_timeout(budget: float) -> tuple[float, float]:
+    """예산을 (연결, 응답대기) 로 쪼갠다.
+
+    requests 에 스칼라 타임아웃을 주면 연결과 응답대기에 '각각' 그 값이 적용되어
+    실제 소요가 최대 2배까지 늘어난다(예산 10초 → 연결 10초 + 대기 10초). 두 단계의
+    합이 예산을 넘지 않도록 나눠서 넘긴다.
+    """
+    connect = min(_CONNECT_TIMEOUT_CAP, budget / 2)
+    return connect, max(budget - connect, 0.1)
 
 _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가입니다.
 아래는 금융위원회·금융감독원·금융규제포털·의안정보시스템 등에서 수집한 게시물입니다.
@@ -62,6 +75,22 @@ _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가�
 # 반면 • * · ▪ ◦ 는 부호로 쓰이지 않으므로 공백 없이 붙어도("•3.5% 감소함") 안전하다.
 # 유니코드 마이너스(−, U+2212)는 애초에 표식 목록에 넣지 않는다.
 _LIST_PREFIX = re.compile(r"^(?:[-–—]+\s+|[•*·▪◦]+\s*|\(?\d{1,2}[.)]\s+)")
+
+
+def _as_sentences(raw) -> list[str] | None:
+    """요청한 스키마(문자열 배열)일 때만 문장 리스트로 받아들인다.
+
+    아니면 None — 호출자는 요약을 버리고 원문 발췌로 되돌린다. 느슨하게 순회하면
+    {"summary": {"first": "금리 인하"}} 같은 응답에서 dict 의 '키'("first")가 AI
+    요약문인 양 메일에 실리고, [1, None, {...}] 같은 배열도 "1"·"None" 으로 찍힌다.
+    """
+    # 배열 대신 문자열 하나만 온 경우: 스키마 위반이지만 내용 자체는 모델이 쓴 문장이라
+    # (키 이름 같은 구조적 잡음이 섞일 여지가 없어) 그대로 한 줄로 받는다.
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list) and all(isinstance(x, str) for x in raw):
+        return raw
+    return None
 
 # 구조화 출력(JSON) 스키마 — 줄바꿈·불릿 파싱에 의존하지 않도록 배열로 받는다.
 _SCHEMA = {
@@ -229,16 +258,16 @@ class Summarizer:
             self._throttle(deadline)
 
             # 대기 중에 마감이 지났으면 새 소켓을 열지 않는다.
-            timeout = self.cfg.timeout_sec
+            budget = self.cfg.timeout_sec
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError(last_error or "요약 시간예산 소진")
-                timeout = min(timeout, remaining)
+                budget = min(budget, remaining)
 
             self._last_call = time.monotonic()
             resp = self.session.post(
-                url, headers=headers, json=payload, timeout=timeout
+                url, headers=headers, json=payload, timeout=_split_timeout(budget)
             )
             if resp.status_code == 200:
                 return resp.json()
@@ -308,24 +337,27 @@ class Summarizer:
                 log.info("Gemini 응답 본문 없음 (finishReason=%s)", reason)
             return []
 
-        lines: list[str] = []
         try:
             parsed = json.loads(text)
-            if isinstance(parsed, dict):
-                raw = parsed.get("summary")
-            else:
-                raw = parsed
-            if isinstance(raw, str):
-                raw = [raw]
-            if isinstance(raw, Iterable):
-                lines = [str(x) for x in raw]
-        except (json.JSONDecodeError, TypeError):
-            # 스키마를 지키지 못한 응답 — 줄 단위로 폴백 파싱
-            lines = text.splitlines()
+        except json.JSONDecodeError:
+            # 애초에 JSON 이 아니면 평문 요약일 가능성이 높다 — 줄 단위로 폴백 파싱.
+            return self._clean(text.splitlines())
 
+        raw = parsed.get("summary") if isinstance(parsed, dict) else parsed
+        lines = _as_sentences(raw)
+        if lines is None:
+            # JSON 이긴 한데 요청한 스키마(문자열 배열)가 아니다. 이때 줄 단위 폴백을
+            # 하면 JSON 조각이 그대로 메일에 실리고, 무턱대고 순회하면 dict 의 '키'가
+            # 요약문인 양 발행된다. 버리고 원문 발췌로 넘긴다.
+            log.info("Gemini 응답이 요청 스키마(문자열 배열)와 달라 요약을 버립니다: %.120s", text)
+            return []
+        return self._clean(lines)
+
+    def _clean(self, lines: list[str]) -> list[str]:
+        """공백 정리 + 목록 표식 제거 + 설정된 줄 수로 절단."""
         out: list[str] = []
         for line in lines:
-            s = " ".join(str(line).split())
+            s = " ".join(line.split())
             s = _LIST_PREFIX.sub("", s, count=1).strip()
             if s:
                 out.append(s)

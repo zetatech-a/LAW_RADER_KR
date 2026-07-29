@@ -189,7 +189,82 @@ def test_generate_caps_timeout_by_remaining_budget():
     deadline = time.monotonic() + 3.0
     s.summarize(_post(), deadline)
     # 45초가 아니라 남은 3초 이내로 잘려야 한다
-    assert 0 < sess.timeouts[0] <= 3.0
+    connect, read = sess.timeouts[0]
+    assert 0 < connect + read <= 3.0
+
+
+def test_timeout_is_split_so_phases_sum_within_budget():
+    # requests 에 스칼라를 주면 연결·응답대기에 '각각' 적용돼 최대 2배가 된다.
+    # 두 단계의 합이 예산을 넘지 않도록 튜플로 쪼개 넘긴다.
+    from src.summarizer import _CONNECT_TIMEOUT_CAP, _split_timeout
+
+    for budget in (0.5, 3.0, 10.0, 45.0, 300.0):
+        connect, read = _split_timeout(budget)
+        assert connect > 0 and read > 0
+        assert connect + read <= budget + 1e-9
+        assert connect <= _CONNECT_TIMEOUT_CAP
+
+    # 예산이 넉넉하면 연결은 상한까지만 쓰고 나머지는 응답 대기에 준다
+    connect, read = _split_timeout(45.0)
+    assert connect == _CONNECT_TIMEOUT_CAP
+    assert read == 45.0 - _CONNECT_TIMEOUT_CAP
+
+
+def test_generate_passes_timeout_tuple_to_requests():
+    s = Summarizer(_cfg(timeout_sec=45))
+    sess = _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}'))])
+    s.summarize(_post())
+    assert isinstance(sess.timeouts[0], tuple)   # 스칼라를 넘기면 2배로 늘어난다
+    assert sum(sess.timeouts[0]) <= 45.0
+
+
+# --- 스키마를 어긴 응답 처리 ---
+
+
+def test_rejects_dict_shaped_summary():
+    # {"summary": {"first": "금리 인하"}} 를 순회하면 dict 의 '키'가 요약문이 된다.
+    s = Summarizer(_cfg())
+    s._generate = lambda prompt, deadline=None: _envelope(
+        '{"summary": {"first": "금리 인하", "second": "시행 연기"}}'
+    )
+    assert s.summarize(_post()) == []   # 버리고 원문 발췌로
+
+
+def test_rejects_list_with_non_strings():
+    s = Summarizer(_cfg())
+    s._generate = lambda prompt, deadline=None: _envelope(
+        '{"summary": ["정상 문장임", 1, null, {"a": "b"}]}'
+    )
+    assert s.summarize(_post()) == []   # "1"·"None" 이 요약문으로 찍히면 안 된다
+
+
+def test_rejects_json_scalar_and_null_summary():
+    s = Summarizer(_cfg())
+    for body in ('{"summary": null}', '{"summary": 3}', '{"summary": true}', "42"):
+        s._generate = lambda prompt, deadline=None, b=body: _envelope(b)
+        assert s.summarize(_post()) == [], body
+
+
+def test_accepts_bare_string_summary():
+    # 스키마 위반이지만 내용은 모델이 쓴 문장이라 구조적 잡음이 섞일 여지가 없다.
+    s = Summarizer(_cfg())
+    s._generate = lambda prompt, deadline=None: _envelope('{"summary": "한 문장 요약함"}')
+    assert s.summarize(_post()) == ["한 문장 요약함"]
+
+
+def test_accepts_top_level_string_array():
+    s = Summarizer(_cfg())
+    s._generate = lambda prompt, deadline=None: _envelope('["첫째임", "둘째임"]')
+    assert s.summarize(_post()) == ["첫째임", "둘째임"]
+
+
+def test_malformed_json_object_does_not_leak_into_mail():
+    # 스키마 위반 JSON 을 줄 단위로 폴백 파싱하면 JSON 조각이 메일에 실린다.
+    s = Summarizer(_cfg())
+    s._generate = lambda prompt, deadline=None: _envelope('{"summary": {"a": "b"}}')
+    out = s.summarize(_post())
+    assert out == []
+    assert not any("{" in line or "summary" in line for line in out)
 
 
 def test_generate_refuses_call_past_deadline():
@@ -516,8 +591,8 @@ def test_send_digest_skips_check_when_nothing_to_send():
     send_digest(_email_cfg(smtp_user="", smtp_password="", recipients=[]), {})
 
 
-def _run_with_one_new_post(tmp_path, monkeypatch, dry_run=False):
-    """신규 1건이 잡힌 상태로 main.run() 을 돌리고 (반환코드, 요약호출수) 를 준다."""
+def _run_with_one_new_post(tmp_path, monkeypatch, dry_run=False, smtp_error=None):
+    """신규 1건이 잡힌 상태로 main.run() 을 돌리고 (반환코드, 호출횟수) 를 준다."""
     from src import main as main_mod
     from src.scrapers.base import CollectResult
     from src.state import State
@@ -536,16 +611,21 @@ def _run_with_one_new_post(tmp_path, monkeypatch, dry_run=False):
         def enrich(self, post):
             return None
 
-    calls = {"summarize": 0, "send": 0}
+    calls = {"summarize": 0, "send": 0, "verify": 0, "order": []}
+
+    def _record(name):
+        def _fn(cfg, *rest):
+            calls[name] += 1
+            calls["order"].append(name)
+            if name == "verify" and smtp_error is not None:
+                raise smtp_error
+
+        return _fn
+
+    monkeypatch.setattr(main_mod, "verify_smtp_login", _record("verify"))
+    monkeypatch.setattr(main_mod, "summarize_posts", _record("summarize"))
+    monkeypatch.setattr(main_mod, "send_digest", _record("send"))
     monkeypatch.setattr(main_mod, "build_scraper", lambda src, fetcher: _FakeScraper())
-    monkeypatch.setattr(
-        main_mod, "summarize_posts",
-        lambda cfg, posts: calls.__setitem__("summarize", calls["summarize"] + 1),
-    )
-    monkeypatch.setattr(
-        main_mod, "send_digest",
-        lambda cfg, posts: calls.__setitem__("send", calls["send"] + 1),
-    )
 
     argv = ["--state", str(state_path), "--only", "fss_press"]
     if dry_run:
@@ -561,8 +641,7 @@ def test_run_skips_llm_when_mail_settings_missing(tmp_path, monkeypatch):
 
     rc, calls = _run_with_one_new_post(tmp_path, monkeypatch)
     assert rc == 1
-    assert calls["summarize"] == 0
-    assert calls["send"] == 0
+    assert calls["order"] == []   # 설정이 비면 SMTP 접속조차 시도하지 않는다
 
 
 def test_run_summarizes_when_mail_settings_present(tmp_path, monkeypatch):
@@ -576,6 +655,38 @@ def test_run_summarizes_when_mail_settings_present(tmp_path, monkeypatch):
     assert calls["send"] == 1
 
 
+def test_run_skips_llm_when_smtp_login_fails(tmp_path, monkeypatch):
+    # 설정값은 다 채워져 있지만 앱 비밀번호 폐기·호스트 도달 불가로 로그인이 안 되는
+    # 경우. 존재 검사만으로는 통과하므로 실제 로그인까지 확인해야 할당량이 안 샌다.
+    import smtplib
+
+    monkeypatch.setenv("SMTP_USER", "sender@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "revoked")
+    monkeypatch.setenv("MAIL_TO", "to@example.com")
+
+    rc, calls = _run_with_one_new_post(
+        tmp_path,
+        monkeypatch,
+        smtp_error=smtplib.SMTPAuthenticationError(535, b"Username and Password not accepted"),
+    )
+    assert rc == 1
+    assert calls["verify"] == 1
+    assert calls["summarize"] == 0   # 요약에 할당량을 쓰지 않는다
+    assert calls["send"] == 0
+
+
+def test_run_verifies_smtp_before_summarizing(tmp_path, monkeypatch):
+    # 순서 보장: 검증(verify) → 요약(summarize) → 발송(send).
+    # 검증이 요약보다 뒤로 가면 할당량을 쓰고 나서야 발송 불가를 알게 된다.
+    monkeypatch.setenv("SMTP_USER", "sender@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "pw")
+    monkeypatch.setenv("MAIL_TO", "to@example.com")
+
+    rc, calls = _run_with_one_new_post(tmp_path, monkeypatch)
+    assert rc == 0
+    assert calls["order"] == ["verify", "summarize", "send"]
+
+
 def test_run_dry_run_still_summarizes_without_mail_settings(tmp_path, monkeypatch):
     # --dry-run 은 원래 발송하지 않으므로 기존대로 요약을 확인할 수 있어야 한다.
     for var in ("SMTP_USER", "SMTP_PASSWORD", "MAIL_TO", "MAIL_FROM"):
@@ -583,8 +694,7 @@ def test_run_dry_run_still_summarizes_without_mail_settings(tmp_path, monkeypatc
 
     rc, calls = _run_with_one_new_post(tmp_path, monkeypatch, dry_run=True)
     assert rc == 0
-    assert calls["summarize"] == 1
-    assert calls["send"] == 0
+    assert calls["order"] == ["summarize"]   # 발송 검증·발송은 건너뛴다
 
 
 # --- 메일 렌더 ---

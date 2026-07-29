@@ -241,6 +241,23 @@ def missing_email_settings(cfg: EmailConfig) -> list[str]:
     return missing
 
 
+def verify_smtp_login(cfg: EmailConfig) -> None:
+    """실제 발송 전에 SMTP 연결·인증만 확인한다(실패 시 예외).
+
+    설정값이 '채워져 있는지'만 보는 missing_email_settings 로는 앱 비밀번호 폐기,
+    호스트 도달 불가, 포트/TLS 오설정을 잡을 수 없다. 그대로 두면 요약을 다 돌린
+    뒤 발송에서 실패하고, 실패는 신규를 seen 으로 확정하지 않으므로 매 실행이 같은
+    글을 다시 요약해 무료 할당량을 계속 태운다. 그래서 요약 전에 한 번 로그인해 본다.
+
+    연결을 열어둔 채 요약(최대 budget_sec)을 돌리면 서버가 유휴 연결을 끊을 수
+    있으므로, 확인 후 바로 닫고 발송 때 새로 연결한다(핸드셰이크 1회 추가는 무시할
+    수준이고, 유휴 끊김으로 발송이 실패하는 것보다 안전하다).
+    """
+    with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=30) as server:
+        server.starttls()
+        server.login(cfg.smtp_user, cfg.smtp_password)
+
+
 def send_digest(cfg: EmailConfig, posts_by_source: dict[str, list[Post]]) -> None:
     total = sum(len(v) for v in posts_by_source.values())
     if total == 0:

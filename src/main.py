@@ -23,7 +23,7 @@ import sys
 from .config import load_config
 from .fetcher import Fetcher
 from .models import Post
-from .notifier import missing_email_settings, send_digest
+from .notifier import missing_email_settings, send_digest, verify_smtp_login
 from .scrapers import build_scraper
 from .state import State
 from .summarizer import summarize_posts
@@ -165,7 +165,7 @@ def run(argv=None) -> int:
         return 1
 
     # 어차피 못 보낼 메일이면 LLM 을 호출하기 전에 멈춘다. 발송 실패는 신규를 seen 으로
-    # 확정하지 않으므로, 설정이 빠진 채 방치되면 매 실행이 같은 글을 다시 요약하며
+    # 확정하지 않으므로, 발송이 막힌 채 방치되면 매 실행이 같은 글을 다시 요약하며
     # 무료 할당량과 시간예산만 반복 소모한다. (--dry-run 은 원래 발송하지 않으므로 제외)
     if total > 0 and not args.dry_run:
         missing = missing_email_settings(cfg.email)
@@ -174,6 +174,19 @@ def run(argv=None) -> int:
                 "메일 설정 누락(%s) — 발송이 불가능하므로 요약·발송을 건너뜁니다. "
                 "신규 %d건은 미확정으로 남아 설정 후 다음 실행에 발송됩니다.",
                 ", ".join(missing),
+                total,
+            )
+            return 1
+        # 값이 채워져 있어도 앱 비밀번호 폐기·호스트 도달 불가면 발송은 실패한다.
+        # 요약에 할당량을 쓰기 전에 실제로 로그인해 본다.
+        try:
+            verify_smtp_login(cfg.email)
+        except Exception as e:  # noqa: BLE001
+            log.error(
+                "SMTP 연결/인증 실패(%s: %s) — 발송이 불가능하므로 요약·발송을 "
+                "건너뜁니다. 신규 %d건은 미확정으로 남아 복구 후 다음 실행에 발송됩니다.",
+                type(e).__name__,
+                e,
                 total,
             )
             return 1

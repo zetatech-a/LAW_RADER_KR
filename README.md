@@ -57,7 +57,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 | `SMTP_PORT` | `587` (기본값과 같으면 생략 가능) |
 | `MAIL_FROM` | 발신 표시 주소(보통 `SMTP_USER`와 동일) |
 
-> 필수 Secret(`SMTP_USER`·`SMTP_PASSWORD`·`MAIL_TO`)이 하나라도 비어 있으면 실행이 **AI 요약을 호출하기 전에** 실패로 끝납니다. 어차피 보낼 수 없는 메일에 Gemini 무료 할당량을 쓰지 않기 위함이며, 신규 글은 미확정으로 남아 설정을 채운 다음 실행에 그대로 발송됩니다.
+> 신규 글이 있으면 **AI 요약을 호출하기 전에** ① 필수 Secret(`SMTP_USER`·`SMTP_PASSWORD`·`MAIL_TO`)이 채워졌는지, ② 그 값으로 실제 SMTP 로그인이 되는지를 먼저 확인합니다. 둘 중 하나라도 실패하면 요약 없이 즉시 실패로 끝냅니다 — 어차피 보낼 수 없는 메일에 Gemini 무료 할당량을 쓰지 않기 위함입니다. 앱 비밀번호를 폐기했거나 SMTP 호스트에 닿지 못하는 경우가 여기 걸립니다. 신규 글은 미확정으로 남아 복구한 다음 실행에 그대로 발송됩니다.
 
 ### 3) 수신자 설정
 수신자 주소는 **저장소에 커밋하지 않습니다.** `MAIL_TO` Secret(여러 명은 `a@x.com, b@y.com`)으로만 지정하세요. 로컬 실행 시에는 `.env` 의 `MAIL_TO` 를 사용합니다(`.env` 는 커밋 제외).
