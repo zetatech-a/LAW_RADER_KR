@@ -125,6 +125,8 @@ npm run deploy -- --secrets-file .dev.vars
 | `llm.lines` | 3 | 요약 문장 수 |
 | `llm.max_posts` | 40 | 한 실행에서 요약할 최대 글 수(무료 티어 일일 한도 보호). 초과분은 원문 발췌 |
 | `llm.rpm` | 10 | 분당 요청 상한. 이 간격에 맞춰 호출을 벌립니다 |
+| `llm.max_consecutive_failures` | 3 | 연속 실패가 이만큼 쌓이면 요약을 중단하고 남은 글은 원문 발췌로 발송(LLM 전면 장애 시 메일 지연 방지) |
+| `llm.budget_sec` | 240 | 요약 단계 전체 시간예산(초). 초과 시 남은 글은 원문 발췌로 발송 |
 
 ## 알려진 한계
 

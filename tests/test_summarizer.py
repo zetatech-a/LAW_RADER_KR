@@ -4,6 +4,7 @@
 """
 import os
 import sys
+import time
 from copy import deepcopy
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -124,6 +125,109 @@ def test_summarize_all_fills_summary_and_survives_failure():
     assert bad.summary == []      # 실패해도 예외 없이 빈 채로 남는다
     assert nobody.summary == []   # 본문 없는 글은 호출 대상 아님
     assert calls["n"] == 2        # 본문 있는 2건만 호출
+
+
+def test_parse_keeps_leading_numbers():
+    # 목록 표식만 떼고 실제 수치(시행일·금액·비율)는 절대 건드리지 않는다.
+    s = Summarizer(_cfg(lines=5))
+    s._generate = lambda prompt: _envelope(
+        '{"summary": ["2026년 1월부터 시행함", "1조원 규모로 확대함", '
+        '"3.5% 인상함", "2) 제재 대상은 5개사임", "- 의견제출 기한은 9월 7일임"]}'
+    )
+    assert s.summarize(_post()) == [
+        "2026년 1월부터 시행함",
+        "1조원 규모로 확대함",
+        "3.5% 인상함",
+        "제재 대상은 5개사임",
+        "의견제출 기한은 9월 7일임",
+    ]
+
+
+def test_parse_strips_only_recognized_list_markers():
+    s = Summarizer(_cfg(lines=6))
+    s._generate = lambda prompt: _envelope(
+        "1. 첫째 줄임\n2) 둘째 줄임\n(3) 셋째 줄임\n• 넷째 줄임\n"
+        "10.5억원 규모임\n2026.1.1. 시행함"
+    )
+    assert s.summarize(_post()) == [
+        "첫째 줄임",
+        "둘째 줄임",
+        "셋째 줄임",
+        "넷째 줄임",
+        "10.5억원 규모임",   # 마침표 뒤 공백이 없으므로 목록 표식이 아님
+        "2026.1.1. 시행함",  # 연도는 두 자리 초과 → 목록 표식이 아님
+    ]
+
+
+def test_max_posts_counts_only_eligible_bodies():
+    # 상한보다 앞자리에 '너무 짧은 본문'이 있어도 할당량을 소모하지 않고,
+    # 뒤쪽의 실제 요약 대상이 정상적으로 요약된다.
+    short = [
+        _post(post_id=f"s{i}", url=f"https://example.com/s{i}", body="짧음")
+        for i in range(3)
+    ]
+    real = [
+        _post(post_id=f"r{i}", url=f"https://example.com/r{i}") for i in range(2)
+    ]
+    s = Summarizer(_cfg(min_body_chars=50, max_posts=2))
+    calls = {"n": 0}
+
+    def _generate(prompt):
+        calls["n"] += 1
+        return _envelope('{"summary": ["요약함"]}')
+
+    s._generate = _generate
+    assert s.summarize_all({"금융위 · 보도자료": short + real}) == 2
+    assert calls["n"] == 2
+    assert all(p.summary == [] for p in short)
+    assert all(p.summary == ["요약함"] for p in real)
+
+
+def test_circuit_breaker_stops_after_consecutive_failures():
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)]
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+    calls = {"n": 0}
+
+    def _generate(prompt):
+        calls["n"] += 1
+        raise RuntimeError("HTTP 503")
+
+    s._generate = _generate
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
+    assert calls["n"] == 3   # 10건 전부가 아니라 3건에서 멈춘다
+    assert all(p.summary == [] for p in posts)
+
+
+def test_circuit_breaker_resets_on_success():
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(6)]
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+    calls = {"n": 0}
+
+    def _generate(prompt):
+        calls["n"] += 1
+        # 실패, 실패, 성공, 실패, 실패, 성공 — 연속 2회를 넘지 않으므로 끝까지 간다
+        if calls["n"] % 3 != 0:
+            raise RuntimeError("일시 오류")
+        return _envelope('{"summary": ["요약함"]}')
+
+    s._generate = _generate
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 2
+    assert calls["n"] == 6
+
+
+def test_time_budget_stops_summarizing():
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(5)]
+    s = Summarizer(_cfg(budget_sec=0.05, max_consecutive_failures=0))
+    calls = {"n": 0}
+
+    def _generate(prompt):
+        calls["n"] += 1
+        time.sleep(0.04)
+        return _envelope('{"summary": ["요약함"]}')
+
+    s._generate = _generate
+    s.summarize_all({"금융위 · 보도자료": posts})
+    assert calls["n"] < 5   # 시간예산에 걸려 전부 돌지 않는다
 
 
 def test_summarize_all_respects_max_posts():
@@ -258,6 +362,9 @@ def test_email_shows_summary_instead_of_body():
     text = build_text(grouped)
     assert "첫째 요약" in text
     assert "원문 본문 발췌가 여기 나온다" not in text
+    # text/plain 만 보는 수신자도 AI 생성물임을 알 수 있어야 한다
+    assert "[AI 3줄 요약]" in text
+    assert "생성형 AI" in text
 
 
 def test_email_falls_back_to_body_without_summary():
@@ -269,7 +376,18 @@ def test_email_falls_back_to_body_without_summary():
     assert ">AI 3줄 요약</div>" not in html
     assert "생성형 AI" not in html   # 요약이 없으면 푸터 유의사항도 붙지 않는다
 
-    assert "원문 본문 발췌가 여기 나온다" in build_text(grouped)
+    text = build_text(grouped)
+    assert "원문 본문 발췌가 여기 나온다" in text
+    assert "[원문 발췌]" in text
+    assert "생성형 AI" not in text   # 요약이 없으면 텍스트 파트에도 유의사항이 없다
+
+
+def test_text_label_matches_actual_line_count():
+    p = _post()
+    p.summary = ["한 줄만 나왔음"]
+    text = build_text({p.source_name: [p]})
+    assert "[AI 1줄 요약]" in text
+    assert ">AI 1줄 요약</div>" in build_html({p.source_name: [p]})
 
 
 def test_email_escapes_summary_html():

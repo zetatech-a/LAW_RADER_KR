@@ -44,6 +44,23 @@ def _snippet(text: str, limit: int = 220) -> str:
     return s[:limit] + " …" if len(s) > limit else s
 
 
+# HTML·텍스트 두 파트가 같은 문구를 쓰도록 한 곳에 둔다. text/plain 만 보는
+# 수신자에게도 동일한 유의사항이 전달되어야 한다.
+_AI_NOTICE = (
+    "AI 요약은 생성형 AI가 원문을 정리한 것이라 부정확하거나 누락이 있을 수 있습니다. "
+    "판단 전 반드시 원문을 확인하세요."
+)
+
+
+def _summary_label(p: Post) -> str:
+    """요약 블록 제목. 실제 줄 수를 그대로 표기한다(config 의 lines 를 바꿔도 맞음)."""
+    return f"AI {len(p.summary)}줄 요약"
+
+
+def _has_summary(posts_by_source: dict[str, list[Post]]) -> bool:
+    return any(p.summary for posts in posts_by_source.values() for p in posts)
+
+
 def _summary_block(p: Post, accent: str) -> str:
     """본문 영역. LLM 3줄 요약이 있으면 그것을, 없으면 원문 발췌를 보여준다.
 
@@ -62,7 +79,7 @@ def _summary_block(p: Post, accent: str) -> str:
             "<div style='margin:10px 0 0;padding:10px 12px;background:#f8fafc;"
             "border:1px solid #e2e8f0;border-radius:6px'>"
             f"<div style='margin:0 0 6px;font-size:10px;letter-spacing:.8px;"
-            f"font-weight:700;color:{accent}'>AI 3줄 요약</div>"
+            f"font-weight:700;color:{accent}'>{_esc(_summary_label(p))}</div>"
             "<table role='presentation' cellpadding='0' cellspacing='0' "
             f"style='border-collapse:collapse'>{items}</table>"
             "</div>"
@@ -169,13 +186,7 @@ def build_html(posts_by_source: dict[str, list[Post]]) -> str:
 
     parts.append("</td></tr>")
     # ── 푸터. AI 요약이 실린 메일에만 요약 관련 유의사항을 덧붙인다.
-    has_summary = any(p.summary for posts in posts_by_source.values() for p in posts)
-    ai_note = (
-        "요약은 생성형 AI가 원문을 3줄로 정리한 것이라 부정확할 수 있습니다. "
-        "판단 전 반드시 원문을 확인하세요.<br>"
-        if has_summary
-        else ""
-    )
+    ai_note = f"{_esc(_AI_NOTICE)}<br>" if _has_summary(posts_by_source) else ""
     parts.append(
         "<tr><td style='padding:16px 24px 22px;background:#f8fafc;"
         "border-radius:0 0 10px 10px;border-top:1px solid #e2e8f0'>"
@@ -201,13 +212,20 @@ def build_text(posts_by_source: dict[str, list[Post]]) -> str:
         for p in posts:
             lines.append(f"  - {p.title}  {p.date}".rstrip())
             if p.summary:
+                # text/plain 파트만 보는 수신자도 이 문장이 AI 생성물임을 알 수 있어야
+                # 한다(원문 발췌와 혼동 금지). 하단 유의사항도 함께 붙는다.
+                lines.append(f"    [{_summary_label(p)}]")
                 for s in p.summary:
                     lines.append(f"      · {s}")
             elif p.body:
+                lines.append("    [원문 발췌]")
                 lines.append(f"      {_snippet(p.body)}")
             lines.append(f"    {p.url}")
             for a in p.attachments:
                 lines.append(f"      첨부: {a.filename} ({a.url})")
+
+    if _has_summary(posts_by_source):
+        lines.append(f"\n※ {_AI_NOTICE}")
     return "\n".join(lines)
 
 

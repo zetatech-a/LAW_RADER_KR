@@ -52,6 +52,11 @@ class LLMConfig:
     timeout_sec: float
     max_retries: int
     retry_backoff_sec: float
+    # 서킷 브레이커: 연속 실패가 이만큼 쌓이면 남은 글은 호출 없이 원문 발췌로 넘긴다
+    # (0=무제한). LLM 전면 장애 때 메일이 크게 지연되는 것을 막는다.
+    max_consecutive_failures: int = 3
+    # 요약 단계 전체 시간예산(초, 0=무제한). 초과하면 남은 글은 원문 발췌로 넘긴다.
+    budget_sec: float = 240.0
     api_key: str = ""
 
 
@@ -125,6 +130,8 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         timeout_sec=float(lm.get("timeout_sec", 45)),
         max_retries=int(lm.get("max_retries", 2)),
         retry_backoff_sec=float(lm.get("retry_backoff_sec", 5)),
+        max_consecutive_failures=int(lm.get("max_consecutive_failures", 3)),
+        budget_sec=float(lm.get("budget_sec", 240)),
         api_key=_env("GEMINI_API_KEY"),
     )
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Iterable
 
@@ -46,6 +47,12 @@ _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가�
 [본문]
 {body}
 """
+
+# 폴백 파싱에서 떼어낼 목록 표식만 좁게 매칭한다.
+#   "- ", "• ", "1. ", "2) ", "(3) "  →  제거
+# 문자 단위 lstrip 을 쓰면 "2026년 1월부터", "1조원", "3.5%" 같은 실제 수치가 잘려
+# 금액·시행일이 훼손되므로 반드시 접두사 패턴으로만 제거한다.
+_LIST_PREFIX = re.compile(r"^(?:[-–—•*·▪◦]+\s*|\(?\d{1,2}[.)]\s+)")
 
 # 구조화 출력(JSON) 스키마 — 줄바꿈·불릿 파싱에 의존하지 않도록 배열로 받는다.
 _SCHEMA = {
@@ -78,9 +85,17 @@ class Summarizer:
         반환값은 요약에 성공한 글 수. 실패는 로그만 남기고 넘어간다(빈 summary →
         메일에서 기존 원문 발췌로 표시).
         """
-        targets = [p for posts in posts_by_source.values() for p in posts if p.body]
+        # 상한을 적용하기 '전에' 실제 호출 대상만 남긴다. 공백뿐이거나 너무 짧아
+        # 어차피 호출하지 않을 글이 앞자리를 차지하면, 정작 요약이 필요한 뒤쪽 글이
+        # 할당량을 남겨두고도 요약되지 않는다.
+        targets = [
+            p
+            for posts in posts_by_source.values()
+            for p in posts
+            if self._prepared_body(p)
+        ]
         if not targets:
-            log.info("요약 대상 없음(본문이 있는 신규 글 없음)")
+            log.info("요약 대상 없음(요약할 만한 본문이 있는 신규 글 없음)")
             return 0
 
         if len(targets) > self.cfg.max_posts:
@@ -93,29 +108,70 @@ class Summarizer:
             )
             targets = targets[: self.cfg.max_posts]
 
+        # 서킷 브레이커: Gemini 가 통째로 죽었을 때 모든 글에 같은 실패를 반복하면
+        # (타임아웃 × 재시도 × 건수) 메일이 크게 지연된다. 연속 실패가 쌓이거나 총
+        # 시간예산을 넘기면 남은 글은 호출 없이 원문 발췌로 넘긴다.
+        deadline = (
+            time.monotonic() + self.cfg.budget_sec if self.cfg.budget_sec > 0 else None
+        )
+        breaker = self.cfg.max_consecutive_failures
+
         ok = 0
-        for post in targets:
+        consecutive = 0
+        attempted = 0
+        for i, post in enumerate(targets):
+            if breaker > 0 and consecutive >= breaker:
+                log.warning(
+                    "연속 %d회 실패 — LLM 장애로 판단해 중단합니다. 남은 %d건은 "
+                    "원문 발췌로 발송됩니다.",
+                    consecutive,
+                    len(targets) - i,
+                )
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                log.warning(
+                    "요약 시간예산(%.0f초) 초과 — 중단합니다. 남은 %d건은 원문 발췌로 "
+                    "발송됩니다.",
+                    self.cfg.budget_sec,
+                    len(targets) - i,
+                )
+                break
+
+            attempted += 1
             try:
                 lines = self.summarize(post)
             except Exception as e:  # noqa: BLE001 — 요약 실패가 메일 발송을 막지 않는다
+                consecutive += 1
                 log.warning("[%s] 요약 실패 %s: %s", post.source_key, post.url, e)
                 continue
+            consecutive = 0
             if lines:
                 post.summary = lines
                 ok += 1
             else:
                 log.info("[%s] 요약 결과 비어 있음 — 원문 발췌 사용: %s", post.source_key, post.url)
 
-        log.info("LLM 요약 완료 %d/%d건 (model=%s)", ok, len(targets), self.cfg.model)
+        log.info(
+            "LLM 요약 완료 %d/%d건 (시도 %d건, model=%s)",
+            ok,
+            len(targets),
+            attempted,
+            self.cfg.model,
+        )
         return ok
+
+    def _prepared_body(self, post: Post) -> str:
+        """호출에 쓸 본문(공백 정규화 + 길이 절단). 요약 대상이 아니면 빈 문자열."""
+        body = " ".join((post.body or "").split())
+        if len(body) < self.cfg.min_body_chars:
+            return ""
+        return body[: self.cfg.max_input_chars]
 
     def summarize(self, post: Post) -> list[str]:
         """게시글 1건을 요약해 문장 리스트를 돌려준다(실패 시 예외)."""
-        body = " ".join((post.body or "").split())
-        if len(body) < self.cfg.min_body_chars:
+        body = self._prepared_body(post)
+        if not body:
             return []
-        if len(body) > self.cfg.max_input_chars:
-            body = body[: self.cfg.max_input_chars]
 
         prompt = _PROMPT.format(
             lines=self.cfg.lines,
@@ -224,7 +280,8 @@ class Summarizer:
 
         out: list[str] = []
         for line in lines:
-            s = " ".join(str(line).split()).lstrip("-•*·0123456789. ").strip()
+            s = " ".join(str(line).split())
+            s = _LIST_PREFIX.sub("", s, count=1).strip()
             if s:
                 out.append(s)
         return out[: self.cfg.lines]
