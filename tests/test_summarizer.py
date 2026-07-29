@@ -7,12 +7,14 @@ import sys
 import time
 from copy import deepcopy
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import EmailConfig, LLMConfig, load_config
 from src.models import Post
 from src.notifier import build_html, build_text, missing_email_settings, send_digest
-from src.summarizer import Summarizer, summarize_posts
+from src.summarizer import Summarizer, SummaryUnavailable, summarize_posts
 
 
 def _cfg(**over) -> LLMConfig:
@@ -218,31 +220,101 @@ def test_generate_passes_timeout_tuple_to_requests():
     assert sum(sess.timeouts[0]) <= 45.0
 
 
-# --- 스키마를 어긴 응답 처리 ---
+# --- 스키마를 어긴 / 잘린 응답 처리 ---
+#
+# 공통 요구사항: 쓸 만한 요약을 못 얻으면 (1) 조각을 메일에 싣지 않고
+# (2) SummaryUnavailable 로 올려 서킷 브레이커가 '실패'로 세게 한다.
+
+
+def _expect_unavailable(response, cfg=None):
+    s = Summarizer(cfg or _cfg())
+    s._generate = lambda prompt, deadline=None: response
+    with pytest.raises(SummaryUnavailable):
+        s.summarize(_post())
 
 
 def test_rejects_dict_shaped_summary():
     # {"summary": {"first": "금리 인하"}} 를 순회하면 dict 의 '키'가 요약문이 된다.
-    s = Summarizer(_cfg())
-    s._generate = lambda prompt, deadline=None: _envelope(
-        '{"summary": {"first": "금리 인하", "second": "시행 연기"}}'
-    )
-    assert s.summarize(_post()) == []   # 버리고 원문 발췌로
+    _expect_unavailable(_envelope('{"summary": {"first": "금리 인하", "second": "시행 연기"}}'))
 
 
 def test_rejects_list_with_non_strings():
-    s = Summarizer(_cfg())
-    s._generate = lambda prompt, deadline=None: _envelope(
-        '{"summary": ["정상 문장임", 1, null, {"a": "b"}]}'
-    )
-    assert s.summarize(_post()) == []   # "1"·"None" 이 요약문으로 찍히면 안 된다
+    # "1"·"None" 이 요약문으로 찍히면 안 된다.
+    _expect_unavailable(_envelope('{"summary": ["정상 문장임", 1, null, {"a": "b"}]}'))
 
 
 def test_rejects_json_scalar_and_null_summary():
-    s = Summarizer(_cfg())
     for body in ('{"summary": null}', '{"summary": 3}', '{"summary": true}', "42"):
+        _expect_unavailable(_envelope(body))
+
+
+def test_rejects_truncated_structured_output():
+    # MAX_TOKENS 등으로 잘린 JSON 을 줄 단위 폴백하면 조각이 그대로 메일에 실린다.
+    for body in (
+        '{"summary": ["첫째 문장",',
+        '{"summary": [',
+        '{"summary": ["첫째 문장", "둘째 문장"',
+        '["첫째 문장",',
+    ):
+        _expect_unavailable(_envelope(body))
+
+
+def test_rejects_nonterminal_finish_reason_even_with_text():
+    # 잘린 응답에 텍스트가 남아 있어도 신뢰할 수 없다.
+    for reason in ("MAX_TOKENS", "SAFETY", "RECITATION"):
+        _expect_unavailable(
+            {
+                "candidates": [
+                    {
+                        "content": {"parts": [{"text": '{"summary": ["첫째 문장",'}]},
+                        "finishReason": reason,
+                    }
+                ]
+            }
+        )
+
+
+def test_rejects_blocked_response_without_text():
+    _expect_unavailable({"candidates": [{"finishReason": "SAFETY"}]})
+    _expect_unavailable({"candidates": []})
+
+
+def test_no_json_fragment_leaks_into_summary():
+    # 어떤 깨진 응답에서도 JSON/펜스 조각이 요약문으로 발행되면 안 된다.
+    broken = [
+        '{"summary": ["첫째 문장",',
+        '{"summary": {"a": "b"}}',
+        '```json\n{"summary": ["첫째 문장",',
+        '```json\n{"summary": [\n```',
+    ]
+    for body in broken:
+        s = Summarizer(_cfg())
         s._generate = lambda prompt, deadline=None, b=body: _envelope(b)
-        assert s.summarize(_post()) == [], body
+        try:
+            out = s.summarize(_post())
+        except SummaryUnavailable:
+            continue
+        assert not any(
+            tok in line for line in out for tok in ("{", "}", "```", "summary")
+        ), (body, out)
+
+
+def test_accepts_fenced_json():
+    # 모델이 ```json 펜스로 감싸 보내도 정상 파싱한다.
+    s = Summarizer(_cfg())
+    s._generate = lambda prompt, deadline=None: _envelope(
+        '```json\n{"summary": ["첫째임", "둘째임"]}\n```'
+    )
+    assert s.summarize(_post()) == ["첫째임", "둘째임"]
+
+
+def test_fenced_prose_falls_back_to_lines_without_fence_markers():
+    # 펜스 안이 JSON 이 아니면 평문 요약으로 보고 줄 단위 폴백하되, 펜스 표식은 뗀다.
+    s = Summarizer(_cfg())
+    s._generate = lambda prompt, deadline=None: _envelope(
+        "```\n- 첫째 줄임\n- 둘째 줄임\n```"
+    )
+    assert s.summarize(_post()) == ["첫째 줄임", "둘째 줄임"]
 
 
 def test_accepts_bare_string_summary():
@@ -258,13 +330,12 @@ def test_accepts_top_level_string_array():
     assert s.summarize(_post()) == ["첫째임", "둘째임"]
 
 
-def test_malformed_json_object_does_not_leak_into_mail():
-    # 스키마 위반 JSON 을 줄 단위로 폴백 파싱하면 JSON 조각이 메일에 실린다.
+def test_empty_summary_array_is_success_not_failure():
+    # "요약할 내용이 없으면 빈 배열" 은 프롬프트가 허용한 정상 응답이다.
+    # 이걸 실패로 세면 멀쩡한 실행에서 브레이커가 열린다.
     s = Summarizer(_cfg())
-    s._generate = lambda prompt, deadline=None: _envelope('{"summary": {"a": "b"}}')
-    out = s.summarize(_post())
-    assert out == []
-    assert not any("{" in line or "summary" in line for line in out)
+    s._generate = lambda prompt, deadline=None: _envelope('{"summary": []}')
+    assert s.summarize(_post()) == []
 
 
 def test_generate_refuses_call_past_deadline():
@@ -430,6 +501,56 @@ def test_time_budget_stops_summarizing():
     assert calls["n"] < 5   # 시간예산에 걸려 전부 돌지 않는다
 
 
+def test_cap_is_spread_across_sources_not_config_order():
+    # 앞쪽 소스가 상한을 다 먹으면 뒤쪽 소스는 글이 더 최신이어도 전부 원문 발췌로
+    # 나간다. 상한은 소스별로 고르게 배분되어야 한다.
+    first = [
+        _post(source_key="fsc_press", source_name="금융위 · 보도자료",
+              post_id=f"a{i}", url=f"https://example.com/a{i}")
+        for i in range(10)
+    ]
+    later = [
+        _post(source_key="assembly_bill", source_name="의안정보시스템 · 계류의안",
+              post_id=f"b{i}", url=f"https://example.com/b{i}")
+        for i in range(3)
+    ]
+    s = Summarizer(_cfg(max_posts=6))
+    s._generate = lambda prompt, deadline=None: _envelope('{"summary": ["요약함"]}')
+
+    s.summarize_all({
+        "금융위 · 보도자료": first,          # config 앞쪽 소스
+        "의안정보시스템 · 계류의안": later,   # 뒤쪽 소스
+    })
+
+    assert sum(1 for p in first if p.summary) + sum(1 for p in later if p.summary) == 6
+    # 뒤쪽 소스도 요약을 받는다(예전에는 0건이었다)
+    assert sum(1 for p in later if p.summary) == 3
+    # 각 소스 안에서는 앞(최신)부터 채워진다
+    assert [bool(p.summary) for p in later] == [True, True, True]
+    assert [bool(p.summary) for p in first][:3] == [True, True, True]
+
+
+def test_cap_spread_falls_back_to_one_source_when_alone():
+    # 소스가 하나뿐이면 그 소스가 상한을 다 쓴다(배분할 상대가 없음).
+    only = [
+        _post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)
+    ]
+    s = Summarizer(_cfg(max_posts=4))
+    s._generate = lambda prompt, deadline=None: _envelope('{"summary": ["요약함"]}')
+    s.summarize_all({"금융위 · 보도자료": only})
+    assert [bool(p.summary) for p in only] == [True] * 4 + [False] * 6
+
+
+def test_interleave_preserves_within_source_order():
+    from src.summarizer import _interleave
+
+    a = [_post(post_id=f"a{i}") for i in range(3)]
+    b = [_post(post_id=f"b{i}") for i in range(1)]
+    c = [_post(post_id=f"c{i}") for i in range(2)]
+    got = [p.post_id for p in _interleave([a, b, c])]
+    assert got == ["a0", "b0", "c0", "a1", "c1", "a2"]
+
+
 def test_summarize_all_respects_max_posts():
     posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(5)]
     s = Summarizer(_cfg(max_posts=2))
@@ -455,10 +576,35 @@ def test_summarize_posts_skips_when_disabled():
     assert summarize_posts(_cfg(enabled=False), {"x": [_post()]}) == 0
 
 
-def test_blocked_response_returns_empty():
-    s = Summarizer(_cfg())
-    s._generate = lambda prompt, deadline=None: {"candidates": [{"finishReason": "SAFETY"}]}
-    assert s.summarize(_post()) == []
+def test_blocked_responses_trip_the_circuit_breaker():
+    # 전량 차단 시 응답이 200 이라 '성공'으로 세면 브레이커가 안 열려 40건을 다 태운다.
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)]
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+    calls = {"n": 0}
+
+    def _generate(prompt, deadline=None):
+        calls["n"] += 1
+        return {"candidates": [{"finishReason": "SAFETY"}]}
+
+    s._generate = _generate
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
+    assert calls["n"] == 3                          # 10건 전부가 아니라 3건에서 멈춤
+    assert all(p.summary == [] for p in posts)      # 원문 발췌 폴백은 그대로
+
+
+def test_empty_array_responses_do_not_trip_the_breaker():
+    # 정상 종료 + 빈 배열은 실패가 아니므로 끝까지 진행해야 한다.
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(6)]
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+    calls = {"n": 0}
+
+    def _generate(prompt, deadline=None):
+        calls["n"] += 1
+        return _envelope('{"summary": []}')
+
+    s._generate = _generate
+    s.summarize_all({"금융위 · 보도자료": posts})
+    assert calls["n"] == 6
 
 
 # --- HTTP 호출 동작 ---

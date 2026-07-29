@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import time
+from itertools import zip_longest
 
 import requests
 
@@ -77,6 +78,44 @@ _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가�
 _LIST_PREFIX = re.compile(r"^(?:[-–—]+\s+|[•*·▪◦]+\s*|\(?\d{1,2}[.)]\s+)")
 
 
+class SummaryUnavailable(RuntimeError):
+    """호출은 됐지만 쓸 수 있는 요약을 얻지 못함(차단·잘림·스키마 위반).
+
+    서킷 브레이커가 '실패'로 세도록 예외로 올린다 — 전량 차단 같은 상황에서 성공으로
+    세면 브레이커가 열리지 않는다.
+    """
+
+
+def _unfence(text: str) -> str:
+    """마크다운 코드펜스(```json … ```)를 벗긴다.
+
+    닫는 펜스가 없는(=잘린) 응답도 처리해야 한다. 펜스 표식이 남으면 폴백 파싱에서
+    그대로 메일 본문에 실린다.
+    """
+    s = (text or "").strip()
+    if not s.startswith("```"):
+        return s
+    s = s.split("\n", 1)[1] if "\n" in s else ""
+    s = s.rstrip()
+    if s.endswith("```"):
+        s = s[:-3]
+    return s.strip()
+
+
+def _interleave(groups: list[list[Post]]) -> list[Post]:
+    """소스별 목록을 번갈아 한 줄로 편다(각 소스 안에서는 원래 순서=최신순 유지).
+
+    단순히 이어붙이면 요약 상한이 config 의 소스 순서대로 소진되어, 앞쪽 소스 하나가
+    상한을 다 먹으면 뒤쪽 소스는 글이 더 최신이어도 전부 원문 발췌로 나간다.
+    (게시일 문자열은 소스마다 형식이 달라 전역 최신순 정렬은 신뢰할 수 없으므로,
+     소스 간에는 라운드로빈으로 고르게 배분한다.)
+    """
+    out: list[Post] = []
+    for row in zip_longest(*groups):
+        out.extend(p for p in row if p is not None)
+    return out
+
+
 def _as_sentences(raw) -> list[str] | None:
     """요청한 스키마(문자열 배열)일 때만 문장 리스트로 받아들인다.
 
@@ -126,20 +165,23 @@ class Summarizer:
         # 상한을 적용하기 '전에' 실제 호출 대상만 남긴다. 공백뿐이거나 너무 짧아
         # 어차피 호출하지 않을 글이 앞자리를 차지하면, 정작 요약이 필요한 뒤쪽 글이
         # 할당량을 남겨두고도 요약되지 않는다.
-        targets = [
-            p
+        groups = [
+            [p for p in posts if self._prepared_body(p)]
             for posts in posts_by_source.values()
-            for p in posts
-            if self._prepared_body(p)
         ]
-        if not targets:
+        groups = [g for g in groups if g]
+        if not groups:
             log.info("요약 대상 없음(요약할 만한 본문이 있는 신규 글 없음)")
             return 0
+
+        # 소스별로 번갈아 뽑는다. 그냥 이어붙이면 config 앞쪽 소스가 상한을 다 먹어,
+        # 뒤쪽 소스는 글이 더 최신이어도 요약이 하나도 없는 채로 발송된다.
+        targets = _interleave(groups)
 
         if len(targets) > self.cfg.max_posts:
             # 무료 티어 일일 한도 보호. 초과분은 요약 없이(원문 발췌로) 발송된다.
             log.warning(
-                "요약 대상 %d건 — 상한(%d)을 넘어 최신 %d건만 요약합니다.",
+                "요약 대상 %d건 — 상한(%d)을 넘어 소스별로 고르게 %d건만 요약합니다.",
                 len(targets),
                 self.cfg.max_posts,
                 self.cfg.max_posts,
@@ -325,33 +367,48 @@ class Summarizer:
             time.sleep(wait)
 
     def _parse(self, data: dict) -> list[str]:
-        """응답 봉투에서 요약 문장 리스트를 뽑는다."""
-        text = self._response_text(data)
-        if not text:
-            # 안전필터 차단 등으로 후보가 비는 경우
-            reason = ""
-            for cand in data.get("candidates") or []:
-                reason = cand.get("finishReason") or ""
-                break
-            if reason and reason != "STOP":
-                log.info("Gemini 응답 본문 없음 (finishReason=%s)", reason)
-            return []
+        """응답에서 요약 문장 리스트를 뽑는다.
 
+        쓸 만한 요약을 얻지 못하면 SummaryUnavailable 을 던진다. 호출은 됐지만 결과가
+        없는 상태(차단·잘림·스키마 위반)를 '성공'으로 세면, 서비스가 모든 요청을
+        막을 때 서킷 브레이커가 열리지 않아 상한(max_posts)까지 전부 태우게 된다.
+        어느 경우든 post.summary 는 비어 있으므로 메일은 원문 발췌로 나간다.
+        """
+        reason = self._finish_reason(data)
+        # STOP 이 아니면 안전필터 차단(SAFETY)이나 토큰 초과(MAX_TOKENS)로 중간에
+        # 끊긴 응답이다. 남아 있는 텍스트는 조각이라 신뢰할 수 없다.
+        if reason and reason != "STOP":
+            raise SummaryUnavailable(f"응답이 정상 종료되지 않음(finishReason={reason})")
+
+        body = _unfence(self._response_text(data))
+        if not body:
+            raise SummaryUnavailable("응답 본문이 비어 있음")
+
+        # 마크다운 펜스를 벗긴 뒤에도 JSON 으로 시작하면 구조화 출력 시도로 본다.
+        looks_json = body.startswith(("{", "["))
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(body)
         except json.JSONDecodeError:
+            if looks_json:
+                # 잘린 구조화 출력('{"summary": ["첫째 문장,' 등)을 줄 단위로 폴백하면
+                # JSON 조각이 그대로 요약문으로 메일에 실린다. 버린다.
+                raise SummaryUnavailable(f"구조화 응답이 깨짐: {body[:120]}") from None
             # 애초에 JSON 이 아니면 평문 요약일 가능성이 높다 — 줄 단위로 폴백 파싱.
-            return self._clean(text.splitlines())
+            return self._clean(body.splitlines())
 
         raw = parsed.get("summary") if isinstance(parsed, dict) else parsed
         lines = _as_sentences(raw)
         if lines is None:
-            # JSON 이긴 한데 요청한 스키마(문자열 배열)가 아니다. 이때 줄 단위 폴백을
-            # 하면 JSON 조각이 그대로 메일에 실리고, 무턱대고 순회하면 dict 의 '키'가
-            # 요약문인 양 발행된다. 버리고 원문 발췌로 넘긴다.
-            log.info("Gemini 응답이 요청 스키마(문자열 배열)와 달라 요약을 버립니다: %.120s", text)
-            return []
+            # JSON 이긴 한데 요청한 스키마(문자열 배열)가 아니다. 무턱대고 순회하면
+            # dict 의 '키'가 요약문인 양 발행된다.
+            raise SummaryUnavailable(f"요청 스키마(문자열 배열)와 다름: {body[:120]}")
         return self._clean(lines)
+
+    @staticmethod
+    def _finish_reason(data: dict) -> str:
+        for cand in data.get("candidates") or []:
+            return str(cand.get("finishReason") or "")
+        return ""
 
     def _clean(self, lines: list[str]) -> list[str]:
         """공백 정리 + 목록 표식 제거 + 설정된 줄 수로 절단."""
