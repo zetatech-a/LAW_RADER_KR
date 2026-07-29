@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from itertools import zip_longest
 
@@ -308,9 +309,7 @@ class Summarizer:
                 budget = min(budget, remaining)
 
             self._last_call = time.monotonic()
-            resp = self.session.post(
-                url, headers=headers, json=payload, timeout=_split_timeout(budget)
-            )
+            resp = self._post_within(url, headers, payload, budget)
             if resp.status_code == 200:
                 return resp.json()
 
@@ -347,6 +346,39 @@ class Summarizer:
 
         raise RuntimeError(last_error or "Gemini 호출 실패")
 
+    def _post_within(self, url: str, headers: dict, payload: dict, budget: float):
+        """요청 전체를 budget(초) 안으로 가둔다.
+
+        requests 의 read 타임아웃은 '소켓 읽기 사이의 무응답 시간'마다 새로 적용되므로,
+        응답 바이트를 read 상한보다 짧은 간격으로 조금씩 흘려보내는 서버(또는 중간
+        프록시)에는 총 소요시간을 제한하지 못한다. (connect, read) 로 나눠 줘도 마찬가지다
+        — 두 값은 '한 번의' 연결·읽기에만 걸리기 때문이다. 그래서 요청을 데몬 스레드에
+        맡기고 단조시계 마감까지만 기다린다.
+
+        스레드는 데몬이라 남아 있어도 프로세스 종료를 막지 않고, 소켓 타임아웃이 걸리면
+        스스로 끝난다. (ThreadPoolExecutor 는 종료 시 워커를 join 하므로 쓰지 않는다 —
+        멈춘 워커 하나가 워크플로 전체를 붙잡는다.)
+        """
+        box: dict = {}
+
+        def _work() -> None:
+            try:
+                box["resp"] = self.session.post(
+                    url, headers=headers, json=payload, timeout=_split_timeout(budget)
+                )
+            except BaseException as e:  # noqa: BLE001 — 호출자에게 원형 그대로 전달
+                box["error"] = e
+
+        worker = threading.Thread(target=_work, daemon=True)
+        worker.start()
+        worker.join(timeout=budget)
+        if worker.is_alive():
+            # 소켓은 살아 있을 수 있지만 우리는 더 기다리지 않는다(메일 지연 방지).
+            raise SummaryUnavailable(f"요청이 시간예산({budget:.1f}초)을 초과함")
+        if "error" in box:
+            raise box["error"]
+        return box["resp"]
+
     def _throttle(self, deadline: float | None = None) -> None:
         """무료 티어 RPM 을 넘지 않도록 직전 호출로부터 간격을 벌린다.
 
@@ -374,11 +406,16 @@ class Summarizer:
         막을 때 서킷 브레이커가 열리지 않아 상한(max_posts)까지 전부 태우게 된다.
         어느 경우든 post.summary 는 비어 있으므로 메일은 원문 발췌로 나간다.
         """
+        # 정상 종료(STOP)가 '확인된' 응답만 받는다. SAFETY(안전필터 차단)나
+        # MAX_TOKENS(토큰 초과)는 물론, finishReason 자체가 없는 응답도 버린다 —
+        # 종료가 확인되지 않은 응답의 텍스트는 조각일 수 있고, 이를 통과시키면
+        # 유효한 JSON 이나 산문처럼 보이기만 하면 그대로 발송되며 실패로도 세지 않아
+        # 서킷 브레이커까지 리셋된다.
         reason = self._finish_reason(data)
-        # STOP 이 아니면 안전필터 차단(SAFETY)이나 토큰 초과(MAX_TOKENS)로 중간에
-        # 끊긴 응답이다. 남아 있는 텍스트는 조각이라 신뢰할 수 없다.
-        if reason and reason != "STOP":
-            raise SummaryUnavailable(f"응답이 정상 종료되지 않음(finishReason={reason})")
+        if reason != "STOP":
+            raise SummaryUnavailable(
+                f"응답이 정상 종료되지 않음(finishReason={reason or '없음'})"
+            )
 
         body = _unfence(self._response_text(data))
         if not body:

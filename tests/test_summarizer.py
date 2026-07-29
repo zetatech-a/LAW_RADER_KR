@@ -279,6 +279,40 @@ def test_rejects_blocked_response_without_text():
     _expect_unavailable({"candidates": []})
 
 
+def test_rejects_missing_finish_reason():
+    # finishReason 이 없으면 종료가 '확인되지 않은' 응답이다. 유효한 JSON 이라도
+    # 조각일 수 있고, 통과시키면 실패로도 세지 않아 브레이커까지 리셋된다.
+    good = '{"summary": ["정상처럼 보이는 문장임"]}'
+    _expect_unavailable({"candidates": [{"content": {"parts": [{"text": good}]}}]})
+    _expect_unavailable(
+        {"candidates": [{"content": {"parts": [{"text": good}]}, "finishReason": None}]}
+    )
+    _expect_unavailable(
+        {"candidates": [{"content": {"parts": [{"text": good}]}, "finishReason": ""}]}
+    )
+    _expect_unavailable({})   # candidates 키 자체가 없는 응답
+
+    # 대조군: finishReason=STOP 이면 같은 본문이 정상 통과한다
+    s = Summarizer(_cfg())
+    s._generate = lambda prompt, deadline=None: _envelope(good)
+    assert s.summarize(_post()) == ["정상처럼 보이는 문장임"]
+
+
+def test_missing_finish_reason_counts_toward_breaker():
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)]
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+    calls = {"n": 0}
+
+    def _generate(prompt, deadline=None):
+        calls["n"] += 1
+        return {"candidates": [{"content": {"parts": [{"text": '{"summary": ["x"]}'}]}}]}
+
+    s._generate = _generate
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
+    assert calls["n"] == 3                       # 브레이커가 열린다
+    assert all(p.summary == [] for p in posts)   # 원문 발췌 폴백
+
+
 def test_no_json_fragment_leaks_into_summary():
     # 어떤 깨진 응답에서도 JSON/펜스 조각이 요약문으로 발행되면 안 된다.
     broken = [
@@ -623,8 +657,9 @@ class _FakeResponse:
 class _FakeSession:
     """미리 정한 응답을 순서대로 돌려주고 보낸 payload 를 기록하는 세션."""
 
-    def __init__(self, responses):
+    def __init__(self, responses, delay=0.0):
         self._responses = list(responses)
+        self._delay = delay        # 응답이 늦는(=바이트를 질질 끄는) 서버 흉내
         self.sent = []
         self.timeouts = []
 
@@ -632,12 +667,79 @@ class _FakeSession:
         # _generate 는 payload 를 그 자리에서 고쳐 재시도하므로 스냅샷으로 남긴다.
         self.sent.append(deepcopy(json))
         self.timeouts.append(timeout)
+        if self._delay:
+            time.sleep(self._delay)
         return self._responses.pop(0)
 
 
-def _stub(s, responses):
-    s.session = _FakeSession(responses)
+def _stub(s, responses, delay=0.0):
+    s.session = _FakeSession(responses, delay=delay)
     return s.session
+
+
+def test_request_is_bounded_by_wall_clock_deadline():
+    # read 타임아웃은 소켓 읽기 '사이'의 무응답에만 걸리므로, 응답을 조금씩 흘려보내는
+    # 서버에는 총 소요를 제한하지 못한다. 요청 전체에 단조시계 마감을 강제해야 한다.
+    s = Summarizer(_cfg(timeout_sec=45, max_retries=0))
+    _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}'))], delay=3.0)
+
+    started = time.monotonic()
+    with pytest.raises(SummaryUnavailable):
+        s.summarize(_post(), started + 0.4)
+    elapsed = time.monotonic() - started
+
+    # 3초짜리 응답을 끝까지 기다리지 않고 예산에서 끊는다
+    assert elapsed < 1.5, elapsed
+
+
+def test_request_deadline_applies_without_explicit_budget():
+    # deadline 을 안 넘겨도 timeout_sec 이 요청 전체의 상한이어야 한다.
+    s = Summarizer(_cfg(timeout_sec=0.3, max_retries=0))
+    _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}'))], delay=3.0)
+
+    started = time.monotonic()
+    with pytest.raises(SummaryUnavailable):
+        s.summarize(_post())
+    assert time.monotonic() - started < 1.5
+
+
+def test_slow_request_does_not_block_process_exit():
+    # 포기한 요청은 데몬 스레드에 남는다 — 프로세스 종료를 막으면 안 된다.
+    import threading
+
+    s = Summarizer(_cfg(timeout_sec=0.2, max_retries=0))
+    _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}'))], delay=2.0)
+    before = {t for t in threading.enumerate()}
+    with pytest.raises(SummaryUnavailable):
+        s.summarize(_post())
+    leftover = [t for t in threading.enumerate() if t not in before]
+    assert leftover, "요청 스레드가 아직 살아 있어야 이 테스트가 의미 있다"
+    assert all(t.daemon for t in leftover)   # 데몬이라 인터프리터 종료를 붙잡지 않는다
+
+
+def test_fast_request_leaves_no_thread_behind():
+    s = Summarizer(_cfg())
+    _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}'))])
+    import threading
+
+    before = len(threading.enumerate())
+    assert s.summarize(_post()) == ["요약함"]
+    assert len(threading.enumerate()) == before
+
+
+def test_request_error_propagates_with_original_type():
+    # 워커 스레드에서 난 예외는 원형 그대로 올라와야 재시도 판정이 유지된다.
+    import requests
+
+    s = Summarizer(_cfg(max_retries=0))
+
+    class _Boom:
+        def post(self, *a, **kw):
+            raise requests.ConnectionError("연결 실패")
+
+    s.session = _Boom()
+    with pytest.raises(requests.ConnectionError):
+        s.summarize(_post())
 
 
 def test_generate_drops_thinking_config_without_spending_retries():
