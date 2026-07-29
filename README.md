@@ -31,8 +31,11 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
    - 어떤 소스를 **처음** 볼 때는 현재 목록을 "기준선"으로만 저장하고 메일을 보내지 않습니다(과거 글 폭탄 방지). 그 다음 실행부터 진짜 신규만 발송합니다.
    - 주말·공휴일에 올라온 글은 **다음 실행(월요일 첫 회차)에 모아서** 발송됩니다. "이미 본 글 ID" 기준이라 시간과 무관합니다.
 3. 새 글의 **상세 본문과 첨부파일**을 내려받습니다.
-4. 신규가 있으면 **다이제스트 메일 1통**으로 묶어 발송합니다(첨부 포함).
-5. "이미 본 글" 목록(`state/seen.json`)을 저장소에 커밋해 다음 실행에 이어씁니다.
+4. 본문이 있는 글은 **Gemini API로 3줄 요약**해 메일에 싣습니다. 원문을 앞에서 자른 발췌 대신 핵심만 보이게 하기 위함입니다.
+   - API 키(`GEMINI_API_KEY`)가 없거나 호출이 실패하면 **기존 원문 발췌로 자동 대체**되고 메일은 정상 발송됩니다.
+   - 상세 본문이 없는 소스(금융규제포털 회신사례·계류의안)는 요약 대상이 아닙니다.
+5. 신규가 있으면 **다이제스트 메일 1통**으로 묶어 발송합니다(첨부 포함).
+6. "이미 본 글" 목록(`state/seen.json`)을 저장소에 커밋해 다음 실행에 이어씁니다.
 
 ## 설정 방법 (GitHub Actions)
 
@@ -49,6 +52,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 | `SMTP_PASSWORD` | 발급받은 앱 비밀번호 16자리 **(필수)** |
 | `MAIL_TO` | **수신자**. 여러 명은 `,` 또는 `;` 로 구분 **(필수)** |
 | `ASSEMBLY_API_KEY` | 계류의안 수집용 열린국회정보(open.assembly.go.kr) API 인증키. 미설정 시 계류의안만 건너뜀 |
+| `GEMINI_API_KEY` | 본문 **AI 3줄 요약**용 Google Gemini API 키(무료 티어 가능). [aistudio.google.com/apikey](https://aistudio.google.com/apikey) 에서 발급. 미설정 시 요약을 건너뛰고 기존처럼 원문 발췌를 표시 |
 | `SMTP_HOST` | `smtp.gmail.com` (기본값과 같으면 생략 가능) |
 | `SMTP_PORT` | `587` (기본값과 같으면 생략 가능) |
 | `MAIL_FROM` | 발신 표시 주소(보통 `SMTP_USER`와 동일) |
@@ -116,10 +120,16 @@ npm run deploy -- --secrets-file .dev.vars
 | `fetch.baseline_pages` | 3 | 최초 기준선 수립 시 기록할 페이지 수 |
 | `fetch.max_new_per_source` | 50 | 한 소스에서 한 번에 발송할 신규 상한(폭주 안전장치) |
 | `email.max_attach_mb` | 15 | 메일에 첨부할 총 용량 상한. 초과분은 링크로만 안내 |
+| `llm.enabled` | true | 본문 AI 요약 사용 여부. `false` 면 기존 원문 발췌로 발송 |
+| `llm.model` | `gemini-2.5-flash` | 요약에 쓸 Gemini 모델. 무료 한도가 빠듯하면 `gemini-2.5-flash-lite` |
+| `llm.lines` | 3 | 요약 문장 수 |
+| `llm.max_posts` | 40 | 한 실행에서 요약할 최대 글 수(무료 티어 일일 한도 보호). 초과분은 원문 발췌 |
+| `llm.rpm` | 10 | 분당 요청 상한. 이 간격에 맞춰 호출을 벌립니다 |
 
 ## 알려진 한계
 
 - **예약 실행 지연:** Cloudflare가 예약 시각에 Dispatch를 요청해도 GitHub-hosted runner의 실제 시작 시각은 부하에 따라 늦을 수 있으며 정확한 시작 시각은 보장되지 않습니다.
+- **AI 요약의 정확도:** 3줄 요약은 생성형 AI가 만든 것으로 부정확하거나 누락이 있을 수 있습니다. 메일 하단에도 같은 안내가 표시되며, 판단 전에는 반드시 원문 링크를 확인해야 합니다.
 - **해외 IP 접속 제한:** `fsc.go.kr`·`better.fsc.go.kr`·`open.assembly.go.kr` 는 시간대에 따라 GitHub 러너(해외 IP)에서 연결이 되지 않아 해당 회차에 건너뛸 수 있습니다(로그에 `ConnectTimeout`). 금융감독원(`fss.or.kr`) 5개 소스는 안정적으로 수집됩니다.
   - 연결 실패는 소스별로 격리되어 나머지 소스 수집에는 영향이 없고, 건너뛴 글은 **접속이 되는 다음 회차에 신규로 잡혀 발송**됩니다.
   - 완전히 해결하려면 국내 IP에서 실행해야 합니다(self-hosted runner 또는 국내 서버 cron). 코드는 환경 독립적이라 그대로 사용 가능합니다.
@@ -138,6 +148,9 @@ python -m src.main --dry-run
 
 # 특정 소스만, 상세 로그
 python -m src.main --dry-run --debug --only fss_press
+
+# LLM 요약 없이 실행(API 키 없이 확인하거나 무료 한도를 아낄 때)
+python -m src.main --dry-run --no-llm
 
 # SMTP 설정 확인용 테스트 메일 1통
 python scripts/send_test_email.py
@@ -171,6 +184,7 @@ src/
   main.py                   # 오케스트레이션(수집→신규판별→enrich→메일→저장)
   config.py  fetcher.py     # 설정 로딩 / HTTP 세션(재시도·한글 인코딩·첨부 용량 제한)
   state.py   notifier.py    # 신규 판별 상태(원자적 저장) / 이메일 렌더·발송
+  summarizer.py             # 본문 3줄 요약(Gemini REST API, 실패 시 원문 발췌 폴백)
   models.py                 # Post, Attachment
   scrapers/
     base.py                 # 스크래퍼 베이스(페이지네이션·디버그 덤프)

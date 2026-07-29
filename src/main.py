@@ -26,6 +26,7 @@ from .models import Post
 from .notifier import send_digest
 from .scrapers import build_scraper
 from .state import State
+from .summarizer import summarize_posts
 
 log = logging.getLogger("law_rader")
 
@@ -37,6 +38,9 @@ def parse_args(argv=None):
     p.add_argument("--dry-run", action="store_true", help="메일 발송 없이 수집 결과만 출력")
     p.add_argument("--debug", action="store_true", help="디버그 로그")
     p.add_argument("--only", default="", help="쉼표로 구분한 소스 key 만 실행")
+    p.add_argument(
+        "--no-llm", action="store_true", help="LLM 본문 요약을 건너뛴다(원문 발췌로 발송)"
+    )
     return p.parse_args(argv)
 
 
@@ -160,6 +164,16 @@ def run(argv=None) -> int:
         log.error("선택된 소스 %d개가 모두 실패 — 실패 종료. 오류: %s", selected, "; ".join(errors))
         return 1
 
+    # 본문이 있는 글은 LLM 으로 3줄 요약해 메일에 싣는다. 요약이 실패하면 summary 가
+    # 빈 채로 남고 notifier 가 기존 원문 발췌로 되돌아가므로, 발송 자체는 막지 않는다.
+    if total > 0 and not args.no_llm:
+        try:
+            summarize_posts(cfg.llm, posts_by_source)
+        except Exception as e:  # noqa: BLE001
+            log.warning("LLM 요약 단계 실패 — 원문 발췌로 발송합니다: %s", e)
+    elif args.no_llm:
+        log.info("--no-llm: LLM 요약 생략")
+
     if args.dry_run:
         _print_dry_run(posts_by_source)
         log.info("--dry-run: 메일 미발송, state 미저장")
@@ -188,6 +202,11 @@ def _print_dry_run(posts_by_source: dict[str, list[Post]]) -> None:
         print(f"\n=== {source_name} ({len(posts)}건) ===")
         for p in posts:
             print(f"  [{p.date or '날짜미상'}] {p.title}")
+            if p.summary:
+                for s in p.summary:
+                    print(f"      · {s}")
+            elif p.body:
+                print(f"      (요약 없음) {p.body[:120]}")
             print(f"    {p.url}")
             if p.attachments:
                 print(f"    첨부 {len(p.attachments)}개: " + ", ".join(a.filename for a in p.attachments))

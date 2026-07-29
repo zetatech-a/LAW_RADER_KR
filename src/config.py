@@ -38,6 +38,24 @@ class FetchConfig:
 
 
 @dataclass
+class LLMConfig:
+    """본문 3줄 요약용 LLM(Gemini) 설정. api_key 는 환경변수에서 주입."""
+
+    enabled: bool
+    model: str
+    lines: int              # 요약 문장 수(기본 3줄)
+    max_line_chars: int     # 문장 1개 길이 상한(프롬프트 지시용)
+    min_body_chars: int     # 이보다 짧은 본문은 요약하지 않고 그대로 보여준다
+    max_input_chars: int    # 모델에 넣을 본문 최대 길이(초과분 절단)
+    max_posts: int          # 한 번의 실행에서 요약할 최대 게시글 수(무료 티어 보호)
+    rpm: int                # 분당 요청 상한(0=제한 없음). 이 간격만큼 호출을 벌린다
+    timeout_sec: float
+    max_retries: int
+    retry_backoff_sec: float
+    api_key: str = ""
+
+
+@dataclass
 class SourceConfig:
     key: str
     name: str
@@ -51,6 +69,7 @@ class SourceConfig:
 class Config:
     email: EmailConfig
     fetch: FetchConfig
+    llm: LLMConfig
     sources: list[SourceConfig]
 
 
@@ -93,6 +112,22 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         max_new_per_source=int(fe.get("max_new_per_source", 50)),
     )
 
+    lm = raw.get("llm", {})
+    llm = LLMConfig(
+        enabled=bool(lm.get("enabled", True)),
+        model=str(lm.get("model", "gemini-2.5-flash")),
+        lines=int(lm.get("lines", 3)),
+        max_line_chars=int(lm.get("max_line_chars", 90)),
+        min_body_chars=int(lm.get("min_body_chars", 80)),
+        max_input_chars=int(lm.get("max_input_chars", 8000)),
+        max_posts=int(lm.get("max_posts", 40)),
+        rpm=int(lm.get("rpm", 10)),
+        timeout_sec=float(lm.get("timeout_sec", 45)),
+        max_retries=int(lm.get("max_retries", 2)),
+        retry_backoff_sec=float(lm.get("retry_backoff_sec", 5)),
+        api_key=_env("GEMINI_API_KEY"),
+    )
+
     sources = []
     for s in raw.get("sources", []):
         known = {"key", "name", "type", "list_url", "enabled"}
@@ -107,4 +142,4 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             )
         )
 
-    return Config(email=email, fetch=fetch, sources=sources)
+    return Config(email=email, fetch=fetch, llm=llm, sources=sources)

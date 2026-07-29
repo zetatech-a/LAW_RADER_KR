@@ -44,6 +44,38 @@ def _snippet(text: str, limit: int = 220) -> str:
     return s[:limit] + " …" if len(s) > limit else s
 
 
+def _summary_block(p: Post, accent: str) -> str:
+    """본문 영역. LLM 3줄 요약이 있으면 그것을, 없으면 원문 발췌를 보여준다.
+
+    요약은 LLM 장애·한도 초과로 비어 있을 수 있으므로 원문 발췌 폴백을 남겨 둔다.
+    """
+    if p.summary:
+        items = "".join(
+            f"<tr>"
+            f"<td valign='top' style='padding:2px 6px 0 0;font-size:13px;"
+            f"line-height:1.6;color:{accent}'>&bull;</td>"
+            f"<td style='font-size:13px;line-height:1.6;color:#334155'>{_esc(line)}</td>"
+            f"</tr>"
+            for line in p.summary
+        )
+        return (
+            "<div style='margin:10px 0 0;padding:10px 12px;background:#f8fafc;"
+            "border:1px solid #e2e8f0;border-radius:6px'>"
+            f"<div style='margin:0 0 6px;font-size:10px;letter-spacing:.8px;"
+            f"font-weight:700;color:{accent}'>AI 3줄 요약</div>"
+            "<table role='presentation' cellpadding='0' cellspacing='0' "
+            f"style='border-collapse:collapse'>{items}</table>"
+            "</div>"
+        )
+
+    if p.body:
+        return (
+            "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
+            f"{_esc(_snippet(p.body))}</div>"
+        )
+    return ""
+
+
 def _card(p: Post, accent: str) -> str:
     """게시글 1건 카드."""
     rows = [
@@ -58,11 +90,9 @@ def _card(p: Post, accent: str) -> str:
             f"{_esc(p.date)}</div>"
         )
 
-    if p.body:
-        rows.append(
-            f"<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
-            f"{_esc(_snippet(p.body))}</div>"
-        )
+    block = _summary_block(p, accent)
+    if block:
+        rows.append(block)
 
     if p.attachments:
         chips = []
@@ -138,13 +168,21 @@ def build_html(posts_by_source: dict[str, list[Post]]) -> str:
             parts.append(_card(p, accent))
 
     parts.append("</td></tr>")
-    # ── 푸터
+    # ── 푸터. AI 요약이 실린 메일에만 요약 관련 유의사항을 덧붙인다.
+    has_summary = any(p.summary for posts in posts_by_source.values() for p in posts)
+    ai_note = (
+        "요약은 생성형 AI가 원문을 3줄로 정리한 것이라 부정확할 수 있습니다. "
+        "판단 전 반드시 원문을 확인하세요.<br>"
+        if has_summary
+        else ""
+    )
     parts.append(
         "<tr><td style='padding:16px 24px 22px;background:#f8fafc;"
         "border-radius:0 0 10px 10px;border-top:1px solid #e2e8f0'>"
         "<div style='font-size:11px;line-height:1.7;color:#94a3b8'>"
         "이 메일은 금융위원회·금융감독원·금융규제포털·의안정보시스템의 신규 게시물을 "
-        "자동 수집해 발송합니다.<br>첨부파일은 원문 그대로이며, 용량이 큰 파일은 링크로만 "
+        f"자동 수집해 발송합니다.<br>{ai_note}"
+        "첨부파일은 원문 그대로이며, 용량이 큰 파일은 링크로만 "
         "제공됩니다.<br>RADER stands for Regulatory Alert Detection & Email Reporter"
         "</div></td></tr>"
     )
@@ -162,6 +200,11 @@ def build_text(posts_by_source: dict[str, list[Post]]) -> str:
         lines.append(f"\n[{source_name}] ({len(posts)}건)")
         for p in posts:
             lines.append(f"  - {p.title}  {p.date}".rstrip())
+            if p.summary:
+                for s in p.summary:
+                    lines.append(f"      · {s}")
+            elif p.body:
+                lines.append(f"      {_snippet(p.body)}")
             lines.append(f"    {p.url}")
             for a in p.attachments:
                 lines.append(f"      첨부: {a.filename} ({a.url})")
