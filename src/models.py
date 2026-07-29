@@ -29,6 +29,8 @@ class Post:
     url: str                 # 상세 페이지 URL
     date: str = ""           # 게시일 문자열 (표시용)
     body: str = ""           # 상세 본문 텍스트 (enrich 단계에서 채움)
+    # LLM 3줄 요약 (summarizer 단계에서 채움). 비어 있으면 메일에서 body 발췌로 대체.
+    summary: list[str] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
 
     @property

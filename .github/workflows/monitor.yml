@@ -69,6 +69,8 @@ jobs:
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           ASSEMBLY_API_KEY: ${{ secrets.ASSEMBLY_API_KEY }}
+          # 본문 3줄 요약용. 없으면 요약을 건너뛰고 원문 발췌로 발송된다.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python -m src.main
 
       # 모니터가 실패·취소되더라도 그때까지 기록된 기준선/신규 상태를 저장소에 반영해,

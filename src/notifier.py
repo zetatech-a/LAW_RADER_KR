@@ -44,6 +44,55 @@ def _snippet(text: str, limit: int = 220) -> str:
     return s[:limit] + " …" if len(s) > limit else s
 
 
+# HTML·텍스트 두 파트가 같은 문구를 쓰도록 한 곳에 둔다. text/plain 만 보는
+# 수신자에게도 동일한 유의사항이 전달되어야 한다.
+_AI_NOTICE = (
+    "AI 요약은 생성형 AI가 원문을 정리한 것이라 부정확하거나 누락이 있을 수 있습니다. "
+    "판단 전 반드시 원문을 확인하세요."
+)
+
+
+def _summary_label(p: Post) -> str:
+    """요약 블록 제목. 실제 줄 수를 그대로 표기한다(config 의 lines 를 바꿔도 맞음)."""
+    return f"AI {len(p.summary)}줄 요약"
+
+
+def _has_summary(posts_by_source: dict[str, list[Post]]) -> bool:
+    return any(p.summary for posts in posts_by_source.values() for p in posts)
+
+
+def _summary_block(p: Post, accent: str) -> str:
+    """본문 영역. LLM 3줄 요약이 있으면 그것을, 없으면 원문 발췌를 보여준다.
+
+    요약은 LLM 장애·한도 초과로 비어 있을 수 있으므로 원문 발췌 폴백을 남겨 둔다.
+    """
+    if p.summary:
+        items = "".join(
+            f"<tr>"
+            f"<td valign='top' style='padding:2px 6px 0 0;font-size:13px;"
+            f"line-height:1.6;color:{accent}'>&bull;</td>"
+            f"<td style='font-size:13px;line-height:1.6;color:#334155'>{_esc(line)}</td>"
+            f"</tr>"
+            for line in p.summary
+        )
+        return (
+            "<div style='margin:10px 0 0;padding:10px 12px;background:#f8fafc;"
+            "border:1px solid #e2e8f0;border-radius:6px'>"
+            f"<div style='margin:0 0 6px;font-size:10px;letter-spacing:.8px;"
+            f"font-weight:700;color:{accent}'>{_esc(_summary_label(p))}</div>"
+            "<table role='presentation' cellpadding='0' cellspacing='0' "
+            f"style='border-collapse:collapse'>{items}</table>"
+            "</div>"
+        )
+
+    if p.body:
+        return (
+            "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
+            f"{_esc(_snippet(p.body))}</div>"
+        )
+    return ""
+
+
 def _card(p: Post, accent: str) -> str:
     """게시글 1건 카드."""
     rows = [
@@ -58,11 +107,9 @@ def _card(p: Post, accent: str) -> str:
             f"{_esc(p.date)}</div>"
         )
 
-    if p.body:
-        rows.append(
-            f"<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
-            f"{_esc(_snippet(p.body))}</div>"
-        )
+    block = _summary_block(p, accent)
+    if block:
+        rows.append(block)
 
     if p.attachments:
         chips = []
@@ -138,13 +185,15 @@ def build_html(posts_by_source: dict[str, list[Post]]) -> str:
             parts.append(_card(p, accent))
 
     parts.append("</td></tr>")
-    # ── 푸터
+    # ── 푸터. AI 요약이 실린 메일에만 요약 관련 유의사항을 덧붙인다.
+    ai_note = f"{_esc(_AI_NOTICE)}<br>" if _has_summary(posts_by_source) else ""
     parts.append(
         "<tr><td style='padding:16px 24px 22px;background:#f8fafc;"
         "border-radius:0 0 10px 10px;border-top:1px solid #e2e8f0'>"
         "<div style='font-size:11px;line-height:1.7;color:#94a3b8'>"
         "이 메일은 금융위원회·금융감독원·금융규제포털·의안정보시스템의 신규 게시물을 "
-        "자동 수집해 발송합니다.<br>첨부파일은 원문 그대로이며, 용량이 큰 파일은 링크로만 "
+        f"자동 수집해 발송합니다.<br>{ai_note}"
+        "첨부파일은 원문 그대로이며, 용량이 큰 파일은 링크로만 "
         "제공됩니다.<br>RADER stands for Regulatory Alert Detection & Email Reporter"
         "</div></td></tr>"
     )
@@ -162,10 +211,51 @@ def build_text(posts_by_source: dict[str, list[Post]]) -> str:
         lines.append(f"\n[{source_name}] ({len(posts)}건)")
         for p in posts:
             lines.append(f"  - {p.title}  {p.date}".rstrip())
+            if p.summary:
+                # text/plain 파트만 보는 수신자도 이 문장이 AI 생성물임을 알 수 있어야
+                # 한다(원문 발췌와 혼동 금지). 하단 유의사항도 함께 붙는다.
+                lines.append(f"    [{_summary_label(p)}]")
+                for s in p.summary:
+                    lines.append(f"      · {s}")
+            elif p.body:
+                lines.append("    [원문 발췌]")
+                lines.append(f"      {_snippet(p.body)}")
             lines.append(f"    {p.url}")
             for a in p.attachments:
                 lines.append(f"      첨부: {a.filename} ({a.url})")
+
+    if _has_summary(posts_by_source):
+        lines.append(f"\n※ {_AI_NOTICE}")
     return "\n".join(lines)
+
+
+def missing_email_settings(cfg: EmailConfig) -> list[str]:
+    """발송에 반드시 필요한데 비어 있는 설정 이름들. 비었으면 발송 가능."""
+    missing = []
+    if not cfg.smtp_user:
+        missing.append("SMTP_USER")
+    if not cfg.smtp_password:
+        missing.append("SMTP_PASSWORD")
+    if not cfg.recipients:
+        missing.append("MAIL_TO(또는 config.yaml 의 email.recipients)")
+    return missing
+
+
+def verify_smtp_login(cfg: EmailConfig) -> None:
+    """실제 발송 전에 SMTP 연결·인증만 확인한다(실패 시 예외).
+
+    설정값이 '채워져 있는지'만 보는 missing_email_settings 로는 앱 비밀번호 폐기,
+    호스트 도달 불가, 포트/TLS 오설정을 잡을 수 없다. 그대로 두면 요약을 다 돌린
+    뒤 발송에서 실패하고, 실패는 신규를 seen 으로 확정하지 않으므로 매 실행이 같은
+    글을 다시 요약해 무료 할당량을 계속 태운다. 그래서 요약 전에 한 번 로그인해 본다.
+
+    연결을 열어둔 채 요약(최대 budget_sec)을 돌리면 서버가 유휴 연결을 끊을 수
+    있으므로, 확인 후 바로 닫고 발송 때 새로 연결한다(핸드셰이크 1회 추가는 무시할
+    수준이고, 유휴 끊김으로 발송이 실패하는 것보다 안전하다).
+    """
+    with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=30) as server:
+        server.starttls()
+        server.login(cfg.smtp_user, cfg.smtp_password)
 
 
 def send_digest(cfg: EmailConfig, posts_by_source: dict[str, list[Post]]) -> None:
@@ -174,10 +264,11 @@ def send_digest(cfg: EmailConfig, posts_by_source: dict[str, list[Post]]) -> Non
         log.info("신규 없음 — 메일 발송 생략")
         return
 
-    if not (cfg.smtp_user and cfg.smtp_password and cfg.recipients):
+    missing = missing_email_settings(cfg)
+    if missing:
         raise RuntimeError(
-            "SMTP 설정이 비어 있습니다. SMTP_USER / SMTP_PASSWORD 환경변수와 "
-            "config.yaml 의 recipients 를 확인하세요."
+            f"SMTP 설정이 비어 있습니다: {', '.join(missing)}. "
+            "환경변수/Secrets 와 config.yaml 을 확인하세요."
         )
 
     # 제목: 가장 많은 소스명 + 총 건수
