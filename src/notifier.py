@@ -145,7 +145,7 @@ def build_html(posts_by_source: dict[str, list[Post]]) -> str:
         "<div style='font-size:11px;line-height:1.7;color:#94a3b8'>"
         "이 메일은 금융위원회·금융감독원·금융규제포털·의안정보시스템의 신규 게시물을 "
         "자동 수집해 발송합니다.<br>첨부파일은 원문 그대로이며, 용량이 큰 파일은 링크로만 "
-        "제공됩니다."
+        "제공됩니다.<br>RADER stands for Regulatory Alert Detection & Email Reporter"
         "</div></td></tr>"
     )
     parts.append("</table></div>")
