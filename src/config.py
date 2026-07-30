@@ -37,6 +37,13 @@ class FetchConfig:
     max_new_per_source: int
 
 
+# 기본 모델은 특정 버전을 고정하지 않고 공식 'flash latest' alias 를 쓴다. 특정 버전을
+# 박아두면 그 버전이 수명 종료된 날부터 전 요청이 404 로 죽는다(실제로 겪었다).
+_DEFAULT_MODEL = "gemini-flash-latest"
+# alias 자체가 막히거나 대상 버전이 사라졌을 때 넘어갈 검증된 stable 모델(순서 보존).
+_DEFAULT_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash-lite")
+
+
 @dataclass
 class LLMConfig:
     """본문 3줄 요약용 LLM(Gemini) 설정. api_key 는 환경변수에서 주입."""
@@ -57,7 +64,19 @@ class LLMConfig:
     max_consecutive_failures: int = 3
     # 요약 단계 전체 시간예산(초, 0=무제한). 초과하면 남은 글은 원문 발췌로 넘긴다.
     budget_sec: float = 240.0
+    # model 이 사용 불가(404/NOT_FOUND)일 때 이 순서로 넘어갈 대체 모델들.
+    fallback_models: list[str] = field(default_factory=list)
     api_key: str = ""
+
+    @property
+    def model_chain(self) -> list[str]:
+        """시도할 모델 목록(순서 보존, 중복 제거). primary → fallback 순."""
+        chain: list[str] = []
+        for name in [self.model, *self.fallback_models]:
+            name = (name or "").strip()
+            if name and name not in chain:
+                chain.append(name)
+        return chain
 
 
 @dataclass
@@ -118,9 +137,16 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     )
 
     lm = raw.get("llm", {})
+    # 키가 아예 없으면 기본 대체 목록을 쓰고, 빈 목록을 명시하면 대체를 끈다.
+    raw_fallbacks = lm.get("fallback_models")
+    if raw_fallbacks is None:
+        raw_fallbacks = list(_DEFAULT_FALLBACK_MODELS)
     llm = LLMConfig(
         enabled=bool(lm.get("enabled", True)),
-        model=str(lm.get("model", "gemini-2.5-flash")),
+        model=str(lm.get("model", _DEFAULT_MODEL)),
+        fallback_models=[
+            str(m).strip() for m in raw_fallbacks if str(m).strip()
+        ],
         lines=int(lm.get("lines", 3)),
         max_line_chars=int(lm.get("max_line_chars", 90)),
         min_body_chars=int(lm.get("min_body_chars", 80)),

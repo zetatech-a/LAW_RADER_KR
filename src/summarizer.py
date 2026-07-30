@@ -79,6 +79,55 @@ _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가�
 _LIST_PREFIX = re.compile(r"^(?:[-–—]+\s+|[•*·▪◦]+\s*|\(?\d{1,2}[.)]\s+)")
 
 
+# 인증·한도·서버 장애는 모델 문제가 아니므로 다른 모델을 연쇄 호출하지 않는다.
+# (기존 재시도·시간예산·서킷 브레이커 정책을 그대로 따른다)
+_NEVER_CHAIN_STATUS = frozenset({401, 403, 429})
+
+# "이 모델은 없거나 이 프로젝트에 제공되지 않는다"는 뜻의 응답 메시지 조각.
+# 404/NOT_FOUND 로 안 오고 400 으로 오는 경우가 있어 메시지도 함께 본다.
+_MODEL_GONE_PATTERNS = (
+    "no longer available",
+    "is not found",
+    "not found for api version",
+    "model not found",
+    "does not exist",
+    "is not available",
+    "not available for your",
+    "unsupported model",
+    "is not supported for generatecontent",
+)
+
+
+class _ModelUnavailable(Exception):
+    """이 모델은 쓸 수 없다(다음 모델로 넘어가야 함). 내부 제어용."""
+
+
+def _error_fields(resp) -> tuple[str, str]:
+    """응답에서 (error.status, error.message) 를 뽑는다. JSON 이 아니면 ('', 본문 일부)."""
+    try:
+        err = (resp.json() or {}).get("error") or {}
+    except ValueError:
+        return "", (resp.text or "")[:200]
+    return str(err.get("status") or ""), str(err.get("message") or "")
+
+
+def _model_unavailable_reason(resp) -> str:
+    """모델 자체를 쓸 수 없다는 신호면 사유 문자열, 아니면 빈 문자열.
+
+    여기서 참을 돌려주면 '다음 모델로 전환'하므로, 모델과 무관한 실패(인증·한도·5xx)를
+    잘못 포함시키면 한 번의 장애로 설정된 모델을 전부 소진해 버린다. 그래서 그 상태
+    코드들은 먼저 배제한다.
+    """
+    if resp.status_code in _NEVER_CHAIN_STATUS or resp.status_code >= 500:
+        return ""
+    status, message = _error_fields(resp)
+    if resp.status_code == 404 or status == "NOT_FOUND":
+        return f"HTTP {resp.status_code} {status} {message}".strip()
+    if any(p in message.lower() for p in _MODEL_GONE_PATTERNS):
+        return f"HTTP {resp.status_code} {message}".strip()
+    return ""
+
+
 class SummaryUnavailable(RuntimeError):
     """호출은 됐지만 쓸 수 있는 요약을 얻지 못함(차단·잘림·스키마 위반).
 
@@ -149,8 +198,15 @@ class Summarizer:
         self._last_call = 0.0
         # 무료 티어 분당 요청수(RPM) 를 지키기 위한 최소 호출 간격
         self._min_interval = 60.0 / cfg.rpm if cfg.rpm > 0 else 0.0
-        # 모델이 thinkingConfig 를 모르면 400 이 난다. 한 번 겪으면 이후로는 빼고 보낸다.
-        self._send_thinking_config = True
+        # 시도할 모델 목록(primary → fallback, 중복 제거).
+        self._models = cfg.model_chain
+        # 성공한 모델. 한 번 성공하면 이 프로세스 동안 계속 이 모델만 쓴다.
+        self._active_model: str | None = None
+        # 사용 불가로 확인된 모델(404 등). 이후 게시글에서 다시 시도하지 않는다.
+        self._unavailable: set[str] = set()
+        # thinkingConfig 를 모르는 모델. 400 을 한 번 겪으면 그 모델에는 빼고 보낸다.
+        # alias 의 실제 대상 버전을 알 수 없으므로 모델별로 따로 기억한다.
+        self._thinking_unsupported: set[str] = set()
 
     @property
     def available(self) -> bool:
@@ -236,12 +292,14 @@ class Summarizer:
                 log.info("[%s] 요약 결과 비어 있음 — 원문 발췌 사용: %s", post.source_key, post.url)
 
         log.info(
-            "LLM 요약 완료 %d/%d건 (시도 %d건, model=%s)",
+            "LLM 요약 완료 %d/%d건 (시도 %d건, 사용 모델=%s)",
             ok,
             len(targets),
             attempted,
-            self.cfg.model,
+            self._active_model or "없음",
         )
+        if ok < len(targets):
+            log.info("요약 없이 원문 발췌로 발송되는 글 %d건", len(targets) - ok)
         return ok
 
     def _prepared_body(self, post: Post) -> str:
@@ -272,7 +330,64 @@ class Summarizer:
         return self._parse(data)
 
     # --- 내부 ---
+    def _model_candidates(self) -> list[str]:
+        """이번 호출에 시도할 모델 순서.
+
+        성공한 모델이 있으면 그것부터(요구사항: 성공 모델 캐시), 사용 불가로 확인된
+        모델은 제외한다. 활성 모델이 뒤늦게 사라져도 같은 호출에서 남은 모델로 넘어간다.
+        """
+        out: list[str] = []
+        if self._active_model and self._active_model not in self._unavailable:
+            out.append(self._active_model)
+        for name in self._models:
+            if name not in self._unavailable and name not in out:
+                out.append(name)
+        return out
+
     def _generate(self, prompt: str, deadline: float | None = None) -> dict:
+        """모델 목록을 순서대로 시도한다. 404 계열에서만 다음 모델로 넘어간다."""
+        candidates = self._model_candidates()
+        if not candidates:
+            raise SummaryUnavailable(
+                f"설정된 모델({', '.join(self._models) or '없음'})이 모두 사용 불가 — "
+                "원문 발췌를 사용합니다"
+            )
+
+        last_reason = ""
+        for i, model in enumerate(candidates):
+            try:
+                data = self._generate_with(model, prompt, deadline)
+            except _ModelUnavailable as e:
+                last_reason = str(e)
+                self._unavailable.add(model)
+                if self._active_model == model:
+                    self._active_model = None
+                rest = [m for m in candidates[i + 1 :] if m not in self._unavailable]
+                if rest:
+                    log.warning(
+                        "모델 %s 사용 불가(%s) — 다음 모델 %s 로 전환합니다",
+                        model,
+                        last_reason,
+                        rest[0],
+                    )
+                continue
+
+            if self._active_model != model:
+                log.info("요약 모델 확정: %s", model)
+                self._active_model = model
+            return data
+
+        log.error(
+            "설정된 모델(%s)이 모두 사용 불가 — 원문 발췌를 사용합니다. 마지막 사유: %s",
+            ", ".join(candidates),
+            last_reason,
+        )
+        raise SummaryUnavailable(f"사용 가능한 모델 없음: {last_reason}")
+
+    def _generate_with(
+        self, model: str, prompt: str, deadline: float | None = None
+    ) -> dict:
+        """모델 하나로 호출한다. 그 모델을 쓸 수 없으면 _ModelUnavailable."""
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {
@@ -282,12 +397,14 @@ class Summarizer:
                 "maxOutputTokens": 1024,
             },
         }
-        if self._send_thinking_config:
-            # 2.5 계열은 기본적으로 '생각'에 출력 토큰을 소진해 본문이 빈 채로 끝날 수
+        send_thinking = model not in self._thinking_unsupported
+        if send_thinking:
+            # 2.5 이상 '생각하는' 모델은 출력 토큰을 생각에 소진해 본문이 빈 채로 끝날 수
             # 있다. 단순 요약이라 생각 예산은 0 으로 둔다.
             payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
 
-        url = _ENDPOINT.format(model=self.cfg.model)
+        log.debug("Gemini 호출 (model=%s)", model)
+        url = _ENDPOINT.format(model=model)
         headers = {
             "x-goog-api-key": self.cfg.api_key,
             "Content-Type": "application/json",
@@ -315,15 +432,22 @@ class Summarizer:
 
             last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
 
-            # thinkingConfig 미지원 모델(2.0 계열 등) → 빼고 즉시 재시도. 설정 교정이지
-            # 장애가 아니므로 재시도 횟수를 소모하지 않는다(max_retries=0 에서도 동작).
+            # 모델 자체가 없거나 이 프로젝트에 제공되지 않음 → 다음 모델로 넘긴다.
+            # (재시도해도 같은 결과이므로 여기서 즉시 빠진다)
+            reason = _model_unavailable_reason(resp)
+            if reason:
+                raise _ModelUnavailable(reason)
+
+            # thinkingConfig 미지원 모델 → 빼고 즉시 재시도. 설정 교정이지 장애가
+            # 아니므로 재시도 횟수를 소모하지 않는다(max_retries=0 에서도 동작).
             if (
                 resp.status_code == 400
-                and self._send_thinking_config
+                and send_thinking
                 and "thinking" in resp.text.lower()
             ):
-                log.info("모델 %s 는 thinkingConfig 미지원 — 제외하고 재시도", self.cfg.model)
-                self._send_thinking_config = False
+                log.info("모델 %s 는 thinkingConfig 미지원 — 제외하고 재시도", model)
+                self._thinking_unsupported.add(model)
+                send_thinking = False
                 payload["generationConfig"].pop("thinkingConfig", None)
                 continue
 
