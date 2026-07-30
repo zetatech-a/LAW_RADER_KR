@@ -46,8 +46,16 @@ fetch:
 # -------------------------------------------------------------------------
 llm:
   enabled: true
-  # 무료 티어에서 쓸 수 있는 모델. 한도가 빠듯하면 gemini-2.5-flash-lite 로 낮추세요.
-  model: "gemini-2.5-flash"
+  # 기본 모델. 특정 버전(예: gemini-2.5-flash)을 박아두면 그 버전이 수명 종료되는
+  # 날부터 전 요청이 404 로 죽으므로, 공식 'flash latest' alias 를 씁니다.
+  model: "gemini-flash-latest"
+  # alias 나 위 모델을 쓸 수 없을 때(404 / NOT_FOUND / 모델 부재 메시지) 이 순서로
+  # 넘어갑니다. 인증(401·403)·한도(429)·5xx·타임아웃에서는 넘어가지 않고 기존
+  # 재시도·시간예산·서킷 브레이커 정책을 따릅니다.
+  # 빈 목록([])으로 두면 대체 없이 model 만 씁니다.
+  fallback_models:
+    - "gemini-3.6-flash"
+    - "gemini-3.5-flash-lite"
   # 요약 문장 수와 문장당 길이 상한(프롬프트 지시)
   lines: 3
   max_line_chars: 90

@@ -34,6 +34,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 4. 본문이 있는 글은 **Gemini API로 3줄 요약**해 메일에 싣습니다. 원문을 앞에서 자른 발췌 대신 핵심만 보이게 하기 위함입니다.
    - API 키(`GEMINI_API_KEY`)가 없거나 호출이 실패하면 **기존 원문 발췌로 자동 대체**되고 메일은 정상 발송됩니다.
    - 상세 본문이 없는 소스(금융규제포털 회신사례·계류의안)는 요약 대상이 아닙니다.
+   - 모델이 수명 종료돼 404가 나면 `llm.fallback_models` 순서로 자동 전환하고, 성공한 모델을 그 실행 동안 재사용합니다. 전부 실패해도 원문 발췌로 발송됩니다.
 5. 신규가 있으면 **다이제스트 메일 1통**으로 묶어 발송합니다(첨부 포함).
 6. "이미 본 글" 목록(`state/seen.json`)을 저장소에 커밋해 다음 실행에 이어씁니다.
 
@@ -123,7 +124,8 @@ npm run deploy -- --secrets-file .dev.vars
 | `fetch.max_new_per_source` | 50 | 한 소스에서 한 번에 발송할 신규 상한(폭주 안전장치) |
 | `email.max_attach_mb` | 15 | 메일에 첨부할 총 용량 상한. 초과분은 링크로만 안내 |
 | `llm.enabled` | true | 본문 AI 요약 사용 여부. `false` 면 기존 원문 발췌로 발송 |
-| `llm.model` | `gemini-2.5-flash` | 요약에 쓸 Gemini 모델. 무료 한도가 빠듯하면 `gemini-2.5-flash-lite` |
+| `llm.model` | `gemini-flash-latest` | 요약에 쓸 기본 Gemini 모델. 특정 버전을 고정하면 그 버전 수명 종료일에 전 요청이 404가 되므로 공식 latest alias 사용 |
+| `llm.fallback_models` | `gemini-3.6-flash`, `gemini-3.5-flash-lite` | `model` 을 쓸 수 없을 때(404 / `NOT_FOUND` / 모델 부재 메시지) 이 **순서대로** 넘어갑니다. `[]` 로 두면 대체 없음 |
 | `llm.lines` | 3 | 요약 문장 수 |
 | `llm.max_posts` | 40 | 한 실행에서 요약할 최대 글 수(무료 티어 일일 한도 보호). 초과분은 원문 발췌 |
 | `llm.rpm` | 10 | 분당 요청 상한. 이 간격에 맞춰 호출을 벌립니다 |
@@ -134,6 +136,7 @@ npm run deploy -- --secrets-file .dev.vars
 
 - **예약 실행 지연:** Cloudflare가 예약 시각에 Dispatch를 요청해도 GitHub-hosted runner의 실제 시작 시각은 부하에 따라 늦을 수 있으며 정확한 시작 시각은 보장되지 않습니다.
 - **AI 요약의 정확도:** 3줄 요약은 생성형 AI가 만든 것으로 부정확하거나 누락이 있을 수 있습니다. 메일 하단에도 같은 안내가 표시되며, 판단 전에는 반드시 원문 링크를 확인해야 합니다.
+- **Gemini 모델 수명 종료:** Google이 특정 모델을 종료하면 그 모델 호출은 404가 됩니다. 기본값은 `gemini-flash-latest` alias이고 `llm.fallback_models` 로 자동 전환하지만, alias와 대체 모델이 모두 막히면 해당 회차는 원문 발췌로만 발송됩니다(메일 자체는 정상 발송). 로그의 `모델 … 사용 불가` / `요약 모델 확정: …` 로 확인하고 `config.yaml` 의 모델 목록을 갱신하세요.
 - **해외 IP 접속 제한:** `fsc.go.kr`·`better.fsc.go.kr`·`open.assembly.go.kr` 는 시간대에 따라 GitHub 러너(해외 IP)에서 연결이 되지 않아 해당 회차에 건너뛸 수 있습니다(로그에 `ConnectTimeout`). 금융감독원(`fss.or.kr`) 5개 소스는 안정적으로 수집됩니다.
   - 연결 실패는 소스별로 격리되어 나머지 소스 수집에는 영향이 없고, 건너뛴 글은 **접속이 되는 다음 회차에 신규로 잡혀 발송**됩니다.
   - 완전히 해결하려면 국내 IP에서 실행해야 합니다(self-hosted runner 또는 국내 서버 cron). 코드는 환경 독립적이라 그대로 사용 가능합니다.
