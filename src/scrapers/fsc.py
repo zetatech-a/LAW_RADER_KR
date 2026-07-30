@@ -34,7 +34,9 @@ _FILE_HINT = ("getfile", "download", "filedown", "/file", "atchfile")
 # 값이 '통째로' 날짜 하나일 때만 인정한다. 범위('2026-07-24 ~ 2026-08-13')나 부가
 # 텍스트가 섞이면 매치되지 않는다.
 _DATE_VALUE = re.compile(r"^(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?\.?$")
-_ISO_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}T")
+# <time datetime> 의 날짜 부분. HTML 의 global date-and-time 은 날짜와 시각을 'T'
+# 또는 공백으로 가르므로 둘 다 받는다.
+_ISO_DATETIME = re.compile(r"^(\d{4}-\d{2}-\d{2})[T ]")
 # 클래스 토큰(비알파벳 제거 후)이 '게시일 전용'을 뜻하는지.
 _DATE_CLASS = re.compile(
     r"^(?:day|date"
@@ -54,8 +56,14 @@ _POST_DATE_LABELS = frozenset(
 _DATE_LABEL_PREFIX = re.compile(
     r"^(?:" + "|".join(sorted(_POST_DATE_LABELS, key=len, reverse=True)) + r")\s*[:：]?\s*"
 )
-# 게시일이 아닌 '기간' 표기 — 입법예고의 예고기간(시작일·종료일) 등.
-_PERIOD_MARKERS = ("기간", "기한", "마감", "시행일", "제출", "~", "∼", "〜")
+# 게시일이 아닌 '기간' 라벨 — 입법예고의 예고기간(시작일·종료일) 등.
+_PERIOD_LABELS = ("기간", "기한", "마감", "시행일", "제출")
+# 날짜이긴 하나 게시일이 아닌 맥락. <time> 은 '이 값이 날짜'라는 것만 알려줄 뿐
+# '게시일'이라는 역할까지 보장하지 않으므로, 라벨 없는 <time> 을 받기 전에 거른다.
+_EVENT_LABELS = ("회의일", "행사일", "개최", "일시", "예정일", "발표일", "접수일")
+_NON_POSTING_LABELS = _PERIOD_LABELS + _EVENT_LABELS
+# 값 자체가 기간(범위)임을 드러내는 표기.
+_RANGE_MARKERS = ("~", "∼", "〜")
 # 날짜 후보에서 통째로 제외할 영역(첨부파일명·제목).
 _EXCLUDED_CLASS = ("file", "atch", "subject")
 # 목록에 게시일 전용 요소가 없을 때 상세 페이지에서 볼 머리말/꼬리말 영역.
@@ -159,32 +167,34 @@ class FscBoardScraper(BaseScraper):
     def _date_candidates(cls, scope):
         """게시일 후보 텍스트를 신뢰도 순으로 낸다.
 
-        첨부·제목 영역과 '예고기간' 블록은 세 경로 모두에서 똑같이 배제한다. <time>
-        이라고 예외를 두면 <div class="period">…<time datetime="2026-07-24"> 같은
-        마크업에서 예고기간 시작일이 그대로 게시일로 올라온다.
-        """
-        # (1) 시맨틱 마크업이 있으면 가장 믿을 만하다.
-        for t in scope.find_all("time"):
-            if cls._excluded(t, scope) or cls._in_period_block(t, scope):
-                continue
-            text = clean_text(t.get_text(" "))
-            if cls._has_period_marker(text):
-                continue
-            yield t.get("datetime", "")
-            yield text
+        역할이 명시된 값이 먼저다. <time> 은 '이 값이 날짜'라는 것만 알려줄 뿐 그게
+        게시일인지는 알려주지 않아서, 회의일·행사일처럼 무관한 날짜가 <time> 으로
+        적히고 게시일은 '등록일' 라벨로 따로 있는 항목에서 엉뚱한 값을 집는다.
 
-        # (2) '등록일/게시일' 라벨의 값. '예고기간' 등 기간 라벨은 후보가 되지 않는다.
+        첨부·제목 영역과 기간·행사 블록은 세 경로 모두에서 똑같이 배제한다.
+        """
+        # (1) '등록일/게시일' 라벨의 값 — 역할이 명시돼 있어 가장 믿을 만하다.
         for label in scope.find_all(["dt", "th", "strong", "b", "em", "i", "span", "p"]):
             if cls._excluded(label, scope) or not cls._is_post_date_label(label.get_text()):
                 continue
             yield from cls._label_values(label)
+
+        # (2) 라벨 없는 <time>. 기간·행사 맥락이면 받지 않는다.
+        for t in scope.find_all("time"):
+            if cls._excluded(t, scope) or cls._in_marked_block(t, scope, _NON_POSTING_LABELS):
+                continue
+            text = clean_text(t.get_text(" "))
+            if cls._is_period_text(text):
+                continue
+            yield t.get("datetime", "")
+            yield text
 
         # (3) day/date 계열 클래스를 가진 전용 요소.
         for el in scope.find_all(True):
             if cls._excluded(el, scope) or not cls._has_date_class(el):
                 continue
             text = clean_text(el.get_text(" "))
-            if cls._has_period_marker(text) or cls._in_period_block(el, scope):
+            if cls._is_period_text(text) or cls._in_marked_block(el, scope, _NON_POSTING_LABELS):
                 continue
             yield _DATE_LABEL_PREFIX.sub("", text)
 
@@ -206,25 +216,46 @@ class FscBoardScraper(BaseScraper):
         label = clean_text(text).rstrip(" :：")
         if not label or len(label) > 6:
             return False
-        if any(m in label for m in _PERIOD_MARKERS):
+        if any(m in label for m in _NON_POSTING_LABELS + _RANGE_MARKERS):
             return False
         return label in _POST_DATE_LABELS
 
     @staticmethod
-    def _has_period_marker(text: str) -> bool:
-        return any(m in text for m in _PERIOD_MARKERS)
+    def _is_period_text(text: str) -> bool:
+        """값 텍스트 자체가 기간을 나타내는지('2026-07-24 ~ 2026-08-13')."""
+        return any(m in text for m in _PERIOD_LABELS + _RANGE_MARKERS)
 
     @classmethod
-    def _in_period_block(cls, el, scope) -> bool:
-        """'예고기간' 같은 기간 표기가 붙은 블록 안의 날짜는 게시일이 아니다."""
+    def _in_marked_block(cls, el, scope, markers) -> bool:
+        """el 을 감싼 블록 어딘가에 markers 라벨이 붙어 있으면 게시일이 아니다.
+
+        조상을 몇 단계만 보면 라벨과 값 사이에 래퍼가 더 끼는 마크업
+        (<div class="period"><span>예고기간</span><div><div><time …>)에서 가드가
+        뚫린다. 그래서 scope(목록 항목 <li> 또는 상세 머리말)까지 전부 훑는다.
+
+        단, 제목·첨부 영역의 낱말은 라벨이 아니다. 조상의 텍스트를 통째로 보면
+        '사업보고서 제출 기한 연장' 같은 제목이나 '…기간별 현황.hwp' 같은 첨부파일명
+        하나로 그 항목의 게시일이 전부 버려진다.
+        """
         node = el.parent
-        for _ in range(2):
-            if node is None or node is scope or getattr(node, "name", None) is None:
-                return False
-            if cls._has_period_marker(clean_text(node.get_text(" "))):
+        while node is not None and node is not scope and getattr(node, "name", None) is not None:
+            if any(m in cls._label_text(node, scope) for m in markers):
                 return True
             node = node.parent
         return False
+
+    @classmethod
+    def _label_text(cls, node, scope) -> str:
+        """node 의 텍스트에서 제목(.subject)·첨부(.file) 영역을 뺀 것(라벨 판정용)."""
+        parts = []
+        for child in node.descendants:
+            if getattr(child, "name", None) is not None:
+                continue  # 텍스트 노드만 모은다
+            parent = child.parent
+            if parent is not None and cls._excluded(parent, scope):
+                continue
+            parts.append(str(child))
+        return clean_text(" ".join(parts))
 
     @staticmethod
     def _has_date_class(el) -> bool:
@@ -264,8 +295,9 @@ class FscBoardScraper(BaseScraper):
     def _normalize_date(raw: str) -> str:
         """값이 통째로 날짜 하나일 때만 YYYY-MM-DD 로. 아니면 ''(빈 문자열 유지)."""
         text = clean_text(raw or "")
-        if _ISO_DATETIME.match(text):
-            text = text.split("T", 1)[0]
+        iso = _ISO_DATETIME.match(text)
+        if iso:
+            text = iso.group(1)
         m = _DATE_VALUE.match(text)
         if not m:
             return ""

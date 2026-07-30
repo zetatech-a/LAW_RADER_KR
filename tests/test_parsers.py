@@ -283,6 +283,86 @@ def test_fsc_enrich_keeps_list_date_and_tolerates_dateless_detail():
     assert bare.date == ""
 
 
+def test_fsc_period_guard_reaches_deeply_nested_wrappers():
+    """기간 라벨과 값 사이에 래퍼가 여러 겹 끼어도 가드가 뚫리지 않는다(코덱스 리뷰).
+
+    조상을 고정 단계(2단)만 보면 '예고기간'을 담은 블록에 닿기 전에 탐색이 끝나
+    예고기간 시작일이 게시일로 올라온다.
+    """
+    nested_time = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="./po040301/view?noticeId=4163" title="규정변경예고">규정변경예고</a></div>
+      <div class="period"><span class="tit">예고기간</span>
+        <div class="wrap"><div class="inner"><div class="row">
+          <time datetime="2026-07-24">2026-07-24</time>
+        </div></div></div></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/po040301", nested_time)[0].date == ""
+
+    nested_class = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="./po040301/view?noticeId=4164" title="규정변경예고">규정변경예고</a></div>
+      <div class="period"><span class="tit">예고기간</span>
+        <div class="wrap"><div class="inner"><div class="row">
+          <span class="day">2026-07-24</span>
+        </div></div></div></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/po040301", nested_class)[0].date == ""
+
+
+def test_fsc_period_words_in_title_or_filename_do_not_drop_the_date():
+    """기간 가드는 라벨에만 걸린다 — 제목·첨부파일명의 낱말로 게시일을 버리지 않는다.
+
+    조상 텍스트를 통째로 보면 '제출 기한' 같은 흔한 제목 하나로 그 항목의 게시일이
+    사라진다(기간 가드를 조상 전체로 넓히면서 생기는 반대쪽 실패).
+    """
+    html = """
+    <ul><li><div class="inner"><div class="cont">
+      <div class="subject"><a href="/no010101/87417"
+        title="사업보고서 제출 기한 연장 및 의견제출 기간 안내">사업보고서 제출 기한 연장</a></div>
+      <div class="file"><div class="file-list">
+        <a href="/comm/getFile?srvcId=BBSTY1&upperNo=87417&fileNo=1"><span class="name">기간별 현황.hwp</span></a>
+      </div></div>
+      <div class="info"><span class="division">공시제도과</span><span class="day">2026-07-24</span></div>
+    </div></div></li></ul>"""
+    posts = _fsc("https://www.fsc.go.kr/no010101", html)
+    assert posts[0].date == "2026-07-24"
+    assert posts[0].attachments[0].filename == "기간별 현황.hwp"
+
+
+def test_fsc_explicit_posting_label_beats_unrelated_time_element():
+    """무관한 <time>(회의일/행사일)보다 '등록일' 라벨 값이 우선한다(코덱스 리뷰).
+
+    <time> 은 '이 값이 날짜'라는 것만 알려줄 뿐 게시일이라는 역할까지 보장하지 않는다.
+    """
+    meeting = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87414" title="정례회의 개최">정례회의 개최</a></div>
+      <div class="meeting"><span class="tit">회의일</span><time datetime="2026-08-01">2026-08-01</time></div>
+      <dl class="info"><dt>등록일</dt><dd>2026-07-25</dd></dl>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/no010101", meeting)[0].date == "2026-07-25"
+
+    # 행사일만 있고 게시일 라벨이 없으면 행사일을 게시일로 삼지 않는다.
+    event_only = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87415" title="설명회 안내">설명회 안내</a></div>
+      <div class="event"><span class="tit">행사일</span><time datetime="2026-08-05">2026-08-05</time></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/no010101", event_only)[0].date == ""
+
+
+def test_fsc_time_datetime_accepts_space_separated_value():
+    """<time datetime> 은 날짜와 시각을 'T' 또는 공백으로 가른다 — 둘 다 처리(코덱스 리뷰)."""
+    for value in ("2026-07-22T14:00:00+09:00", "2026-07-22 14:00:00+09:00", "2026-07-22"):
+        html = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="/no010101/87416" title="정례회의 결과">정례회의 결과</a></div>
+          <p class="info"><time datetime="{value}">7월 22일</time></p>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/no010101", html)[0].date == "2026-07-22", value
+
+
 def test_fss_title_link_board_nttid():
     html = """
     <table><tbody><tr>
