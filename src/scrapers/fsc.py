@@ -64,7 +64,11 @@ _DATE_LABEL_PREFIX = re.compile(
     r"^(?:" + "|".join(sorted(_POST_DATE_LABELS, key=len, reverse=True)) + r")\s*[:：]?\s*"
 )
 # 게시일이 아닌 '기간' 라벨 — 입법예고의 예고기간(시작일·종료일) 등.
-_PERIOD_LABELS = ("기간", "기한", "마감", "시행일", "제출")
+# 기간의 양 끝을 가리키는 라벨(시작일/종료일 …)도 게시일이 아니다.
+_PERIOD_LABELS = (
+    "기간", "기한", "마감", "시행일", "제출",
+    "시작일", "종료일", "개시일", "만료일",
+)
 # 날짜이긴 하나 게시일이 아닌 맥락. <time> 은 '이 값이 날짜'라는 것만 알려줄 뿐
 # '게시일'이라는 역할까지 보장하지 않으므로, 라벨 없는 <time> 을 받기 전에 거른다.
 _EVENT_LABELS = ("회의일", "행사일", "개최", "일시", "예정일", "발표일", "접수일")
@@ -76,8 +80,16 @@ _RANGE_MARKERS = ("~", "∼", "〜")
 _SEPARATOR_ONLY = re.compile(r"^[\s:：·ㆍ|/\\,.\-–—_>»«\[\](){}]+$")
 # 텍스트 어딘가에 날짜가 들어 있는지(라벨인지 '값을 품은 블록'인지 가르는 데 쓴다).
 _DATE_ANYWHERE = re.compile(r"(?:19|20)\d{2}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}")
-# 날짜 후보에서 통째로 제외할 영역(첨부파일명·제목).
-_EXCLUDED_CLASS = ("file", "atch", "subject")
+# 날짜 후보에서 통째로 제외할 영역(첨부파일명·제목)의 클래스 '토큰'.
+# 부분문자열로 맞추면 안 된다 — 'profile'에 'file'이, 'subject-info'에 'subject'가
+# 걸려 정작 그 안에 있는 등록일까지 통째로 사라진다.
+_EXCLUDED_CLASS = frozenset(
+    {
+        "subject",
+        "file", "files", "file-list", "filelist", "file-wrap", "filewrap",
+        "atch", "atchfile", "atch-file",
+    }
+)
 # 목록에 게시일 전용 요소가 없을 때 상세 페이지에서 볼 머리말/꼬리말 영역.
 _DETAIL_DATE_SCOPES = (
     ".board-view-wrap .header",
@@ -246,23 +258,64 @@ class FscBoardScraper(BaseScraper):
         섞여 있어 멀쩡한 게시일까지 버려진다. 제목·첨부도 같은 이유로 오염원이다
         ('사업보고서 제출 기한 연장' 같은 제목 하나로 그 항목 날짜가 사라진다).
 
-        그래서 scope 까지 조상을 올라가되, 각 단계에서 후보가 든 가지 '바로 앞'의
-        라벨만 본다 — `_preceding_label` 참고.
+        그래서 scope 까지 조상을 올라가되, 각 단계에서 두 가지만 본다.
+
+        1. 후보가 든 가지 '바로 앞'의 라벨 (`_preceding_label`) — 가장 구체적이라
+           결론이 나면 거기서 끝낸다.
+        2. 그걸로 못 정하면 후보를 감싼 블록의 '선두 라벨' (`_block_heading`).
+           바로 앞 라벨이 '시작일'이거나 앞이 이미 날짜 값이면 그 값을 감싼
+           <div class="period"><span>예고기간</span>… 맥락을 놓치기 때문이다.
+           형제 블록의 텍스트가 아니라 '이 블록 자신이 무엇으로 시작하는지'만 보므로
+           나란한 예고기간 블록이 옆 블록의 게시일을 가리지는 않는다.
         """
         reject = tuple(markers) + _RANGE_MARKERS
+
+        def verdict(label):
+            """라벨 하나로 판정. True=거부, False=확정 수용, None=판단 보류."""
+            if not label:
+                return None
+            if any(m in label for m in reject):
+                return True
+            if cls._is_post_date_label(label):
+                return False
+            return None
+
         node = el
         while node is not None and node is not scope:
             parent = node.parent
             if parent is None or getattr(parent, "name", None) is None:
                 return False
-            label = cls._preceding_label(node, scope)
-            if label:
-                if any(m in label for m in reject):
-                    return True
-                if cls._is_post_date_label(label):
-                    return False  # 가장 가까운 라벨이 게시일이면 더 볼 것 없다
+            for label in (
+                cls._preceding_label(node, scope),
+                cls._block_heading(parent, scope),
+            ):
+                decided = verdict(label)
+                if decided is not None:
+                    return decided
             node = parent
         return False
+
+    @classmethod
+    def _block_heading(cls, block, scope) -> str:
+        """블록의 '선두 라벨'. 이 블록 안의 값들은 그 라벨에 딸린 것으로 본다.
+
+        값(날짜)이 먼저 나오면 라벨로 시작하는 블록이 아니므로 ''를 준다.
+        """
+        for child in block.children:
+            if getattr(child, "name", None) is None:
+                text = clean_text(str(child))
+                if not text or _SEPARATOR_ONLY.match(text):
+                    continue
+                return text
+            if cls._excluded(child, scope):
+                return ""
+            text = clean_text(child.get_text(" "))
+            if not text or _SEPARATOR_ONLY.match(text):
+                continue
+            if _DATE_ANYWHERE.search(text):
+                return ""
+            return text
+        return ""
 
     @classmethod
     def _preceding_label(cls, node, scope) -> str:
@@ -309,8 +362,7 @@ class FscBoardScraper(BaseScraper):
         node = el
         while node is not None and node is not scope and getattr(node, "name", None) is not None:
             for name in node.get("class") or []:
-                low = name.lower()
-                if any(bad in low for bad in _EXCLUDED_CLASS):
+                if name.lower() in _EXCLUDED_CLASS:
                     return True
             node = node.parent
         return False

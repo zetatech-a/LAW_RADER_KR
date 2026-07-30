@@ -387,6 +387,70 @@ def test_fsc_preceding_sibling_is_label_or_block_by_content_not_tag():
         assert _fsc("https://www.fsc.go.kr/po040301", html)[0].date == "", tag
 
 
+def test_fsc_period_endpoint_labels_are_not_posting_dates():
+    """예고기간의 양 끝(시작일/종료일)을 게시일로 삼지 않는다(코덱스 리뷰).
+
+    바로 앞 라벨이 '시작일'이면 기간 라벨이 아니라 통과해 버린다. 감싼 블록의
+    선두 라벨('예고기간')까지 봐야 막힌다.
+    """
+    for label in ("시작일", "종료일", "개시일", "만료일"):
+        html = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="./po040301/view?noticeId=4170" title="시행령 입법예고">시행령 입법예고</a></div>
+          <div class="period"><span class="tit">예고기간</span>
+            <span class="tit">{label}</span><time datetime="2026-07-24">2026-07-24</time></div>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/po040301", html)[0].date == "", label
+
+    # 감싼 '예고기간' 블록이 없어도 시작일 자체는 게시일이 아니다.
+    bare = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="./po040301/view?noticeId=4171" title="시행령 입법예고">시행령 입법예고</a></div>
+      <div class="info"><span class="tit">시작일</span><time datetime="2026-07-24">2026-07-24</time></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/po040301", bare)[0].date == ""
+
+
+def test_fsc_period_context_survives_a_preceding_date_value():
+    """시작·종료가 물결 없이 두 값으로 나뉘어도 둘 다 게시일이 아니다(코덱스 리뷰).
+
+    두 번째 값 입장에서 바로 앞은 '첫 번째 날짜 값'이라 경계로 보이고, 그 순간
+    바깥 '예고기간' 라벨을 잃는다.
+    """
+    for sep in ("", " ", "부터 ", "<span>부터</span>"):
+        html = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="./po040301/view?noticeId=4172" title="시행령 입법예고">시행령 입법예고</a></div>
+          <div class="period"><span class="tit">예고기간</span>
+            <span class="day">2026-07-24</span>{sep}<span class="day">2026-08-13</span></div>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/po040301", html)[0].date == "", repr(sep)
+
+
+def test_fsc_excluded_class_matches_tokens_not_substrings():
+    """제외 영역은 클래스 '토큰'으로 맞춘다 — 부분문자열이면 안 된다(코덱스 리뷰).
+
+    'profile'에 'file'이, 'subject-info'에 'subject'가 걸리면 그 안의 등록일까지
+    통째로 사라진다.
+    """
+    for wrapper in ("profile", "subject-info", "subject-wrap", "filed-info", "info"):
+        html = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="/no010101/87420" title="회의 결과">회의 결과</a></div>
+          <div class="{wrapper}"><span class="tit">등록일</span><span class="day">2026-07-23</span></div>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/no010101", html)[0].date == "2026-07-23", wrapper
+
+    # 진짜 제외 대상(.subject/.file-list)은 여전히 후보가 되지 않아야 한다.
+    still_excluded = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87421" title="회의 결과">회의 결과</a>
+        <span class="day">2019-01-01</span></div>
+      <div class="file"><div class="file-list"><span class="name">2020-02-02 별첨.hwp</span></div></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/no010101", still_excluded)[0].date == ""
+
+
 def test_fsc_period_words_in_title_or_filename_do_not_drop_the_date():
     """기간 가드는 라벨에만 걸린다 — 제목·첨부파일명의 낱말로 게시일을 버리지 않는다.
 
