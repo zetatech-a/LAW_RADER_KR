@@ -6,8 +6,9 @@
 
 두 게시판 모두 목록이 `<li> … <div class="subject"><a title="제목" href="상세"> …`
 구조이고, 첨부는 목록 `<div class="file">` 안에 노출된다(라이브 HTML 기준). 게시일은
-같은 `<li>` 안의 전용 요소(`<time>`, '등록일' 라벨의 값, day/date 계열 클래스)에서만
-읽는다 — `_list_date` 주석 참고.
+전용 요소(`<time>`, '등록일' 라벨의 값, day/date 계열 클래스)에서만 읽는다. 목록
+항목에 그런 요소가 없는 레이아웃이면 상세 머리말(`.board-view-wrap .header`)에서
+보강한다 — `_list_date` / `_detail_date` 주석 참고.
 """
 from __future__ import annotations
 
@@ -34,8 +35,6 @@ _FILE_HINT = ("getfile", "download", "filedown", "/file", "atchfile")
 # 텍스트가 섞이면 매치되지 않는다.
 _DATE_VALUE = re.compile(r"^(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?\.?$")
 _ISO_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}T")
-# 값 앞에 붙은 라벨('등록일 : 2026-07-24')을 떼어낸다.
-_DATE_LABEL_PREFIX = re.compile(r"^(?:등록|게시|작성|배포|보도|공고)?\s*(?:일자|일시|일)\s*[:：]?\s*")
 # 클래스 토큰(비알파벳 제거 후)이 '게시일 전용'을 뜻하는지.
 _DATE_CLASS = re.compile(
     r"^(?:day|date"
@@ -49,10 +48,25 @@ _POST_DATE_LABELS = frozenset(
         "배포일", "보도일", "공고일", "일자", "날짜",
     }
 )
+# 값 앞에 붙은 라벨('등록일 : 2026-07-24')을 떼어낸다. 인정하는 라벨과 떼어내는 라벨이
+# 어긋나면 '날짜: 2026-07-24' 같은 값이 통째로 버려지므로, 목록에서 직접 만든다.
+# (긴 라벨 우선 — '등록일자'가 '등록일'보다 먼저 매치되어야 '자'가 남지 않는다.)
+_DATE_LABEL_PREFIX = re.compile(
+    r"^(?:" + "|".join(sorted(_POST_DATE_LABELS, key=len, reverse=True)) + r")\s*[:：]?\s*"
+)
 # 게시일이 아닌 '기간' 표기 — 입법예고의 예고기간(시작일·종료일) 등.
 _PERIOD_MARKERS = ("기간", "기한", "마감", "시행일", "제출", "~", "∼", "〜")
 # 날짜 후보에서 통째로 제외할 영역(첨부파일명·제목).
 _EXCLUDED_CLASS = ("file", "atch", "subject")
+# 목록에 게시일 전용 요소가 없을 때 상세 페이지에서 볼 머리말/꼬리말 영역.
+_DETAIL_DATE_SCOPES = (
+    ".board-view-wrap .header",
+    ".board-view-wrap .info",
+    ".board-view-wrap .foot",
+    ".board-view .header",
+    ".board-view .info",
+    ".view-head",
+)
 
 
 class FscBoardScraper(BaseScraper):
@@ -124,39 +138,53 @@ class FscBoardScraper(BaseScraper):
 
         그래서 (1) <time>, (2) '등록일/게시일' 라벨의 값, (3) day/date 계열 클래스
         요소 순으로 후보를 좁히고, 그 값이 통째로 유효한 날짜일 때만 인정한다.
-        전용 요소가 없거나 형식이 어긋나면 빈 문자열을 유지한다.
+        전용 요소가 없거나 형식이 어긋나면 빈 문자열을 유지하고, 상세를 읽는
+        enrich() 단계에서 `_detail_date` 로 한 번 더 시도한다.
         """
         li = anchor.find_parent("li")
         if li is None:
             return ""
-        for raw in self._date_candidates(li):
-            parsed = self._normalize_date(raw)
+        return self._scope_date(li)
+
+    @classmethod
+    def _scope_date(cls, scope) -> str:
+        """주어진 영역(목록 항목 <li> 또는 상세 머리말) 안에서 게시일을 찾는다."""
+        for raw in cls._date_candidates(scope):
+            parsed = cls._normalize_date(raw)
             if parsed:
                 return parsed
         return ""
 
     @classmethod
-    def _date_candidates(cls, li):
-        """게시일 후보 텍스트를 신뢰도 순으로 낸다(첨부·제목 영역은 어느 경로에서도 제외)."""
+    def _date_candidates(cls, scope):
+        """게시일 후보 텍스트를 신뢰도 순으로 낸다.
+
+        첨부·제목 영역과 '예고기간' 블록은 세 경로 모두에서 똑같이 배제한다. <time>
+        이라고 예외를 두면 <div class="period">…<time datetime="2026-07-24"> 같은
+        마크업에서 예고기간 시작일이 그대로 게시일로 올라온다.
+        """
         # (1) 시맨틱 마크업이 있으면 가장 믿을 만하다.
-        for t in li.find_all("time"):
-            if cls._excluded(t):
+        for t in scope.find_all("time"):
+            if cls._excluded(t, scope) or cls._in_period_block(t, scope):
+                continue
+            text = clean_text(t.get_text(" "))
+            if cls._has_period_marker(text):
                 continue
             yield t.get("datetime", "")
-            yield t.get_text()
+            yield text
 
         # (2) '등록일/게시일' 라벨의 값. '예고기간' 등 기간 라벨은 후보가 되지 않는다.
-        for label in li.find_all(["dt", "th", "strong", "b", "em", "i", "span", "p"]):
-            if cls._excluded(label) or not cls._is_post_date_label(label.get_text()):
+        for label in scope.find_all(["dt", "th", "strong", "b", "em", "i", "span", "p"]):
+            if cls._excluded(label, scope) or not cls._is_post_date_label(label.get_text()):
                 continue
             yield from cls._label_values(label)
 
         # (3) day/date 계열 클래스를 가진 전용 요소.
-        for el in li.find_all(True):
-            if cls._excluded(el) or not cls._has_date_class(el):
+        for el in scope.find_all(True):
+            if cls._excluded(el, scope) or not cls._has_date_class(el):
                 continue
             text = clean_text(el.get_text(" "))
-            if cls._has_period_marker(text) or cls._in_period_block(el):
+            if cls._has_period_marker(text) or cls._in_period_block(el, scope):
                 continue
             yield _DATE_LABEL_PREFIX.sub("", text)
 
@@ -187,11 +215,11 @@ class FscBoardScraper(BaseScraper):
         return any(m in text for m in _PERIOD_MARKERS)
 
     @classmethod
-    def _in_period_block(cls, el) -> bool:
+    def _in_period_block(cls, el, scope) -> bool:
         """'예고기간' 같은 기간 표기가 붙은 블록 안의 날짜는 게시일이 아니다."""
         node = el.parent
         for _ in range(2):
-            if node is None or getattr(node, "name", None) in (None, "li"):
+            if node is None or node is scope or getattr(node, "name", None) is None:
                 return False
             if cls._has_period_marker(clean_text(node.get_text(" "))):
                 return True
@@ -206,16 +234,31 @@ class FscBoardScraper(BaseScraper):
         return False
 
     @staticmethod
-    def _excluded(el) -> bool:
+    def _excluded(el, scope) -> bool:
         """첨부(.file/.file-list)·제목(.subject) 영역은 날짜 후보가 아니다."""
         node = el
-        while node is not None and getattr(node, "name", None) not in (None, "li"):
+        while node is not None and node is not scope and getattr(node, "name", None) is not None:
             for name in node.get("class") or []:
                 low = name.lower()
                 if any(bad in low for bad in _EXCLUDED_CLASS):
                     return True
             node = node.parent
         return False
+
+    @classmethod
+    def _detail_date(cls, soup) -> str:
+        """상세 페이지 머리말/꼬리말의 게시일 전용 요소에서 게시일을 읽는다.
+
+        FSC 상세는 .board-view-wrap 안 header/body/foot 구조이고 담당부서·등록일은
+        본문(.body) 밖 머리말·꼬리말에 있다. 본문 전체는 훑지 않는다 — 보도자료
+        본문에는 '2026-07-24 중 배포'처럼 게시일이 아닌 날짜가 흔하다.
+        """
+        for selector in _DETAIL_DATE_SCOPES:
+            for scope in soup.select(selector):
+                parsed = cls._scope_date(scope)
+                if parsed:
+                    return parsed
+        return ""
 
     @staticmethod
     def _normalize_date(raw: str) -> str:
@@ -292,6 +335,10 @@ class FscBoardScraper(BaseScraper):
             )
             if body_el:
                 post.body = clean_text(body_el.get_text("\n"))
+            # 목록에 게시일 전용 요소가 없는 레이아웃이면 상세 머리말에서 보강한다.
+            # (목록에서 이미 얻었으면 덮어쓰지 않는다.)
+            if not post.date:
+                post.date = self._detail_date(soup)
         except Exception as e:  # noqa: BLE001
             log.warning("[%s] 상세 본문 로드 실패 %s: %s", self.key, post.url, e)
 

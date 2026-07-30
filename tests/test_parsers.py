@@ -14,9 +14,30 @@ from src.scrapers.fsc import FscBoardScraper
 from src.scrapers.fss import FssBoardScraper
 
 
+def _fsc_scraper(list_url, fetcher=None):
+    return FscBoardScraper(
+        SourceConfig(key="k", name="k", type="x", list_url=list_url), fetcher=fetcher
+    )
+
+
 def _fsc(list_url, html):
-    sc = FscBoardScraper(SourceConfig(key="k", name="k", type="x", list_url=list_url), fetcher=None)
-    return sc._parse_list(BeautifulSoup(html, "lxml"))
+    return _fsc_scraper(list_url)._parse_list(BeautifulSoup(html, "lxml"))
+
+
+class _DetailFetcher:
+    """enrich() 용 최소 fetcher — 상세 HTML 하나만 돌려준다."""
+
+    def __init__(self, html):
+        self.html = html
+
+    def get(self, url, referer=None):
+        return object()
+
+    def text(self, resp):
+        return self.html
+
+    def download(self, url, referer=None):  # pragma: no cover - 첨부 없는 케이스
+        raise AssertionError("이 테스트에는 첨부가 없어야 한다")
 
 
 def _fss(list_url, html):
@@ -165,6 +186,101 @@ def test_fsc_date_absent_or_invalid_stays_empty():
       <div class="info"><span class="day">2026-07</span></div>
     </div></li></ul>"""
     assert _fsc("https://www.fsc.go.kr/no010101", partial)[0].date == ""
+
+
+def test_fsc_legislation_period_time_element_is_not_the_posting_date():
+    """<time> 도 예외 없이 기간 가드를 받는다(코덱스 리뷰).
+
+    예고기간을 시맨틱 마크업으로 적은 레이아웃에서 <time> 경로만 가드를 건너뛰면
+    예고기간 시작일이 그대로 게시일로 올라온다.
+    """
+    period_only = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="./po040301/view?noticeId=4161" title="규정변경예고">규정변경예고</a></div>
+      <div class="info"><span class="tit">예고기간</span>
+        <time datetime="2026-07-24">2026-07-24</time> ~ <time datetime="2026-08-13">2026-08-13</time></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/po040301", period_only)[0].date == ""
+
+    # 예고기간과 등록일이 각각 별도 블록이면 등록일만 골라낸다.
+    with_posted = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="./po040301/view?noticeId=4162" title="시행령 입법예고">시행령 입법예고</a></div>
+      <div class="period"><span class="tit">예고기간</span>
+        <time datetime="2026-07-24">2026-07-24</time> ~ <time datetime="2026-08-13">2026-08-13</time></div>
+      <div class="info"><span class="tit">등록일</span><time datetime="2026-07-23">2026-07-23</time></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/po040301", with_posted)[0].date == "2026-07-23"
+
+
+def test_fsc_date_label_inside_dedicated_element_is_stripped():
+    """전용 요소가 라벨과 값을 함께 담아도 인정한다(코덱스 리뷰).
+
+    '날짜'는 게시일 라벨로 인정하면서 접두사 제거 대상에서 빠져 있으면
+    '날짜: 2026-07-24' 가 통째로 버려진다. 인정 라벨 전부가 제거 대상이어야 한다.
+    """
+    for label in ("날짜", "등록일", "등록일자", "게시일자", "일자"):
+        html = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="/no010101/87410" title="회의 결과">회의 결과</a></div>
+          <div class="info"><span class="date">{label}: 2026-07-24</span></div>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/no010101", html)[0].date == "2026-07-24", label
+
+
+def test_fsc_enrich_fills_date_from_detail_header_when_list_has_none():
+    """목록에 게시일 전용 요소가 없는 레이아웃이면 상세 머리말에서 보강한다(코덱스 리뷰).
+
+    기존 목록 마크업(담당부서/조회수만 노출)에서는 목록 추출만으로는 날짜가 계속
+    비어 있으므로, 상세를 읽는 enrich() 에서 한 번 더 시도해야 실제로 채워진다.
+    """
+    list_html = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87411" title="정례회의 결과">정례회의 결과</a></div>
+      <div class="info"><span class="division">대변인실</span><span class="hit">1,234</span></div>
+    </div></li></ul>"""
+    post = _fsc("https://www.fsc.go.kr/no010101", list_html)[0]
+    assert post.date == ""  # 목록 단계에서는 여전히 빈 문자열
+
+    detail = """
+    <div class="board-view-wrap">
+      <div class="header">
+        <h3 class="subject">정례회의 결과</h3>
+        <dl class="info"><dt>담당부서</dt><dd>대변인실</dd><dt>등록일</dt><dd>2026-07-21</dd></dl>
+      </div>
+      <div class="body"><p>2026-07-15 회의에서 의결한 내용입니다.</p></div>
+    </div>"""
+    _fsc_scraper("https://www.fsc.go.kr/no010101", _DetailFetcher(detail)).enrich(post)
+    assert post.date == "2026-07-21"                  # 본문의 2026-07-15 가 아님
+    assert "의결한 내용입니다" in post.body            # 기존 본문 추출 보존
+
+
+def test_fsc_enrich_keeps_list_date_and_tolerates_dateless_detail():
+    """목록에서 얻은 게시일은 상세가 덮어쓰지 않고, 상세에도 없으면 빈 문자열 유지."""
+    list_html = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87412" title="보도자료">보도자료</a></div>
+      <div class="info"><span class="day">2026-07-24</span></div>
+    </div></li></ul>"""
+    post = _fsc("https://www.fsc.go.kr/no010101", list_html)[0]
+    detail = """
+    <div class="board-view-wrap">
+      <div class="header"><dl><dt>등록일</dt><dd>2026-07-20</dd></dl></div>
+      <div class="body"><p>본문</p></div>
+    </div>"""
+    _fsc_scraper("https://www.fsc.go.kr/no010101", _DetailFetcher(detail)).enrich(post)
+    assert post.date == "2026-07-24"  # 목록 값 유지
+
+    bare = _fsc(
+        "https://www.fsc.go.kr/no010101",
+        """<ul><li><div class="cont">
+          <div class="subject"><a href="/no010101/87413" title="보도자료">보도자료</a></div>
+        </div></li></ul>""",
+    )[0]
+    dateless = '<div class="board-view-wrap"><div class="header"><h3>보도자료</h3></div>' \
+               '<div class="body"><p>공고 제2026-15호 관련</p></div></div>'
+    _fsc_scraper("https://www.fsc.go.kr/no010101", _DetailFetcher(dateless)).enrich(bare)
+    assert bare.date == ""
 
 
 def test_fss_title_link_board_nttid():
