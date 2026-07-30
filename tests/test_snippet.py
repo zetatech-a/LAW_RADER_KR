@@ -84,6 +84,18 @@ def test_title_comparison_keeps_numeric_punctuation():
     assert not is_duplicate_title("한도 1234억원 상향", "한도 1,234억원 상향")
 
 
+def test_title_comparison_keeps_signs_separated_from_numbers():
+    """부호를 숫자와 띄어 쓴 형태("수익률 - 3.5%")도 부호로 본다.
+
+    공백만 보고 형식 문자로 지우면 부호가 반대인 본문 줄이 제목 중복으로 사라진다.
+    """
+    assert not is_duplicate_title("수익률 3.5% 기록", "수익률 - 3.5% 기록")
+    assert not is_duplicate_title("수익률 - 3.5% 기록", "수익률 3.5% 기록")
+    assert not is_duplicate_title("실적 2026724 발표", "실적 2026. 7. 24. 발표")
+    # 같은 표기끼리는 여전히 중복이다.
+    assert is_duplicate_title("수익률 - 3.5% 기록", "수익률 - 3.5% 기록")
+
+
 def test_title_comparison_still_ignores_formatting_only_differences():
     """반대로 수치와 무관한 구분자·괄호 차이는 계속 같은 제목으로 본다."""
     assert is_duplicate_title("외부감사 규정 개정안.", "외부감사 규정 개정안")
@@ -135,10 +147,26 @@ def test_strips_label_value_lines_and_press_notice():
 
 
 def test_keeps_body_sentence_that_mentions_javascript_as_a_rule():
-    """'자바스크립트 사용' 도 규제 내용일 수 있다 — 브라우저 안내문만 지운다."""
-    body = "자바스크립트 사용 여부를 점검하도록 규정하였다.\n세부 기준은 붙임과 같다."
-    out = build_fallback_snippet(body, "보안 점검 기준")
-    assert out.startswith("자바스크립트 사용 여부를 점검하도록 규정하였다.")
+    """'자바스크립트' 는 규제 내용일 수 있다 — 브라우저 안내문 형태만 지운다."""
+    for first in (
+        "자바스크립트 사용 여부를 점검하도록 규정하였다.",
+        "금융회사의 홈페이지는 자바스크립트를 활성화하도록 규정하였다.",
+        "홈페이지에 자바스크립트를 적용한 비율은 82%였다.",
+    ):
+        out = build_fallback_snippet(f"{first}\n세부 기준은 붙임과 같다.", "보안 점검 기준")
+        assert out.startswith(first), first
+
+
+def test_strips_complete_javascript_browser_notices():
+    """브라우저·설정 문맥을 갖추고 안내 종결로 끝나는 줄만 걷어낸다."""
+    for notice in (
+        "이 사이트는 자바스크립트를 지원하는 브라우저에서 최적화되어 있습니다.",
+        "자바스크립트를 지원하지 않는 브라우저에서는 정상적으로 동작하지 않습니다.",
+        "브라우저 설정에서 자바스크립트를 활성화해 주세요.",
+    ):
+        assert build_fallback_snippet(f"{notice}\n{BODY_SENTENCE}", TITLE) == (
+            BODY_SENTENCE
+        ), notice
 
 
 def test_zero_width_characters_do_not_split_numbers():
@@ -297,6 +325,17 @@ def test_inline_tags_do_not_break_numbers_or_word_boundaries():
     assert build_fallback_snippet(body, "금리 인하 의결") == (
         "금융위원회는 3.5% 인하를 의결하였다."
     )
+
+
+def test_block_nested_after_text_gets_a_boundary():
+    """텍스트 뒤에 중첩된 블록 앞에도 경계가 있어야 어절이 붙지 않는다."""
+    body = "<div><strong>주의</strong><p>금융위원회는 규정을 의결하였다.</p></div>"
+    assert build_fallback_snippet(body, "규정 의결") == (
+        "주의 금융위원회는 규정을 의결하였다."
+    )
+
+    body = "<div>머리말<ul><li>첫 항목</li><li>둘째 항목</li></ul></div>"
+    assert build_fallback_snippet(body, "안내") == "머리말 첫 항목 둘째 항목"
 
 
 def test_block_tags_still_separate_lines():
