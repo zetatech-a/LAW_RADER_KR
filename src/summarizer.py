@@ -102,6 +102,37 @@ class _ModelUnavailable(Exception):
     """이 모델은 쓸 수 없다(다음 모델로 넘어가야 함). 내부 제어용."""
 
 
+# 세대 종속적인 생성 옵션을 붙일 모델(= Gemini 2.5 계열)만 좁게 매칭한다.
+#
+# thinkingConfig.thinkingBudget 은 Gemini 2.5 계열의 필드다. Gemini 3 계열은 이를
+# thinkingLevel(minimal/low/medium/high) 로 대체했고 생각을 끌 수 없어서,
+# thinkingBudget: 0 을 보내면 400 INVALID_ARGUMENT 로 거절한다. 그런데 응답 message 가
+# "Request contains an invalid argument." 한 줄뿐인 경우가 있어 어느 필드가 문제인지
+# 알려주지 않는다 — 그래서 '보내고 메시지 보고 고치기'가 아니라 애초에 보내지 않는다.
+#
+# gemini-flash-latest 같은 alias 는 요청 시점에 어느 세대를 가리키는지 알 수 없으므로
+# (현재는 Gemini 3 계열) 여기에 걸리지 않는다. thinkingLevel 을 대신 보내지도 않는다 —
+# 지원하는 값이 모델마다 달라(예: 일부 flash-lite 는 minimal/medium 불가) alias 에
+# 보내면 같은 400 을 다른 필드로 다시 만들 뿐이다.
+_GEMINI_25 = re.compile(r"^gemini-2\.5-")
+
+
+def _is_gemini_25(model: str) -> bool:
+    return bool(_GEMINI_25.match((model or "").strip().lower()))
+
+
+# 생각을 끈 모델의 출력 상한. 3줄 요약에는 넉넉하다.
+_MAX_OUTPUT_TOKENS = 1024
+# 생각을 끌 수 없는 모델(Gemini 3 계열)의 출력 상한. 이 상한은 '생각 토큰 + 응답 토큰'
+# 합계에 걸리므로 1024 로 두면 생각만 하다 MAX_TOKENS 로 잘려 본문이 빈 응답이 온다
+# (그러면 _parse 가 폐기 → 서킷 브레이커가 열려 전 건이 원문 발췌로 나간다).
+_MAX_OUTPUT_TOKENS_THINKING = 4096
+
+# 생성 온도. Gemini 3 계열에는 보내지 않는다 — 공식 가이드가 기본값 1.0 유지를 권하고,
+# 낮추면 반복 루프·품질 저하가 생길 수 있다고 명시한다.
+_TEMPERATURE = 0.2
+
+
 def _error_fields(resp) -> tuple[str, str]:
     """응답에서 (error.status, error.message) 를 뽑는다. JSON 이 아니면 ('', 본문 일부)."""
     try:
@@ -204,8 +235,8 @@ class Summarizer:
         self._active_model: str | None = None
         # 사용 불가로 확인된 모델(404 등). 이후 게시글에서 다시 시도하지 않는다.
         self._unavailable: set[str] = set()
-        # thinkingConfig 를 모르는 모델. 400 을 한 번 겪으면 그 모델에는 빼고 보낸다.
-        # alias 의 실제 대상 버전을 알 수 없으므로 모델별로 따로 기억한다.
+        # thinkingConfig 를 받지 않는 모델. 400 을 한 번 겪으면 그 모델에는 빼고 보낸다
+        # (모델별로 따로 기억한다). 애초에 Gemini 2.5 계열에만 보내므로 평상시엔 빈 집합.
         self._thinking_unsupported: set[str] = set()
 
     @property
@@ -384,24 +415,40 @@ class Summarizer:
         )
         raise SummaryUnavailable(f"사용 가능한 모델 없음: {last_reason}")
 
+    def _generation_config(self, model: str, send_thinking: bool) -> dict:
+        """모델이 받아들이는 옵션만 담은 generationConfig.
+
+        구조화 출력(responseMimeType·responseSchema)은 모든 대상 모델에서 지원되므로
+        항상 보낸다. 세대에 따라 뜻이 달라지거나 아예 없는 옵션(thinkingConfig,
+        temperature)은 그 세대의 모델에만 붙인다.
+        """
+        gc: dict = {
+            "responseMimeType": "application/json",
+            "responseSchema": _SCHEMA,
+            # 생각을 못 끄는 모델에서는 이 값이 생각 토큰까지 함께 덮는다.
+            "maxOutputTokens": (
+                _MAX_OUTPUT_TOKENS if send_thinking else _MAX_OUTPUT_TOKENS_THINKING
+            ),
+        }
+        if send_thinking:
+            # 단순 요약이라 생각은 필요 없다. 생각을 켠 채 출력 상한이 낮으면 본문이
+            # 빈 채로 MAX_TOKENS 로 끝난다.
+            gc["thinkingConfig"] = {"thinkingBudget": 0}
+        if _is_gemini_25(model):
+            gc["temperature"] = _TEMPERATURE
+        return gc
+
     def _generate_with(
         self, model: str, prompt: str, deadline: float | None = None
     ) -> dict:
         """모델 하나로 호출한다. 그 모델을 쓸 수 없으면 _ModelUnavailable."""
+        send_thinking = (
+            _is_gemini_25(model) and model not in self._thinking_unsupported
+        )
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json",
-                "responseSchema": _SCHEMA,
-                "maxOutputTokens": 1024,
-            },
+            "generationConfig": self._generation_config(model, send_thinking),
         }
-        send_thinking = model not in self._thinking_unsupported
-        if send_thinking:
-            # 2.5 이상 '생각하는' 모델은 출력 토큰을 생각에 소진해 본문이 빈 채로 끝날 수
-            # 있다. 단순 요약이라 생각 예산은 0 으로 둔다.
-            payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
 
         log.debug("Gemini 호출 (model=%s)", model)
         url = _ENDPOINT.format(model=model)
@@ -440,15 +487,18 @@ class Summarizer:
 
             # thinkingConfig 미지원 모델 → 빼고 즉시 재시도. 설정 교정이지 장애가
             # 아니므로 재시도 횟수를 소모하지 않는다(max_retries=0 에서도 동작).
-            if (
-                resp.status_code == 400
-                and send_thinking
-                and "thinking" in resp.text.lower()
-            ):
+            #
+            # 메시지 본문을 조건에 넣지 않는다. 실제 거절 응답이 어느 필드가 문제인지
+            # 알려주지 않는 경우("Request contains an invalid argument." 뿐)가 있어,
+            # "thinking" 문자열을 찾는 방식은 영원히 걸리지 않는다.
+            # 대신 '우리가 이 요청에 붙인 유일한 선택 옵션이 thinkingConfig 이고 400 을
+            # 받았다'는 사실만으로 그 옵션을 떼고 한 번만 재시도한다(send_thinking 이
+            # False 가 되므로 두 번은 없다). 400 에서 다른 모델로 넘어가지는 않는다.
+            if resp.status_code == 400 and send_thinking:
                 log.info("모델 %s 는 thinkingConfig 미지원 — 제외하고 재시도", model)
                 self._thinking_unsupported.add(model)
                 send_thinking = False
-                payload["generationConfig"].pop("thinkingConfig", None)
+                payload["generationConfig"] = self._generation_config(model, False)
                 continue
 
             # 한도 초과/일시 장애만 재시도. 400·401·403 은 설정 문제라 즉시 실패.

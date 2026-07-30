@@ -15,7 +15,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import EmailConfig, LLMConfig, load_config
 from src.models import Post
 from src.notifier import build_html, build_text, missing_email_settings, send_digest
-from src.summarizer import Summarizer, SummaryUnavailable, summarize_posts
+from src.summarizer import (
+    _MAX_OUTPUT_TOKENS,
+    _MAX_OUTPUT_TOKENS_THINKING,
+    _SCHEMA,
+    _TEMPERATURE,
+    Summarizer,
+    SummaryUnavailable,
+    summarize_posts,
+)
 
 
 def _cfg(**over) -> LLMConfig:
@@ -276,10 +284,13 @@ class _ModelSession:
         self._by_model = dict(by_model)
         self._default = default
         self.models = []
+        self.sent = []
 
     def post(self, url, headers=None, json=None, timeout=None):
         model = url.rstrip("/").split("/")[-1].split(":")[0]
         self.models.append(model)
+        # payload 는 재시도에서 그 자리에서 교체되므로 스냅샷으로 남긴다.
+        self.sent.append(deepcopy(json))
         resp = self._by_model.get(model, self._default)
         if resp is None:
             raise AssertionError(f"호출되면 안 되는 모델: {model}")
@@ -291,6 +302,8 @@ class _ModelSession:
 _PRIMARY = "gemini-flash-latest"
 _FB1 = "gemini-3.6-flash"
 _FB2 = "gemini-3.5-flash-lite"
+# thinkingBudget 을 받는 유일한 계열(과거 기본 모델)
+_M25 = "gemini-2.5-flash"
 
 
 def _chain_cfg(**over):
@@ -304,6 +317,11 @@ def _ok_resp(text='{"summary": ["첫째임", "둘째임", "셋째임"]}'):
 def _err_resp(code, status="", message=""):
     payload = {"error": {"code": code, "status": status, "message": message}}
     return _FakeResponse(code, payload, text=json.dumps(payload))
+
+
+def _bare_400():
+    # 운영에서 실제로 받은 응답 — 어떤 인자가 문제인지 알려주지 않는다.
+    return _err_resp(400, "INVALID_ARGUMENT", "Request contains an invalid argument.")
 
 
 def _gone_resp(model="models/x"):
@@ -447,16 +465,124 @@ def test_chains_on_400_saying_model_not_found():
 
 
 def test_thinking_config_retry_is_per_model():
-    # alias 의 실제 대상 버전을 알 수 없으므로 thinkingConfig 호환성은 모델별로 기억한다.
-    s = Summarizer(_chain_cfg(max_retries=0))
+    # thinkingConfig 는 Gemini 2.5 계열에만 보내고, 거절당하면 그 모델에만 기록한다.
+    s = Summarizer(_cfg(model=_M25, fallback_models=[_FB1], max_retries=0))
     thinking_400 = _err_resp(
         400, "INVALID_ARGUMENT", 'Unknown name "thinkingConfig": Cannot find field.'
     )
-    s.session = _ModelSession({_PRIMARY: [thinking_400, _ok_resp()]})
+    s.session = _ModelSession({_M25: [thinking_400, _ok_resp()]})
     assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
-    assert s.session.models == [_PRIMARY, _PRIMARY]     # 같은 모델로 재시도
+    assert s.session.models == [_M25, _M25]             # 같은 모델로 재시도
     assert s._unavailable == set()                      # 사용 불가가 아니다
-    assert s._thinking_unsupported == {_PRIMARY}        # 그 모델에만 기록
+    assert s._thinking_unsupported == {_M25}            # 그 모델에만 기록
+
+
+# --- 실제로 전송되는 request payload 검증 (400 INVALID_ARGUMENT 재발 방지) ---
+#
+# 거절 응답의 message 가 "Request contains an invalid argument." 한 줄뿐일 수 있어
+# 문제 필드를 알려주지 않는다. 그래서 '어떤 옵션을 보냈는지'를 테스트가 직접 본다.
+#   - thinkingConfig.thinkingBudget: Gemini 2.5 전용. Gemini 3 계열은 thinkingLevel 로
+#     대체되고 생각을 끌 수 없어 budget 0 을 보내면 400 이다.
+#   - temperature: Gemini 3 계열은 기본값 1.0 유지가 공식 권고(낮추면 루프·품질 저하).
+
+
+def _sent_cfg(model, **over):
+    return _cfg(model=model, fallback_models=[], max_retries=0, **over)
+
+
+def _payloads(model, responses=None, **over):
+    """모델 하나로 호출하고 (Summarizer, 실제로 보낸 payload 목록)을 돌려준다."""
+    s = Summarizer(_sent_cfg(model, **over))
+    sess = _stub(s, list(responses or [_ok_resp()]))
+    return s, sess.sent
+
+
+def _gen_config(model, **over):
+    s, sent = _payloads(model, **over)
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    return sent[0]["generationConfig"]
+
+
+def test_alias_payload_omits_generation_specific_options():
+    gc = _gen_config(_PRIMARY)
+    assert "thinkingConfig" not in gc
+    assert "temperature" not in gc
+    # 구조화 출력은 그대로 유지한다
+    assert gc["responseMimeType"] == "application/json"
+    assert gc["responseSchema"] == _SCHEMA
+    # 생각을 끌 수 없으므로 출력 상한은 '생각 + 응답' 합계를 담을 만큼 크게 잡는다
+    assert gc["maxOutputTokens"] == _MAX_OUTPUT_TOKENS_THINKING
+
+
+def test_gemini_3_models_get_no_thinking_budget_or_temperature():
+    for model in (_FB1, _FB2, "gemini-3-pro-preview", "gemini-flash-lite-latest"):
+        gc = _gen_config(model)
+        assert "thinkingConfig" not in gc, model
+        assert "temperature" not in gc, model
+        assert gc["responseSchema"] == _SCHEMA, model
+
+
+def test_gemini_25_payload_keeps_thinking_budget_and_temperature():
+    # 2.5 계열에서는 기존 동작(생각 끄기 + 낮은 온도)을 그대로 유지한다.
+    gc = _gen_config(_M25)
+    assert gc["thinkingConfig"] == {"thinkingBudget": 0}
+    assert gc["temperature"] == _TEMPERATURE
+    assert gc["maxOutputTokens"] == _MAX_OUTPUT_TOKENS
+
+
+def test_configured_models_never_send_thinking_budget():
+    # config.yaml 의 모델 목록이 바뀌어도 세대 종속 옵션이 새로 붙지 않게 못박는다.
+    chain = load_config("config.yaml").llm.model_chain
+    assert chain
+    for model in chain:
+        gc = _gen_config(model)
+        assert "thinkingConfig" not in gc, model
+        assert "temperature" not in gc, model
+
+
+def test_fallback_payload_also_omits_generation_specific_options():
+    s = Summarizer(_chain_cfg())
+    s.session = _ModelSession({_PRIMARY: _gone_resp(), _FB1: _ok_resp()})
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    assert s.session.models == [_PRIMARY, _FB1]
+    for model, payload in zip(s.session.models, s.session.sent):
+        gc = payload["generationConfig"]
+        assert "thinkingConfig" not in gc, model
+        assert "temperature" not in gc, model
+        assert gc["responseSchema"] == _SCHEMA, model
+
+
+def test_bare_400_neither_chains_nor_retries():
+    # 필드를 특정하지 않는 400 은 다음 모델로 넘기지도, 재시도하지도 않는다.
+    s = Summarizer(_chain_cfg(max_retries=2, retry_backoff_sec=0))
+    s.session = _ModelSession({_PRIMARY: _bare_400()})
+    with pytest.raises(RuntimeError):
+        s.summarize(_post())
+    assert s.session.models == [_PRIMARY]
+    assert s._unavailable == set()
+    assert s._thinking_unsupported == set()
+
+
+def test_bare_400_drops_thinking_config_once_and_retries():
+    # 2.5 로 알고 보냈는데 거절당하면(alias 가 그 이름으로 옮겨간 경우 등) 우리가 붙인
+    # 유일한 선택 옵션인 thinkingConfig 를 떼고 한 번만 재시도한다.
+    s, sent = _payloads(_M25, [_bare_400(), _ok_resp()])
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    assert len(sent) == 2
+    first, second = (p["generationConfig"] for p in sent)
+    assert first["thinkingConfig"] == {"thinkingBudget": 0}
+    assert "thinkingConfig" not in second
+    assert second["maxOutputTokens"] == _MAX_OUTPUT_TOKENS_THINKING
+    assert second["responseSchema"] == _SCHEMA      # 구조화 출력은 유지
+    assert s._thinking_unsupported == {_M25}
+    assert s._unavailable == set()                  # 사용 불가가 아니다
+
+
+def test_thinking_config_removal_retries_at_most_once():
+    s, sent = _payloads(_M25, [_bare_400(), _bare_400()])
+    with pytest.raises(RuntimeError):
+        s.summarize(_post())
+    assert len(sent) == 2   # 옵션 제거 재시도 1회로 끝(무한 루프 없음)
 
 
 def test_json_schema_validation_preserved_across_fallback():
@@ -1012,7 +1138,8 @@ def test_request_error_propagates_with_original_type():
 
 def test_generate_drops_thinking_config_without_spending_retries():
     # max_retries=0 이어도 thinkingConfig 미지원 400 은 한 번 교정 재시도한다.
-    s = Summarizer(_cfg(max_retries=0))
+    # (thinkingConfig 를 애초에 보내는 계열, 즉 Gemini 2.5 에서만 일어난다)
+    s = Summarizer(_cfg(model=_M25, max_retries=0))
     sess = _stub(
         s,
         [
