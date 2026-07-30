@@ -330,6 +330,63 @@ def test_fsc_sibling_period_block_does_not_mask_unlabelled_posting_date():
         assert posts[0].date == "2026-07-23", value_el
 
 
+def test_fsc_separator_between_label_and_value_is_skipped():
+    """라벨과 값 사이의 구분자(':', '|', '-')를 라벨로 착각하면 안 된다(코덱스 리뷰).
+
+    구분자에서 탐색이 멈추면 정작 '예고기간' 라벨을 못 보고 예고기간 시작일을
+    게시일로 받아들인다.
+    """
+    for sep in (":", "：", "|", "-", "·"):
+        html = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="./po040301/view?noticeId=4166" title="시행령 입법예고">시행령 입법예고</a></div>
+          <div class="info"><span class="tit">예고기간</span> {sep} <time datetime="2026-07-24">2026-07-24</time></div>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/po040301", html)[0].date == "", sep
+
+    # 반대로 '~'는 구분자가 아니라 '이 값이 범위의 꼬리'라는 뜻이므로 건너뛰지 않는다.
+    tail = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="./po040301/view?noticeId=4167" title="시행령 입법예고">시행령 입법예고</a></div>
+      <div class="period"><span class="tit">예고기간</span>
+        <span class="day">2026-07-24</span> ~ <span class="day">2026-08-13</span></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/po040301", tail)[0].date == ""
+
+
+def test_fsc_preceding_sibling_is_label_or_block_by_content_not_tag():
+    """앞 형제가 '라벨'인지 '자기 값을 품은 블록'인지는 태그가 아니라 내용으로 가른다.
+
+    같은 <p>/<div> 가 한 곳에선 라벨('예고기간'), 다른 곳에선 값을 품은 블록
+    ('예고기간 2026-07-24 ~ 2026-08-13')이다. 태그를 열거하면 한쪽을 고치는 순간
+    다른 쪽이 뚫린다(코덱스 리뷰).
+    """
+    # 값을 품은 형제 블록 = 경계 → 뒤따르는 게시일은 살아 있어야 한다.
+    for value_el in (
+        '<time datetime="2026-07-23">2026-07-23</time>',
+        '<span class="day">2026-07-23</span>',
+    ):
+        html = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="./po040301/view?noticeId=4168" title="시행령 입법예고">시행령 입법예고</a></div>
+          <p class="period">예고기간 2026-07-24 ~ 2026-08-13</p>
+          <p class="info">{value_el}</p>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/po040301", html)[0].date == "2026-07-23", value_el
+
+    # 라벨만 든 형제(날짜 없음)는 태그가 <p>든 <div>든 이 값의 라벨 → 거부해야 한다.
+    for tag in ("p", "div"):
+        html = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="./po040301/view?noticeId=4169" title="시행령 입법예고">시행령 입법예고</a></div>
+          <div class="period">
+            <{tag} class="tit">예고기간</{tag}>
+            <{tag} class="val"><time datetime="2026-07-24">2026-07-24</time></{tag}>
+          </div>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/po040301", html)[0].date == "", tag
+
+
 def test_fsc_period_words_in_title_or_filename_do_not_drop_the_date():
     """기간 가드는 라벨에만 걸린다 — 제목·첨부파일명의 낱말로 게시일을 버리지 않는다.
 

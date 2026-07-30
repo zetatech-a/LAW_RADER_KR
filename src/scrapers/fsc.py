@@ -71,11 +71,11 @@ _EVENT_LABELS = ("회의일", "행사일", "개최", "일시", "예정일", "발
 _NON_POSTING_LABELS = _PERIOD_LABELS + _EVENT_LABELS
 # 값 자체가 기간(범위)임을 드러내는 표기.
 _RANGE_MARKERS = ("~", "∼", "〜")
-# 별개 메타데이터 블록을 가르는 태그 — 라벨 탐색은 이 경계를 넘지 않는다.
-_BLOCK_TAGS = (
-    "div", "ul", "ol", "li", "dl", "table", "tbody", "thead", "tr",
-    "section", "article", "header", "footer", "nav",
-)
+# 라벨과 값 사이를 가르는 구분자만으로 이뤄진 조각('：', '|', '-' 등)은 라벨이 아니다.
+# 범위 표기(~)는 뜻이 있으므로 여기 넣지 않는다.
+_SEPARATOR_ONLY = re.compile(r"^[\s:：·ㆍ|/\\,.\-–—_>»«\[\](){}]+$")
+# 텍스트 어딘가에 날짜가 들어 있는지(라벨인지 '값을 품은 블록'인지 가르는 데 쓴다).
+_DATE_ANYWHERE = re.compile(r"(?:19|20)\d{2}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}")
 # 날짜 후보에서 통째로 제외할 영역(첨부파일명·제목).
 _EXCLUDED_CLASS = ("file", "atch", "subject")
 # 목록에 게시일 전용 요소가 없을 때 상세 페이지에서 볼 머리말/꼬리말 영역.
@@ -247,8 +247,7 @@ class FscBoardScraper(BaseScraper):
         ('사업보고서 제출 기한 연장' 같은 제목 하나로 그 항목 날짜가 사라진다).
 
         그래서 scope 까지 조상을 올라가되, 각 단계에서 후보가 든 가지 '바로 앞'의
-        인라인 라벨만 본다. 블록 태그를 만나면 거기서부터는 별개 메타데이터 블록이라
-        이 후보의 맥락이 아니다.
+        라벨만 본다 — `_preceding_label` 참고.
         """
         reject = tuple(markers) + _RANGE_MARKERS
         node = el
@@ -256,7 +255,7 @@ class FscBoardScraper(BaseScraper):
             parent = node.parent
             if parent is None or getattr(parent, "name", None) is None:
                 return False
-            label = cls._preceding_label(node)
+            label = cls._preceding_label(node, scope)
             if label:
                 if any(m in label for m in reject):
                     return True
@@ -265,21 +264,36 @@ class FscBoardScraper(BaseScraper):
             node = parent
         return False
 
-    @staticmethod
-    def _preceding_label(node) -> str:
-        """node 바로 앞의 인라인 라벨 텍스트(블록 경계를 만나면 없는 것으로 본다)."""
+    @classmethod
+    def _preceding_label(cls, node, scope) -> str:
+        """node 바로 앞에서 이 값을 설명하는 라벨 텍스트. 없으면 ''.
+
+        앞 형제가 '라벨'인지 '별개 메타데이터 블록'인지는 태그 이름으로 가를 수 없다.
+        같은 <p>·<div> 가 한 곳에선 라벨('예고기간')이고 다른 곳에선 자기 값을 품은
+        블록('예고기간 2026-07-24 ~ 2026-08-13')이다. 태그를 열거하면 한쪽을 고치는
+        순간 다른 쪽이 뚫린다. 그래서 내용으로 가른다:
+
+        - 구분자만 있는 조각(':', '|', '-' …)은 건너뛰고 실제 라벨을 계속 찾는다.
+          단 '~'는 이 값이 범위의 꼬리라는 뜻이라 건너뛰지 않는다.
+        - 날짜를 품고 있으면 자기 값을 가진 별개 블록이므로 경계로 본다(이 후보의
+          라벨이 아니다).
+        - 제목·첨부 영역도 라벨이 아니다('제출 기한 연장' 같은 제목이 기간 라벨로
+          오인된다).
+        """
         for prev in node.previous_siblings:
-            name = getattr(prev, "name", None)
-            if name is None:
+            if getattr(prev, "name", None) is None:
                 text = clean_text(str(prev))
-                if text:
-                    return text
-                continue
-            if name in _BLOCK_TAGS:
+                if not text or _SEPARATOR_ONLY.match(text):
+                    continue
+                return text
+            if cls._excluded(prev, scope):
                 return ""
             text = clean_text(prev.get_text(" "))
-            if text:
-                return text
+            if not text or _SEPARATOR_ONLY.match(text):
+                continue
+            if _DATE_ANYWHERE.search(text):
+                return ""  # 자기 값을 품은 블록 = 경계
+            return text
         return ""
 
     @staticmethod
