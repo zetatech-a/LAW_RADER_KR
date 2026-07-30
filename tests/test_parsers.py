@@ -310,6 +310,26 @@ def test_fsc_period_guard_reaches_deeply_nested_wrappers():
     assert _fsc("https://www.fsc.go.kr/po040301", nested_class)[0].date == ""
 
 
+def test_fsc_sibling_period_block_does_not_mask_unlabelled_posting_date():
+    """예고기간 블록과 게시일 블록이 형제면, 공용 래퍼 때문에 게시일이 버려지면 안 된다(코덱스 리뷰).
+
+    조상의 전체 텍스트를 보면 둘의 공용 래퍼(.cont)에 '예고기간'이 섞여 있어
+    라벨 없는 게시일(.day / <time>)까지 함께 거부된다.
+    """
+    for value_el in (
+        '<span class="day">2026-07-23</span>',
+        '<time datetime="2026-07-23">2026-07-23</time>',
+    ):
+        html = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="./po040301/view?noticeId=4165" title="시행령 입법예고">시행령 입법예고</a></div>
+          <div class="period"><span class="tit">예고기간</span><span class="day">2026-07-24 ~ 2026-08-13</span></div>
+          <div class="info">{value_el}</div>
+        </div></li></ul>"""
+        posts = _fsc("https://www.fsc.go.kr/po040301", html)
+        assert posts[0].date == "2026-07-23", value_el
+
+
 def test_fsc_period_words_in_title_or_filename_do_not_drop_the_date():
     """기간 가드는 라벨에만 걸린다 — 제목·첨부파일명의 낱말로 게시일을 버리지 않는다.
 

@@ -64,6 +64,11 @@ _EVENT_LABELS = ("회의일", "행사일", "개최", "일시", "예정일", "발
 _NON_POSTING_LABELS = _PERIOD_LABELS + _EVENT_LABELS
 # 값 자체가 기간(범위)임을 드러내는 표기.
 _RANGE_MARKERS = ("~", "∼", "〜")
+# 별개 메타데이터 블록을 가르는 태그 — 라벨 탐색은 이 경계를 넘지 않는다.
+_BLOCK_TAGS = (
+    "div", "ul", "ol", "li", "dl", "table", "tbody", "thead", "tr",
+    "section", "article", "header", "footer", "nav",
+)
 # 날짜 후보에서 통째로 제외할 영역(첨부파일명·제목).
 _EXCLUDED_CLASS = ("file", "atch", "subject")
 # 목록에 게시일 전용 요소가 없을 때 상세 페이지에서 볼 머리말/꼬리말 영역.
@@ -227,35 +232,48 @@ class FscBoardScraper(BaseScraper):
 
     @classmethod
     def _in_marked_block(cls, el, scope, markers) -> bool:
-        """el 을 감싼 블록 어딘가에 markers 라벨이 붙어 있으면 게시일이 아니다.
+        """후보가 속한 '가지'의 라벨이 게시일 아님을 가리키면 True.
 
-        조상을 몇 단계만 보면 라벨과 값 사이에 래퍼가 더 끼는 마크업
-        (<div class="period"><span>예고기간</span><div><div><time …>)에서 가드가
-        뚫린다. 그래서 scope(목록 항목 <li> 또는 상세 머리말)까지 전부 훑는다.
+        조상의 전체 텍스트를 보면 안 된다. 예고기간 블록과 게시일 블록은 보통 형제로
+        나란히 놓이는데, 둘의 공용 래퍼(.cont)에 닿는 순간 그 텍스트에 '예고기간'이
+        섞여 있어 멀쩡한 게시일까지 버려진다. 제목·첨부도 같은 이유로 오염원이다
+        ('사업보고서 제출 기한 연장' 같은 제목 하나로 그 항목 날짜가 사라진다).
 
-        단, 제목·첨부 영역의 낱말은 라벨이 아니다. 조상의 텍스트를 통째로 보면
-        '사업보고서 제출 기한 연장' 같은 제목이나 '…기간별 현황.hwp' 같은 첨부파일명
-        하나로 그 항목의 게시일이 전부 버려진다.
+        그래서 scope 까지 조상을 올라가되, 각 단계에서 후보가 든 가지 '바로 앞'의
+        인라인 라벨만 본다. 블록 태그를 만나면 거기서부터는 별개 메타데이터 블록이라
+        이 후보의 맥락이 아니다.
         """
-        node = el.parent
-        while node is not None and node is not scope and getattr(node, "name", None) is not None:
-            if any(m in cls._label_text(node, scope) for m in markers):
-                return True
-            node = node.parent
+        reject = tuple(markers) + _RANGE_MARKERS
+        node = el
+        while node is not None and node is not scope:
+            parent = node.parent
+            if parent is None or getattr(parent, "name", None) is None:
+                return False
+            label = cls._preceding_label(node)
+            if label:
+                if any(m in label for m in reject):
+                    return True
+                if cls._is_post_date_label(label):
+                    return False  # 가장 가까운 라벨이 게시일이면 더 볼 것 없다
+            node = parent
         return False
 
-    @classmethod
-    def _label_text(cls, node, scope) -> str:
-        """node 의 텍스트에서 제목(.subject)·첨부(.file) 영역을 뺀 것(라벨 판정용)."""
-        parts = []
-        for child in node.descendants:
-            if getattr(child, "name", None) is not None:
-                continue  # 텍스트 노드만 모은다
-            parent = child.parent
-            if parent is not None and cls._excluded(parent, scope):
+    @staticmethod
+    def _preceding_label(node) -> str:
+        """node 바로 앞의 인라인 라벨 텍스트(블록 경계를 만나면 없는 것으로 본다)."""
+        for prev in node.previous_siblings:
+            name = getattr(prev, "name", None)
+            if name is None:
+                text = clean_text(str(prev))
+                if text:
+                    return text
                 continue
-            parts.append(str(child))
-        return clean_text(" ".join(parts))
+            if name in _BLOCK_TAGS:
+                return ""
+            text = clean_text(prev.get_text(" "))
+            if text:
+                return text
+        return ""
 
     @staticmethod
     def _has_date_class(el) -> bool:
