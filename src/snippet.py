@@ -139,31 +139,70 @@ def is_duplicate_title(line: str, title: str) -> bool:
 
 
 # ── 4) 상용구·메타데이터 판정 ───────────────────────────────────────────────
-# 라벨만 있는 줄이거나 "라벨 : 값" 형태일 때만 지운다. 구분자 없이 라벨로 시작하기만
-# 하는 문장("담당자는 …", "문의사항이 있으면 …")은 그대로 남는다.
-_META_LABELS = (
-    "담당부서", "주관부서", "작성부서", "담당자", "작성자", "담당", "부서",
-    "연락처", "전화번호", "전화", "문의처", "문의",
-    "등록일자", "등록일시", "등록일", "게시일자", "게시일", "작성일자", "작성일",
-    "수정일자", "수정일", "배포일시", "배포일", "보도일시", "보도시점",
-    "조회수", "조회",
-    "제목", "첨부파일", "첨부",
-    "이전글", "다음글",
-)
-_LABEL_ALT = "|".join(_META_LABELS)
-_LABEL_LINE = re.compile(rf"^(?:{_LABEL_ALT})\s*(?:[:：]\s*.{{0,60}})?$")
-_LABEL_ONLY = re.compile(rf"^(?:{_LABEL_ALT})\s*[:：]?$")
+# 첨부 파일명 조각(값 모양 판정과 첨부 목록 판정이 함께 쓴다).
+_FILE_EXT = r"(?:hwp|hwpx|pdf|docx?|xlsx?|pptx?|zip|jpe?g|png|gif|bmp|txt|csv)"
+_FILE_SIZE = r"\s*\(?\s*[\d.,]+\s*[KMGkmg]?B\s*\)?"
 
-# 라벨만 있는 줄(<dt>담당부서</dt>) 바로 뒤에는 값 줄(<dd>기업회계팀</dd>)이 온다.
-# 값은 짧고 문장으로 끝나지 않는다 — 그 조건을 만족할 때만 한 줄 더 걷어낸다.
-_META_VALUE_MAX_CHARS = 30
-_SENTENCE_TAIL = re.compile(r"(?:[.!?。]|니다|습니다|이다|한다|였다|했다|함|임|음)$")
-# 다만 "2026. 7. 24." 처럼 마침표로 끝나는 날짜 표기가 흔하다. 문장 종결 검사에 걸려
-# 값으로 인정되지 않으면 라벨만 지워지고 날짜부터 뒤 메타행 전부가 발췌 앞에 남는다.
-_DATE_LIKE = re.compile(
-    r"^\d{4}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*[.일]?\s*"
-    r"(?:\(?[월화수목금토일]\)?)?\s*(?:\d{1,2}:\d{2})?$"
+# ── 라벨별 '값 모양' ───
+# 메타데이터는 라벨만 있는 줄이거나 "라벨 : 값" 형태다. 값을 아무 텍스트로 받으면
+#   - "문의 : 대출 상한은 어떻게 해야 합니까?" 같은 실제 문장이 지워지고,
+#   - 값이 빈 라벨 뒤에 오는 소제목("담당부서 / 대출한도 1억원 상향")까지 값으로 먹는다.
+# 그래서 라벨마다 기대되는 값 모양을 정해 두고, 그 모양일 때만 군더더기로 본다.
+# 부서명은 조직 접미사로, 날짜·전화·조회수는 형식으로 판정한다.
+_ORG_TAIL = (
+    r"(?:팀|과|국|실|부|처|청|위원회|감독원|연구원|담당관|본부|센터|사무국|지원단|추진단)"
 )
+_RANK = (
+    r"(?:사무관|주사보|주사|주임|팀장|과장|국장|실장|부장|본부장|서기관|조사관"
+    r"|연구관|검사역|수석|선임|담당자)"
+)
+_ORG = rf"[가-힣A-Za-z0-9()·\-\s]{{0,26}}{_ORG_TAIL}"
+_PERSON = rf"[가-힣]{{2,4}}(?:\s*{_RANK})?"
+_PHONE = r"\(?0?\d{1,4}\)?[-\s.]?\d{3,4}[-\s.]?\d{4}(?:\s*\(?(?:내선\s*)?\d{1,5}\)?)?"
+# "2026-07-24", "2026. 7. 24.", "2026년 7월 24일", "2026-07-24 15:30" 모두 값이다.
+# (마침표로 끝나는 날짜 표기가 흔해 문장 종결로 오인하면 안 된다.)
+_DATE = (
+    r"\d{4}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*[.일]?\s*"
+    r"(?:\(?[월화수목금토일]\)?)?\s*(?:\d{1,2}:\d{2})?"
+)
+_COUNT = r"[\d,]+\s*(?:회|건|명)?"
+
+_VALUE_ORG = re.compile(rf"^{_ORG}$")
+_VALUE_STAFF = re.compile(rf"^(?:{_PERSON}|{_ORG}|{_ORG}\s+{_PERSON})$")
+_VALUE_CONTACT = re.compile(rf"^(?:{_PHONE}|{_ORG}(?:\s*\(?{_PHONE}\)?)?)$")
+_VALUE_DATE = re.compile(rf"^{_DATE}$")
+_VALUE_COUNT = re.compile(rf"^{_COUNT}$")
+_VALUE_FILE = re.compile(
+    rf"^[^:：]{{1,120}}\.{_FILE_EXT}(?:{_FILE_SIZE})?$", re.IGNORECASE
+)
+
+_LABEL_VALUE_RULES: tuple[tuple[tuple[str, ...], re.Pattern], ...] = (
+    (("담당부서", "주관부서", "작성부서", "부서"), _VALUE_ORG),
+    (("담당자", "작성자", "담당"), _VALUE_STAFF),
+    (("연락처", "전화번호", "전화", "문의처", "문의"), _VALUE_CONTACT),
+    (
+        (
+            "등록일자", "등록일시", "등록일", "게시일자", "게시일", "작성일자",
+            "작성일", "수정일자", "수정일", "배포일시", "배포일", "보도일시", "보도시점",
+        ),
+        _VALUE_DATE,
+    ),
+    (("조회수", "조회"), _VALUE_COUNT),
+    (("첨부파일", "첨부"), _VALUE_FILE),
+)
+# 값이 임의의 글 제목이라 모양을 못 박을 수 없는 라벨. 라벨 자체가 머리말·내비게이션
+# 으로만 쓰이는 말이라 "라벨 : 값" 한 줄은 값을 보지 않고 지우되, 값이 빈 라벨 뒤의
+# **다음 줄은 건드리지 않는다**(본문 첫 줄일 수 있다). '제목' 뒤의 제목 반복은
+# is_duplicate_title 이 따로 걸러낸다.
+_FREE_VALUE_LABELS = ("제목", "이전글", "다음글")
+
+_META_LABELS = tuple(
+    label for labels, _ in _LABEL_VALUE_RULES for label in labels
+) + _FREE_VALUE_LABELS
+# 긴 라벨을 먼저 시도하도록 정렬한다(가독성 목적 — 역추적으로도 결과는 같다).
+_LABEL_ALT = "|".join(sorted(_META_LABELS, key=len, reverse=True))
+_LABEL_ONLY = re.compile(rf"^({_LABEL_ALT})\s*[:：]?$")
+_LABEL_VALUE = re.compile(rf"^({_LABEL_ALT})\s*[:：]\s*(.*)$")
 
 # 정확히 일치할 때만 지우는 메뉴·네비게이션 문구(공백 제거·소문자화 후 비교).
 _NAV_WORDS = frozenset({
@@ -190,15 +229,11 @@ _DECORATION = re.compile(r"^[\s\-=_~*·・ㆍ‧∙•▪◦□■○●◇◆�
 #   ① 크기 표기가 붙은 줄("보도자료.hwp (188 KB)") — 첨부 목록 행이 거의 확실해 단독 판정.
 #   ② 크기 없는 파일명 줄 — '첨부파일' 라벨 바로 뒤(첨부 목록 문맥)에서만 지운다.
 # ②를 단독으로 지우면 "제출 파일명은 report.pdf" 같은 본문 문장이 발췌에서 사라진다.
-_FILE_EXT = r"(?:hwp|hwpx|pdf|docx?|xlsx?|pptx?|zip|jpe?g|png|gif|bmp|txt|csv)"
-_FILE_SIZE = r"\s*\(?\s*[\d.,]+\s*[KMGkmg]?B\s*\)?"
 # 콜론이 있으면 "신청 서식: 금융지원신청서.hwp" 처럼 설명문이라 파일명 줄로 보지 않는다.
 _ATTACHMENT_WITH_SIZE = re.compile(
     rf"^[^:：]{{1,120}}\.{_FILE_EXT}{_FILE_SIZE}$", re.IGNORECASE
 )
-_BARE_FILENAME = re.compile(
-    rf"^[^:：]{{1,120}}\.{_FILE_EXT}(?:{_FILE_SIZE})?$", re.IGNORECASE
-)
+_BARE_FILENAME = _VALUE_FILE
 # 첨부 목록 문맥을 만드는 라벨(_META_LABELS 의 부분집합).
 _ATTACHMENT_LABEL_ONLY = re.compile(r"^(?:첨부파일|첨부)\s*[:：]?$")
 
@@ -241,14 +276,31 @@ def _nav_key(line: str) -> str:
     return _NAV_TRIM.sub("", line).lower()
 
 
-def _looks_like_meta_value(line: str) -> bool:
-    """라벨만 있는 줄 바로 뒤에 오는 값 줄(부서명·날짜·조회수 등)로 볼 수 있는가.
+def _value_rule(label: str) -> re.Pattern | None:
+    """라벨에 기대되는 값 모양. 값을 검사하지 않는 라벨(_FREE_VALUE_LABELS)은 None."""
+    for labels, pattern in _LABEL_VALUE_RULES:
+        if label in labels:
+            return pattern
+    return None
 
-    날짜 모양을 먼저 확인한 뒤에 문장 종결 검사를 적용한다("2026. 7. 24." 도 값이다).
+
+def is_label_line(line: str) -> bool:
+    """'라벨' 또는 '라벨 : 값' 형태의 메타데이터 줄인가.
+
+    값이 있으면 라벨에 맞는 모양(부서명·날짜·전화·조회수·파일명)인지까지 확인한다.
+    아무 텍스트나 값으로 받으면 "문의 : 대출 상한은 어떻게 해야 합니까?" 처럼 라벨을
+    머리말로 쓴 실제 문장이 지워진다.
     """
-    if not 0 < len(line) <= _META_VALUE_MAX_CHARS:
+    if _LABEL_ONLY.match(line):
+        return True
+    m = _LABEL_VALUE.match(line)
+    if not m:
         return False
-    return bool(_DATE_LIKE.match(line)) or not _SENTENCE_TAIL.search(line)
+    label, value = m.group(1), m.group(2).strip()
+    if not value:
+        return True
+    rule = _value_rule(label)
+    return rule is None or bool(rule.match(value))
 
 
 def is_boilerplate(line: str) -> bool:
@@ -259,7 +311,7 @@ def is_boilerplate(line: str) -> bool:
         _DECORATION.match(line)
         or _nav_key(line) in _NAV_WORDS
         or _BREADCRUMB.match(line)
-        or _LABEL_LINE.match(line)
+        or is_label_line(line)
         or _ATTACHMENT_WITH_SIZE.match(line)
         or _SURVEY.match(line)
         or _PRESS_NOTICE.match(line)
@@ -276,16 +328,24 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
     def noise(line: str) -> bool:
         return is_duplicate_title(line, title) or is_boilerplate(line)
 
-    def is_value_of_label(index: int) -> bool:
-        """lines[index] 를 바로 앞 라벨 줄의 값으로 볼 수 있는가.
+    def is_value_of_label(label_line: str, index: int) -> bool:
+        """lines[index] 를 label_line(라벨만 있는 줄)의 값으로 볼 수 있는가.
 
-        그 줄이 또 다른 라벨·군더더기면 값으로 삼지 않는다. 값이 비어 라벨만 잇달아
-        나오는 경우("첨부파일 / 등록일 / 2026-07-24")에 뒤 라벨을 값으로 먹어치우면,
-        정작 지워야 할 날짜가 발췌 맨 앞에 남는다.
+        그 라벨에 기대되는 값 모양일 때만 True 다. 짧고 문장이 아니라는 이유로 아무
+        줄이나 값으로 삼으면, 값이 빈 라벨 뒤에 오는 본문 소제목("담당부서 /
+        대출한도 1억원 상향")까지 발췌에서 사라진다.
+
+        또 다른 라벨·군더더기도 값으로 삼지 않는다 — 값이 비어 라벨만 잇달아 나오는
+        경우("첨부파일 / 등록일 / 2026-07-24")에 뒤 라벨을 먹어치우면 정작 지워야 할
+        날짜가 발췌 맨 앞에 남는다.
         """
-        if not 0 <= index < len(lines):
+        m = _LABEL_ONLY.match(label_line)
+        if not m or not 0 <= index < len(lines):
             return False
-        return not noise(lines[index]) and _looks_like_meta_value(lines[index])
+        rule = _value_rule(m.group(1))
+        if rule is None:
+            return False
+        return not noise(lines[index]) and bool(rule.match(lines[index]))
 
     def after_attachment_run(index: int) -> int:
         """'첨부파일' 라벨 뒤에 이어지는 파일명 줄들을 지나친 위치."""
@@ -303,7 +363,7 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
             start = after_attachment_run(start + 1)
             continue
         # 라벨만 있는 줄(<dt>) 다음의 값 줄(<dd>)까지 한 줄 더 걷어낸다.
-        if _LABEL_ONLY.match(line) and is_value_of_label(start + 1):
+        if is_value_of_label(line, start + 1):
             start += 1
         start += 1
 
@@ -321,11 +381,7 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
             end = run - 1
             continue
         # 꼬리말이 "담당부서 / 기업회계팀" 처럼 라벨+값 두 줄로 끝나는 경우.
-        if (
-            end - 1 > start
-            and _LABEL_ONLY.match(lines[end - 2])
-            and is_value_of_label(end - 1)
-        ):
+        if end - 1 > start and is_value_of_label(lines[end - 2], end - 1):
             end -= 2
             continue
         break

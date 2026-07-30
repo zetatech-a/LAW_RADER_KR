@@ -12,7 +12,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.models import Post
 from src.notifier import build_html, build_text
-from src.snippet import build_fallback_snippet, is_duplicate_title
+from src.snippet import (
+    build_fallback_snippet,
+    is_duplicate_title,
+    is_label_line,
+)
 
 TITLE = "외부감사 규정 개정안 입법예고"
 BODY_SENTENCE = "금융위원회는 외부감사 및 회계 등에 관한 규정 개정안을 입법예고한다고 밝혔다."
@@ -278,6 +282,57 @@ def test_label_without_a_value_does_not_swallow_the_next_label():
         "담당부서", "담당자", "연락처", "02-2100-2600", "조회수", "1,234", BODY_SENTENCE,
     ])
     assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+
+def test_keeps_short_heading_after_a_label_without_a_value():
+    """값이 빈 라벨 뒤에 오는 짧은 소제목을 값으로 먹지 않는다.
+
+    라벨에 기대되는 값 모양(부서명·날짜·전화·조회수)이 아니면 건드리지 않는다.
+    """
+    body = "담당부서\n대출한도 1억원 상향\n금융위원회는 서민금융 지원을 확대한다고 밝혔다."
+    out = build_fallback_snippet(body, "서민금융 지원 확대")
+    assert out.startswith("대출한도 1억원 상향")
+
+    body = "담당자\n추진 배경\n금융위원회는 규정 개정을 추진한다고 밝혔다."
+    assert build_fallback_snippet(body, "규정 개정 추진").startswith("추진 배경")
+
+
+def test_still_strips_label_values_that_match_the_label_shape():
+    """반대로 라벨에 맞는 값이면 계속 두 줄 다 걷어낸다."""
+    for value in (
+        "기업회계팀",
+        "금융위원회 기업회계팀",
+        "제재심의국",
+    ):
+        body = f"담당부서\n{value}\n{BODY_SENTENCE}"
+        assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE, value
+
+    for label, value in (
+        ("담당자", "홍길동 사무관"),
+        ("연락처", "02-2100-2600"),
+        ("등록일", "2026. 7. 24."),
+        ("조회수", "1,234"),
+    ):
+        body = f"{label}\n{value}\n{BODY_SENTENCE}"
+        assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE, label
+
+
+def test_inline_label_value_must_match_the_label_shape():
+    """'라벨 : 값' 한 줄도 값 모양을 검증한다 — 라벨을 머리말로 쓴 문장을 지우지 않는다."""
+    body = "문의: 대출 상한은 어떻게 해야 합니까?\n상한은 연소득의 3배로 제한된다."
+    out = build_fallback_snippet(body, "대출 상한 안내")
+    assert out.startswith("문의: 대출 상한은 어떻게 해야 합니까?")
+
+    assert not is_label_line("담당부서 : 대출한도를 1억원으로 상향한다")
+    assert not is_label_line("등록일 : 접수일로부터 30일 이내")
+    # 라벨에 맞는 값이면 그대로 군더더기다.
+    assert is_label_line("문의 : 02-2100-2600")
+    assert is_label_line("문의 : 금융위원회 은행과 (02-2100-2000)")
+    assert is_label_line("담당부서 : 금융위원회 기업회계팀")
+    assert is_label_line("등록일 : 2026-07-24")
+    assert is_label_line("조회수 : 1,234")
+    # 값이 임의의 글 제목인 내비게이션 라벨은 값을 보지 않는다.
+    assert is_label_line("이전글 : 은행법 시행령 개정안")
 
 
 def test_keeps_sentences_that_only_start_like_a_label():
