@@ -77,17 +77,25 @@ def normalize_lines(body: str) -> list[str]:
 
 
 # ── 3) 제목 중복 판정 ───────────────────────────────────────────────────────
-# 제목 비교용으로 지우는 문자는 공백과 괄호·따옴표·구분자뿐이다. 글자와 숫자는 남기므로
-# "은행법 개정" 과 "은행법 개정안" 은 여전히 다른 것으로 본다.
-_TITLE_TRIVIA = re.compile(
-    r"[\s\[\]()（）〔〕【】<>《》「」『』｢｣\"'“”‘’`·・ㆍ:：;,./|~\-–—_!?]+"
+# 제목 비교에서 무시하는 '형식' 문자 — 공백·괄호·따옴표·중점처럼 수치와 무관한 것뿐이다.
+# 글자와 숫자는 남기므로 "은행법 개정" 과 "은행법 개정안" 은 여전히 다른 것으로 본다.
+_TITLE_FORMAT = re.compile(
+    r"[\s\[\]()（）〔〕【】<>《》「」『』｢｣\"'“”‘’`·・ㆍ;|_!?]+"
 )
+# 소수점·자릿점·부호·날짜·시각 구분자로도 쓰이는 문자. 숫자에 붙어 있지 않을 때만
+# 무시한다. 무조건 지우면 "수익률 3.5% 증가"와 "수익률 35% 증가", "-3.5%"와 "3.5%",
+# "2026-07-24"와 "20260724" 가 같은 제목으로 판정되어, 제목과 수치가 다른 본문
+# 문장이 '제목 중복'으로 지워진다(발췌에서 사실이 통째로 사라진다).
+_TITLE_SEPARATOR = re.compile(r"(?<![0-9])[.,:：/~\-–—+±]+(?![0-9])")
 # 제목이 이 정도로 짧으면 우연히 겹칠 수 있어 중복 판정에 쓰지 않는다.
 _MIN_TITLE_KEY_CHARS = 2
 
 
 def _title_key(text: str) -> str:
-    return _TITLE_TRIVIA.sub("", text or "")
+    """제목 비교용 키. 형식 차이는 지우고 숫자에 붙은 부호·구분자는 남긴다."""
+    # 구분자를 먼저 판정한다 — 공백을 지운 뒤에 보면 "수익률 - 3.5%" 의 하이픈이
+    # 숫자에 붙은 부호처럼 보여 형식 차이를 무시하지 못한다.
+    return _TITLE_FORMAT.sub("", _TITLE_SEPARATOR.sub("", text or ""))
 
 
 def is_duplicate_title(line: str, title: str) -> bool:
@@ -150,8 +158,13 @@ _ATTACHMENT_FILE = re.compile(
     re.IGNORECASE,
 )
 
-# 페이지 하단 만족도 조사.
-_SURVEY = re.compile(r"만족도\s*(?:조사|평가)|만족하[십셨]")
+# 페이지 하단 만족도 조사. **줄 전체**가 그 안내문일 때만 지운다 — "만족도 조사" 는
+# 실제 보도자료 본문("금융감독원은 금융소비자 만족도 조사를 실시했다")에도 나오는 말이라
+# 부분 일치로 보면 첫 문단이 통째로 군더더기로 분류된다.
+_SURVEY = re.compile(
+    r"^(?:만족도\s*(?:조사|평가)\s*[:：]?"          # 섹션 제목만 있는 줄
+    r"|.{0,40}만족하[십셨]\S{0,4}\s*[?？])$"        # "…정보에 만족하십니까?" 안내문
+)
 
 # 보도자료 배포 안내(엠바고·출처 표기 요청).
 _PRESS_NOTICE = re.compile(
@@ -183,7 +196,7 @@ def is_boilerplate(line: str) -> bool:
         or _BREADCRUMB.match(line)
         or _LABEL_LINE.match(line)
         or _ATTACHMENT_FILE.match(line)
-        or _SURVEY.search(line)
+        or _SURVEY.match(line)
         or _PRESS_NOTICE.search(line)
         or (_JS_WORD.search(line) and _JS_HINT.search(line))
     )
@@ -198,17 +211,24 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
     def noise(line: str) -> bool:
         return is_duplicate_title(line, title) or is_boilerplate(line)
 
+    def is_value_of_label(index: int) -> bool:
+        """lines[index] 를 바로 앞 라벨 줄의 값으로 볼 수 있는가.
+
+        그 줄이 또 다른 라벨·군더더기면 값으로 삼지 않는다. 값이 비어 라벨만 잇달아
+        나오는 경우("첨부파일 / 등록일 / 2026-07-24")에 뒤 라벨을 값으로 먹어치우면,
+        정작 지워야 할 날짜가 발췌 맨 앞에 남는다.
+        """
+        if not 0 <= index < len(lines):
+            return False
+        return not noise(lines[index]) and _looks_like_meta_value(lines[index])
+
     start = 0
     while start < len(lines):
         line = lines[start]
         if not noise(line):
             break
         # 라벨만 있는 줄(<dt>) 다음의 값 줄(<dd>)까지 한 줄 더 걷어낸다.
-        if (
-            _LABEL_ONLY.match(line)
-            and start + 1 < len(lines)
-            and _looks_like_meta_value(lines[start + 1])
-        ):
+        if _LABEL_ONLY.match(line) and is_value_of_label(start + 1):
             start += 1
         start += 1
 
@@ -222,7 +242,7 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
         if (
             end - 1 > start
             and _LABEL_ONLY.match(lines[end - 2])
-            and _looks_like_meta_value(line)
+            and is_value_of_label(end - 1)
         ):
             end -= 2
             continue

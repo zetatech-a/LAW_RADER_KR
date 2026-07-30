@@ -72,6 +72,31 @@ def test_is_duplicate_title_ignores_too_short_titles():
     assert not is_duplicate_title("본문 첫 줄", "  ")
 
 
+def test_title_comparison_keeps_numeric_punctuation():
+    """소수점·부호·자릿점·날짜 구분자가 다르면 다른 제목이다.
+
+    무시하면 "수익률 3.5% 증가" 제목에서 "수익률 35% 증가" 본문 줄이 중복으로
+    지워져, 발췌에서 서로 다른 수치가 통째로 사라진다.
+    """
+    assert not is_duplicate_title("수익률 35% 증가", "수익률 3.5% 증가")
+    assert not is_duplicate_title("수익률 3.5% 기록", "수익률 -3.5% 기록")
+    assert not is_duplicate_title("실적 20260724 발표", "실적 2026-07-24 발표")
+    assert not is_duplicate_title("한도 1234억원 상향", "한도 1,234억원 상향")
+
+
+def test_title_comparison_still_ignores_formatting_only_differences():
+    """반대로 수치와 무관한 구분자·괄호 차이는 계속 같은 제목으로 본다."""
+    assert is_duplicate_title("외부감사 규정 개정안.", "외부감사 규정 개정안")
+    assert is_duplicate_title("외부감사 규정 - 개정안", "외부감사 규정 개정안")
+    assert is_duplicate_title("수익률 3.5% 증가", "수익률 3.5% 증가")
+
+
+def test_keeps_body_line_whose_numbers_differ_from_the_title():
+    title = "수익률 3.5% 증가"
+    body = "수익률 35% 증가\n세부 내용은 붙임과 같다."
+    assert build_fallback_snippet(body, title).startswith("수익률 35% 증가")
+
+
 # --- 상용구·메타데이터 제거 ---
 
 
@@ -116,6 +141,36 @@ def test_strips_breadcrumb_and_javascript_notice():
         "이 사이트는 자바스크립트를 지원하는 브라우저에서 최적화되어 있습니다.",
         BODY_SENTENCE,
         "이 페이지에서 제공하는 정보에 만족하십니까?",
+    ])
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+
+def test_keeps_body_paragraph_that_mentions_a_satisfaction_survey():
+    """'만족도 조사' 는 실제 보도자료 본문에도 나오는 말 — 문장을 지우면 안 된다."""
+    body = "\n".join([
+        "금융감독원은 금융소비자 만족도 조사를 실시했다.",
+        "조사 대상은 1,234명이며 만족 응답은 82%였다.",
+    ])
+    out = build_fallback_snippet(body, "금융소비자 만족도 조사 결과")
+    assert out.startswith("금융감독원은 금융소비자 만족도 조사를 실시했다.")
+
+
+def test_strips_satisfaction_footer_when_it_is_the_whole_line():
+    body = "\n".join([
+        BODY_SENTENCE,
+        "이 페이지에서 제공하는 정보에 만족하십니까?",
+        "만족도 조사",
+    ])
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+
+def test_label_without_a_value_does_not_swallow_the_next_label():
+    """값이 비어 라벨만 잇달아 나와도 메타데이터가 발췌 앞에 남지 않아야 한다."""
+    body = "\n".join(["첨부파일", "등록일", "2026-07-24", BODY_SENTENCE])
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+    body = "\n".join([
+        "담당부서", "담당자", "연락처", "02-2100-2600", "조회수", "1,234", BODY_SENTENCE,
     ])
     assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
 
