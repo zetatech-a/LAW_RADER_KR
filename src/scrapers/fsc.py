@@ -5,13 +5,15 @@
 - 입법예고/규정변경예고: https://www.fsc.go.kr/po040301   (상세: /po040301/view?noticeId=…)
 
 두 게시판 모두 목록이 `<li> … <div class="subject"><a title="제목" href="상세"> …`
-구조이고, 첨부는 목록 `<div class="file">` 안에 노출된다(라이브 HTML 기준). 날짜는
-목록에 없어(담당부서/조회수만) 비워 둔다.
+구조이고, 첨부는 목록 `<div class="file">` 안에 노출된다(라이브 HTML 기준). 게시일은
+같은 `<li>` 안의 전용 요소(`<time>`, '등록일' 라벨의 값, day/date 계열 클래스)에서만
+읽는다 — `_list_date` 주석 참고.
 """
 from __future__ import annotations
 
 import logging
 import re
+from datetime import date as _date
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -26,6 +28,31 @@ _ID_IN_PATH = re.compile(r"/(\d{3,})(?:[/?#]|$)")
 # 상세 URL 쿼리에서 찾을 안정적 ID 키
 _ID_KEYS = ("noticeId", "no", "idx", "seq", "bbsId", "nttId", "boardId")
 _FILE_HINT = ("getfile", "download", "filedown", "/file", "atchfile")
+
+# --- 게시일 추출용 ---
+# 값이 '통째로' 날짜 하나일 때만 인정한다. 범위('2026-07-24 ~ 2026-08-13')나 부가
+# 텍스트가 섞이면 매치되지 않는다.
+_DATE_VALUE = re.compile(r"^(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?\.?$")
+_ISO_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}T")
+# 값 앞에 붙은 라벨('등록일 : 2026-07-24')을 떼어낸다.
+_DATE_LABEL_PREFIX = re.compile(r"^(?:등록|게시|작성|배포|보도|공고)?\s*(?:일자|일시|일)\s*[:：]?\s*")
+# 클래스 토큰(비알파벳 제거 후)이 '게시일 전용'을 뜻하는지.
+_DATE_CLASS = re.compile(
+    r"^(?:day|date"
+    r"|(?:reg|regist|register|write|wrt|post|board|bbs|notice|create|created)(?:ed)?date"
+    r"|regdt)$"
+)
+# 값을 게시일로 받아들일 라벨.
+_POST_DATE_LABELS = frozenset(
+    {
+        "등록일", "등록일자", "게시일", "게시일자", "작성일", "작성일자",
+        "배포일", "보도일", "공고일", "일자", "날짜",
+    }
+)
+# 게시일이 아닌 '기간' 표기 — 입법예고의 예고기간(시작일·종료일) 등.
+_PERIOD_MARKERS = ("기간", "기한", "마감", "시행일", "제출", "~", "∼", "〜")
+# 날짜 후보에서 통째로 제외할 영역(첨부파일명·제목).
+_EXCLUDED_CLASS = ("file", "atch", "subject")
 
 
 class FscBoardScraper(BaseScraper):
@@ -55,6 +82,7 @@ class FscBoardScraper(BaseScraper):
                 post_id=post_id,
                 title=title,
                 url=url,
+                date=self._list_date(a),
             )
             self._collect_list_attachments(a, post)
             posts.append(post)
@@ -84,6 +112,125 @@ class FscBoardScraper(BaseScraper):
         if m:
             return f"path:{m.group(1)}"
         return ""
+
+    # --- 게시일 ---
+    def _list_date(self, anchor) -> str:
+        """목록 항목의 '게시일 전용' 요소에서 게시일을 읽어 YYYY-MM-DD 로 돌려준다.
+
+        항목 전체 텍스트에서 첫 날짜를 긁으면 안 된다. 입법예고 목록은 예고기간
+        ('2026-07-24 ~ 2026-08-13')이 게시일보다 앞에 오고, 보도자료 목록에는
+        첨부파일명('2025년 계획.hwp')·공고번호('제2026-15호')처럼 날짜로 보이는
+        숫자가 섞여 있어 엉뚱한 값을 게시일로 잡는다.
+
+        그래서 (1) <time>, (2) '등록일/게시일' 라벨의 값, (3) day/date 계열 클래스
+        요소 순으로 후보를 좁히고, 그 값이 통째로 유효한 날짜일 때만 인정한다.
+        전용 요소가 없거나 형식이 어긋나면 빈 문자열을 유지한다.
+        """
+        li = anchor.find_parent("li")
+        if li is None:
+            return ""
+        for raw in self._date_candidates(li):
+            parsed = self._normalize_date(raw)
+            if parsed:
+                return parsed
+        return ""
+
+    @classmethod
+    def _date_candidates(cls, li):
+        """게시일 후보 텍스트를 신뢰도 순으로 낸다(첨부·제목 영역은 어느 경로에서도 제외)."""
+        # (1) 시맨틱 마크업이 있으면 가장 믿을 만하다.
+        for t in li.find_all("time"):
+            if cls._excluded(t):
+                continue
+            yield t.get("datetime", "")
+            yield t.get_text()
+
+        # (2) '등록일/게시일' 라벨의 값. '예고기간' 등 기간 라벨은 후보가 되지 않는다.
+        for label in li.find_all(["dt", "th", "strong", "b", "em", "i", "span", "p"]):
+            if cls._excluded(label) or not cls._is_post_date_label(label.get_text()):
+                continue
+            yield from cls._label_values(label)
+
+        # (3) day/date 계열 클래스를 가진 전용 요소.
+        for el in li.find_all(True):
+            if cls._excluded(el) or not cls._has_date_class(el):
+                continue
+            text = clean_text(el.get_text(" "))
+            if cls._has_period_marker(text) or cls._in_period_block(el):
+                continue
+            yield _DATE_LABEL_PREFIX.sub("", text)
+
+    @staticmethod
+    def _label_values(label):
+        """라벨 요소 뒤의 값 후보: 바로 뒤 텍스트 노드 → 다음 형제 요소."""
+        parts = []
+        for node in label.next_siblings:
+            if getattr(node, "name", None):
+                break
+            parts.append(str(node))
+        yield clean_text(" ".join(parts))
+        sib = label.find_next_sibling()
+        if sib is not None:
+            yield clean_text(sib.get_text(" "))
+
+    @staticmethod
+    def _is_post_date_label(text: str) -> bool:
+        label = clean_text(text).rstrip(" :：")
+        if not label or len(label) > 6:
+            return False
+        if any(m in label for m in _PERIOD_MARKERS):
+            return False
+        return label in _POST_DATE_LABELS
+
+    @staticmethod
+    def _has_period_marker(text: str) -> bool:
+        return any(m in text for m in _PERIOD_MARKERS)
+
+    @classmethod
+    def _in_period_block(cls, el) -> bool:
+        """'예고기간' 같은 기간 표기가 붙은 블록 안의 날짜는 게시일이 아니다."""
+        node = el.parent
+        for _ in range(2):
+            if node is None or getattr(node, "name", None) in (None, "li"):
+                return False
+            if cls._has_period_marker(clean_text(node.get_text(" "))):
+                return True
+            node = node.parent
+        return False
+
+    @staticmethod
+    def _has_date_class(el) -> bool:
+        for name in el.get("class") or []:
+            if _DATE_CLASS.match(re.sub(r"[^a-z]", "", name.lower())):
+                return True
+        return False
+
+    @staticmethod
+    def _excluded(el) -> bool:
+        """첨부(.file/.file-list)·제목(.subject) 영역은 날짜 후보가 아니다."""
+        node = el
+        while node is not None and getattr(node, "name", None) not in (None, "li"):
+            for name in node.get("class") or []:
+                low = name.lower()
+                if any(bad in low for bad in _EXCLUDED_CLASS):
+                    return True
+            node = node.parent
+        return False
+
+    @staticmethod
+    def _normalize_date(raw: str) -> str:
+        """값이 통째로 날짜 하나일 때만 YYYY-MM-DD 로. 아니면 ''(빈 문자열 유지)."""
+        text = clean_text(raw or "")
+        if _ISO_DATETIME.match(text):
+            text = text.split("T", 1)[0]
+        m = _DATE_VALUE.match(text)
+        if not m:
+            return ""
+        year, month, day = (int(g) for g in m.groups())
+        try:
+            return _date(year, month, day).isoformat()
+        except ValueError:  # 2026-13-45 처럼 달력에 없는 값
+            return ""
 
     def _collect_list_attachments(self, anchor, post: Post) -> None:
         """목록 항목(li) 안의 첨부를 수집.

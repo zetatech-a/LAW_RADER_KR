@@ -59,6 +59,114 @@ def test_fsc_legislation_noticeid_and_sibling_filename():
     assert posts[0].attachments[0].filename == "1. 공고문 입법예고.hwpx"  # 크기표기 제거, 앵커 title('파일 다운로드') 아님
 
 
+def test_fsc_press_date_from_dedicated_element_not_first_date_in_text():
+    """보도자료: 게시일 전용 요소(.day)의 값만 쓴다.
+
+    항목 텍스트에는 제목의 공고번호와 첨부파일명이 게시일보다 앞에 나오므로,
+    목록 전체를 정규식으로 훑으면 엉뚱한 숫자를 게시일로 잡는다.
+    """
+    html = """
+    <ul><li><div class="inner"><div class="cont">
+      <div class="subject"><a href="/no010101/87401?curPage="
+        title="금융위원회 공고 제2026-15호 (2019-03-11 제정) 개정안">개정안</a></div>
+      <div class="file"><div class="file-list">
+        <a href="/comm/getFile?srvcId=BBSTY1&upperNo=87401&fileNo=1"><span class="name">2025-01-02_별첨.hwp</span></a>
+      </div></div>
+      <div class="info">
+        <span class="division">자본시장과</span>
+        <span class="day">2026-07-24</span>
+        <span class="hit">1,234</span>
+      </div>
+    </div></div></li></ul>"""
+    posts = _fsc("https://www.fsc.go.kr/no010101", html)
+    assert len(posts) == 1
+    p = posts[0]
+    assert p.date == "2026-07-24"
+    # 기존 동작 보존
+    assert p.post_id == "path:87401"
+    assert p.attachments[0].filename == "2025-01-02_별첨.hwp"
+
+
+def test_fsc_press_date_from_label_and_time_element():
+    """'등록일' 라벨 값과 <time datetime> 모두 게시일 전용 요소로 인정한다."""
+    labelled = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87402" title="가계부채 점검회의">가계부채 점검회의</a></div>
+      <dl class="info"><dt>등록일</dt><dd>2026.07.23</dd><dt>조회수</dt><dd>2026</dd></dl>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/no010101", labelled)[0].date == "2026-07-23"
+
+    semantic = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87403" title="정례회의 결과">정례회의 결과</a></div>
+      <p class="info"><time datetime="2026-07-22T14:00:00+09:00">7월 22일</time></p>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/no010101", semantic)[0].date == "2026-07-22"
+
+
+def test_fsc_legislation_uses_posting_date_not_notice_period():
+    """입법예고: 예고기간(시작일/종료일)이 아니라 등록일을 게시일로 쓴다."""
+    html = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="./po040301/view?noticeId=4159&curPage=" title="특별법 시행령 입법예고">특별법 시행령 입법예고</a></div>
+      <div class="info">
+        <span class="tit">예고기간</span><span class="day">2026-07-24 ~ 2026-08-13</span>
+      </div>
+      <dl class="info"><dt>등록일</dt><dd>2026-07-23</dd></dl>
+      <div class="file"><div class="file-list">
+        <span class="name">1. 공고문 입법예고.hwpx (42 KB)</span>
+        <span class="ico download"><a href="/comm/getFile?srvcId=RULENOTICE&upperNo=4159&fileNo=1" title="파일 다운로드">down</a></span>
+      </div></div>
+    </div></li></ul>"""
+    posts = _fsc("https://www.fsc.go.kr/po040301", html)
+    assert len(posts) == 1
+    p = posts[0]
+    assert p.date == "2026-07-23"          # 예고기간 시작일(07-24)/종료일(08-13) 아님
+    # 기존 동작 보존
+    assert p.post_id == "noticeId:4159"
+    assert p.attachments[0].filename == "1. 공고문 입법예고.hwpx"
+
+
+def test_fsc_legislation_period_only_leaves_date_empty():
+    """예고기간밖에 없으면 시작일을 게시일로 추측하지 않고 비워 둔다."""
+    html = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="./po040301/view?noticeId=4160" title="규정변경예고">규정변경예고</a></div>
+      <div class="period"><span class="tit">예고기간</span>
+        <span class="day">2026-07-24</span> ~ <span class="day">2026-08-13</span></div>
+    </div></li></ul>"""
+    posts = _fsc("https://www.fsc.go.kr/po040301", html)
+    assert len(posts) == 1
+    assert posts[0].date == ""
+
+
+def test_fsc_date_absent_or_invalid_stays_empty():
+    """전용 요소가 없거나 값이 날짜로 유효하지 않으면 빈 문자열."""
+    no_date = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87404" title="공고 제2026-15호">공고 제2026-15호</a></div>
+      <div class="file"><div class="file-list">
+        <a href="/comm/getFile?srvcId=BBSTY1&upperNo=87404&fileNo=1"><span class="name">2026-07-24 보도자료.hwp</span></a>
+      </div></div>
+      <div class="info"><span class="division">감독정책과</span><span class="hit">20260724</span></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/no010101", no_date)[0].date == ""
+
+    invalid = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87405" title="회의 결과">회의 결과</a></div>
+      <div class="info"><span class="day">2026-13-45</span></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/no010101", invalid)[0].date == ""
+
+    partial = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87406" title="회의 결과">회의 결과</a></div>
+      <div class="info"><span class="day">2026-07</span></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/no010101", partial)[0].date == ""
+
+
 def test_fss_title_link_board_nttid():
     html = """
     <table><tbody><tr>
