@@ -50,13 +50,22 @@ _DATE_CLASS = re.compile(
     r"|(?:reg|regist|register|write|wrt|post|board|bbs|notice|create|created)(?:ed)?date"
     r"|regdt)$"
 )
-# 값을 게시일로 받아들일 라벨.
-_POST_DATE_LABELS = frozenset(
+# 게시일이라는 '역할'까지 못박는 라벨. 기간·행사 맥락을 이겨도 되는 것은 이쪽뿐이다.
+# '일시'로 끝나는 복합 라벨은 흔한 게시 시각 표기라, 아래 _EVENT_LABELS 의 일반
+# '일시'(행사 일시 등)보다 우선한다 — _is_post_date_label 참고.
+_POSTING_ROLE_LABELS = frozenset(
     {
-        "등록일", "등록일자", "게시일", "게시일자", "작성일", "작성일자",
-        "배포일", "보도일", "공고일", "일자", "날짜",
+        "등록일", "등록일자", "등록일시",
+        "게시일", "게시일자", "게시일시",
+        "작성일", "작성일자", "작성일시",
+        "배포일", "배포일시", "보도일", "공고일", "공고일시",
     }
 )
+# '이 값이 날짜'라는 것만 알려주는 일반 필드 라벨. 라벨 경로에서는 값으로 인정하되,
+# 기간·행사 블록 안에서는 그 맥락을 이기지 못한다(예고기간 > 일자 > 2026-08-01).
+_GENERIC_DATE_LABELS = frozenset({"일자", "날짜"})
+# 값을 게시일로 받아들일 라벨.
+_POST_DATE_LABELS = _POSTING_ROLE_LABELS | _GENERIC_DATE_LABELS
 # 값 앞에 붙은 라벨('등록일 : 2026-07-24')을 떼어낸다. 인정하는 라벨과 떼어내는 라벨이
 # 어긋나면 '날짜: 2026-07-24' 같은 값이 통째로 버려지므로, 목록에서 직접 만든다.
 # (긴 라벨 우선 — '등록일자'가 '등록일'보다 먼저 매치되어야 '자'가 남지 않는다.)
@@ -198,8 +207,16 @@ class FscBoardScraper(BaseScraper):
         첨부·제목 영역과 기간·행사 블록은 세 경로 모두에서 똑같이 배제한다.
         """
         # (1) '등록일/게시일' 라벨의 값 — 역할이 명시돼 있어 가장 믿을 만하다.
+        #     단 이 경로도 기간·행사 가드를 받아야 한다. '일자'·'날짜' 같은 일반 필드
+        #     라벨은 기간 블록 안에도 흔히 쓰여(예고기간 > 일자 > 2026-08-01), 가드
+        #     없이 받으면 진짜 등록일보다 먼저 나와 예고기간 날짜가 게시일이 된다.
+        #     여기서는 감싼 블록의 선두 라벨까지 보지는 않는다(use_heading=False) —
+        #     '예고기간 … 등록일 …'처럼 한 블록에 필드가 나란한 배치에서 앞 기간
+        #     필드가 뒤따르는 게시일 라벨까지 덮어 버리기 때문이다.
         for label in scope.find_all(["dt", "th", "strong", "b", "em", "i", "span", "p"]):
             if cls._excluded(label, scope) or not cls._is_post_date_label(label.get_text()):
+                continue
+            if cls._in_marked_block(label, scope, _NON_POSTING_LABELS, use_heading=False):
                 continue
             yield from cls._label_values(label)
 
@@ -236,13 +253,23 @@ class FscBoardScraper(BaseScraper):
             yield clean_text(sib.get_text(" "))
 
     @staticmethod
-    def _is_post_date_label(text: str) -> bool:
+    def _normalize_label(text: str) -> str:
         label = clean_text(text).rstrip(" :：")
-        if not label or len(label) > 6:
-            return False
-        if any(m in label for m in _NON_POSTING_LABELS + _RANGE_MARKERS):
-            return False
-        return label in _POST_DATE_LABELS
+        return label if label and len(label) <= 6 else ""
+
+    @classmethod
+    def _is_post_date_label(cls, text: str) -> bool:
+        """값을 게시일로 받아들일 라벨인지. 정확히 일치할 때만 인정한다.
+
+        일반 마커를 부분문자열로 먼저 거르면 '등록일시'가 '일시'(행사 일시)에 걸려
+        멀쩡한 게시 시각 라벨이 버려진다. 그래서 목록 일치를 우선한다.
+        """
+        return cls._normalize_label(text) in _POST_DATE_LABELS
+
+    @classmethod
+    def _is_posting_role_label(cls, text: str) -> bool:
+        """게시일이라는 '역할'까지 못박는 라벨인지('일자'·'날짜'는 아니다)."""
+        return cls._normalize_label(text) in _POSTING_ROLE_LABELS
 
     @staticmethod
     def _is_period_text(text: str) -> bool:
@@ -250,7 +277,7 @@ class FscBoardScraper(BaseScraper):
         return any(m in text for m in _PERIOD_LABELS + _RANGE_MARKERS)
 
     @classmethod
-    def _in_marked_block(cls, el, scope, markers) -> bool:
+    def _in_marked_block(cls, el, scope, markers, use_heading: bool = True) -> bool:
         """후보가 속한 '가지'의 라벨이 게시일 아님을 가리키면 True.
 
         조상의 전체 텍스트를 보면 안 된다. 예고기간 블록과 게시일 블록은 보통 형제로
@@ -271,13 +298,18 @@ class FscBoardScraper(BaseScraper):
         reject = tuple(markers) + _RANGE_MARKERS
 
         def verdict(label):
-            """라벨 하나로 판정. True=거부, False=확정 수용, None=판단 보류."""
+            """라벨 하나로 판정. True=거부, False=확정 수용, None=판단 보류.
+
+            게시일 '역할' 라벨 판정이 먼저다 — '등록일시'가 '일시'에 걸려 거부되면
+            안 된다. 반대로 '일자'·'날짜'는 날짜라는 것만 알려줄 뿐이라 바깥 기간·행사
+            맥락을 이기지 못하고, 판단을 보류해 위쪽 라벨을 마저 보게 한다.
+            """
             if not label:
                 return None
+            if cls._is_posting_role_label(label):
+                return False
             if any(m in label for m in reject):
                 return True
-            if cls._is_post_date_label(label):
-                return False
             return None
 
         node = el
@@ -285,10 +317,10 @@ class FscBoardScraper(BaseScraper):
             parent = node.parent
             if parent is None or getattr(parent, "name", None) is None:
                 return False
-            for label in (
-                cls._preceding_label(node, scope),
-                cls._block_heading(parent, scope),
-            ):
+            labels = [cls._preceding_label(node, scope)]
+            if use_heading:
+                labels.append(cls._block_heading(parent, scope))
+            for label in labels:
                 decided = verdict(label)
                 if decided is not None:
                     return decided

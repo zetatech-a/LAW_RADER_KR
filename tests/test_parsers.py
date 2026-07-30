@@ -451,6 +451,76 @@ def test_fsc_excluded_class_matches_tokens_not_substrings():
     assert _fsc("https://www.fsc.go.kr/no010101", still_excluded)[0].date == ""
 
 
+def test_fsc_generic_date_label_does_not_override_period_or_event_context():
+    """기간·행사 블록 안의 일반 필드 라벨('일자'/'날짜')은 게시일이 아니다(코덱스 리뷰).
+
+    라벨 경로가 가드 없이 먼저 값을 내면, 뒤에 있는 진짜 등록일보다 예고기간 날짜가
+    이긴다. '일자'는 값이 날짜라는 것만 알려줄 뿐 게시일이라는 역할은 말해주지 않는다.
+    """
+    for generic in ("일자", "날짜"):
+        # 기간 블록 안의 '일자' 대신, 뒤에 있는 진짜 등록일이 이겨야 한다.
+        with_posted = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="./po040301/view?noticeId=4173" title="시행령 입법예고">시행령 입법예고</a></div>
+          <div class="period"><span class="tit">예고기간</span>
+            <span class="tit">{generic}</span><time datetime="2026-08-01">2026-08-01</time></div>
+          <dl class="info"><dt>등록일</dt><dd>2026-07-23</dd></dl>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/po040301", with_posted)[0].date == "2026-07-23", generic
+
+        # 행사 블록 안이고 게시일이 따로 없으면 비워 둔다(행사일을 올리지 않는다).
+        event_only = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="/no010101/87422" title="설명회 안내">설명회 안내</a></div>
+          <div class="event"><span class="tit">행사일</span>
+            <span class="tit">{generic}</span><time datetime="2026-08-05">2026-08-05</time></div>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/no010101", event_only)[0].date == "", generic
+
+        # 반대로 중립적인 맥락이면 '일자'/'날짜'도 그대로 게시일로 쓴다.
+        neutral = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="/no010101/87423" title="회의 결과">회의 결과</a></div>
+          <div class="info"><span class="tit">{generic}</span><span class="day">2026-07-24</span></div>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/no010101", neutral)[0].date == "2026-07-24", generic
+
+
+def test_fsc_posting_labels_ending_in_ilsi_are_kept():
+    """'등록일시' 같은 게시 시각 라벨이 일반 '일시'(행사 일시)에 걸리면 안 된다(코덱스 리뷰)."""
+    for label in ("등록일시", "게시일시", "작성일시"):
+        pair = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="/no010101/87424" title="회의 결과">회의 결과</a></div>
+          <dl class="info"><dt>{label}</dt><dd>2026-07-24</dd></dl>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/no010101", pair)[0].date == "2026-07-24", label
+
+        semantic = f"""
+        <ul><li><div class="cont">
+          <div class="subject"><a href="/no010101/87425" title="회의 결과">회의 결과</a></div>
+          <div class="info"><span class="tit">{label}</span>
+            <time datetime="2026-07-24 14:00:00+09:00">7월 24일</time></div>
+        </div></li></ul>"""
+        assert _fsc("https://www.fsc.go.kr/no010101", semantic)[0].date == "2026-07-24", label
+
+    # 라벨과 값이 한 전용 요소에 같이 있어도 접두사로 떨어져야 한다.
+    inline = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87426" title="회의 결과">회의 결과</a></div>
+      <div class="info"><span class="date">등록일시: 2026-07-24</span></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/no010101", inline)[0].date == "2026-07-24"
+
+    # 단독 '일시'는 여전히 행사 맥락으로 보고 받지 않는다.
+    bare = """
+    <ul><li><div class="cont">
+      <div class="subject"><a href="/no010101/87427" title="설명회 안내">설명회 안내</a></div>
+      <div class="info"><span class="tit">일시</span><time datetime="2026-08-05">8월 5일</time></div>
+    </div></li></ul>"""
+    assert _fsc("https://www.fsc.go.kr/no010101", bare)[0].date == ""
+
+
 def test_fsc_period_words_in_title_or_filename_do_not_drop_the_date():
     """기간 가드는 라벨에만 걸린다 — 제목·첨부파일명의 낱말로 게시일을 버리지 않는다.
 
