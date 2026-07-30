@@ -134,6 +134,19 @@ def test_strips_label_value_lines_and_press_notice():
     assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
 
 
+def test_keeps_body_sentence_that_mentions_javascript_as_a_rule():
+    """'자바스크립트 사용' 도 규제 내용일 수 있다 — 브라우저 안내문만 지운다."""
+    body = "자바스크립트 사용 여부를 점검하도록 규정하였다.\n세부 기준은 붙임과 같다."
+    out = build_fallback_snippet(body, "보안 점검 기준")
+    assert out.startswith("자바스크립트 사용 여부를 점검하도록 규정하였다.")
+
+
+def test_zero_width_characters_do_not_split_numbers():
+    """제로폭 공백은 공백으로 바꾸지 않고 지운다(숫자가 갈라지면 안 된다)."""
+    body = "과징금은 1,​234억원이다."
+    assert build_fallback_snippet(body, "과징금 부과") == "과징금은 1,234억원이다."
+
+
 def test_strips_breadcrumb_and_javascript_notice():
     body = "\n".join([
         "본문 바로가기",
@@ -141,6 +154,32 @@ def test_strips_breadcrumb_and_javascript_notice():
         "이 사이트는 자바스크립트를 지원하는 브라우저에서 최적화되어 있습니다.",
         BODY_SENTENCE,
         "이 페이지에서 제공하는 정보에 만족하십니까?",
+    ])
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+
+def test_keeps_body_paragraph_that_states_a_source_labeling_rule():
+    """'출처를 표기' 는 실제 규제 내용이기도 하다 — 서술형 문장은 지우지 않는다."""
+    body = "\n".join([
+        "온라인 광고에는 자료의 출처를 표기해야 한다.",
+        "위반 시 과태료 1,000만원을 부과한다.",
+    ])
+    out = build_fallback_snippet(body, "광고규제 개선방안")
+    assert out.startswith("온라인 광고에는 자료의 출처를 표기해야 한다.")
+
+
+def test_keeps_body_paragraph_that_mentions_an_embargo():
+    body = "엠바고를 위반한 언론사에는 제재를 부과한다.\n세부 기준은 붙임과 같다."
+    out = build_fallback_snippet(body, "보도 관련 제재 기준")
+    assert out.startswith("엠바고를 위반한 언론사에는 제재를 부과한다.")
+
+
+def test_strips_press_notice_only_in_request_form():
+    """요청·안내 종결로 끝나는 배포 안내문만 걷어낸다."""
+    body = "\n".join([
+        "이 자료는 배포 즉시 보도할 수 있습니다.",
+        BODY_SENTENCE,
+        "※ 본 자료를 인용하여 보도할 경우 출처를 표기해 주시기 바랍니다.",
     ])
     assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
 
@@ -161,6 +200,44 @@ def test_strips_satisfaction_footer_when_it_is_the_whole_line():
         "이 페이지에서 제공하는 정보에 만족하십니까?",
         "만족도 조사",
     ])
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+
+def test_accepts_period_terminated_date_as_a_metadata_value():
+    """"2026. 7. 24." 처럼 마침표로 끝나는 날짜도 라벨 값으로 인정해 함께 걷어낸다."""
+    body = "\n".join(["등록일", "2026. 7. 24.", "조회수", "1,234", BODY_SENTENCE])
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+    body = "\n".join(["게시일", "2026년 7월 24일", BODY_SENTENCE])
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+
+def test_keeps_prose_that_merely_ends_with_a_filename():
+    """산문이 파일명으로 끝나도 첨부 목록 행으로 오인하지 않는다."""
+    body = "제출 파일명은 report.pdf\n서식은 홈페이지에서 받을 수 있다."
+    out = build_fallback_snippet(body, "서식 안내")
+    assert out.startswith("제출 파일명은 report.pdf")
+
+    body = "신청 서식: 금융지원신청서.hwp\n접수는 8월 1일부터 시작한다."
+    out = build_fallback_snippet(body, "지원 신청 안내")
+    assert out.startswith("신청 서식: 금융지원신청서.hwp")
+
+
+def test_strips_attachment_rows_in_attachment_list_context():
+    """'첨부파일' 라벨 뒤라면 크기 표기가 없는 파일명도 여러 줄 걷어낸다."""
+    body = "\n".join([
+        "첨부파일", "보도자료.hwp", "1. 공고문 입법예고.hwpx", BODY_SENTENCE,
+    ])
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+    # 꼬리말 쪽도 같다.
+    body = "\n".join([BODY_SENTENCE, "첨부파일", "보도자료.hwp", "별첨.pdf"])
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+
+def test_strips_attachment_row_with_size_on_its_own():
+    """크기 표기가 붙은 줄은 첨부 목록 행이 거의 확실해 라벨 없이도 걷어낸다."""
+    body = f"보도자료.hwp (188 KB)\n{BODY_SENTENCE}"
     assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
 
 
@@ -209,6 +286,31 @@ def test_strips_html_tags_and_entities():
     )
     out = build_fallback_snippet(body, TITLE)
     assert out == "금융위원회는 <주식회사 등의 외부감사에 관한 법률> 개정안을 의결하였다."
+
+
+def test_inline_tags_do_not_break_numbers_or_word_boundaries():
+    """인라인 태그 경계에 줄바꿈을 넣으면 수치와 어절이 훼손된다."""
+    body = "<p>과징금은 1,<strong>234</strong>억원이다.</p>"
+    assert build_fallback_snippet(body, "과징금 부과") == "과징금은 1,234억원이다."
+
+    body = "<p><strong>금융위원회</strong>는 <em>3.5</em>% 인하를 의결하였다.</p>"
+    assert build_fallback_snippet(body, "금리 인하 의결") == (
+        "금융위원회는 3.5% 인하를 의결하였다."
+    )
+
+
+def test_block_tags_still_separate_lines():
+    """반대로 블록 요소·<br> 자리에서는 줄이 갈려야 한다(라벨/값 분리)."""
+    body = (
+        "<div><dl><dt>담당부서</dt><dd>기업회계팀</dd></dl>"
+        "<p>금융위원회는 1,<b>234</b>억원을 부과하였다.</p></div>"
+    )
+    assert build_fallback_snippet(body, "과징금 부과") == (
+        "금융위원회는 1,234억원을 부과하였다."
+    )
+    assert build_fallback_snippet("첫째 줄이다.<br/>둘째 줄이다.", "무제") == (
+        "첫째 줄이다. 둘째 줄이다."
+    )
 
 
 def test_keeps_korean_angle_notation_that_is_not_html():

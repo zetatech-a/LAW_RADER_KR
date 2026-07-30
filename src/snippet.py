@@ -39,21 +39,39 @@ _HTML_TAG = re.compile(
 )
 
 
+# 줄바꿈을 만드는 태그(블록 요소와 <br>). 나머지(strong·em·span 등 인라인)는 텍스트를
+# 그대로 이어 붙인다. get_text("\n") 으로 뭉뚱그리면 인라인 태그 경계마다 줄이 갈려
+# "과징금은 1,<strong>234</strong>억원이다" 가 "과징금은 1, 234 억원이다" 로, "<strong>
+# 금융위원회</strong>는" 이 "금융위원회 는" 으로 어긋난다 — 수치와 어절이 훼손된다.
+_BLOCK_TAGS = (
+    "p", "br", "hr", "div", "table", "thead", "tbody", "tfoot", "tr", "td", "th",
+    "caption", "ul", "ol", "li", "dl", "dt", "dd", "h1", "h2", "h3", "h4", "h5",
+    "h6", "pre", "blockquote", "section", "article", "header", "footer", "nav",
+)
+
+
 def strip_html(text: str) -> str:
-    """본문에 HTML 이 남아 있으면 기존 프로젝트 방식(BeautifulSoup+lxml)으로 태그를 제거."""
+    """본문에 HTML 이 남아 있으면 기존 프로젝트 방식(BeautifulSoup+lxml)으로 태그를 제거.
+
+    블록 요소·<br> 자리에만 줄바꿈을 넣고 인라인 노드는 공백 없이 이어 붙인다.
+    """
     if not text or not _HTML_TAG.search(text):
         return text or ""
     soup = BeautifulSoup(text, "lxml")
     for el in soup(["script", "style"]):
         el.decompose()
-    return soup.get_text("\n")
+    for el in soup.find_all(_BLOCK_TAGS):
+        el.insert_after("\n")
+    return soup.get_text("")
 
 
 # ── 2) 공백·엔티티 정규화 ───────────────────────────────────────────────────
-# 눈에 안 보이거나 폭만 다른 공백류. 그대로 두면 제목 비교와 길이 계산이 어긋난다.
-_SPACE_LIKE = re.compile(
-    "[\u00a0\u1680\u2000-\u200d\u202f\u205f\u3000\ufeff]"
-)
+# 폭만 다른 공백류(줄바꿈 없는 공백·전각 공백 등)는 보통 공백으로 바꾼다. 그대로 두면
+# 제목 비교와 길이 계산이 어긋난다.
+_SPACE_LIKE = re.compile("[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
+# 폭이 없는 문자(제로폭 공백·BOM 등)는 공백으로 바꾸지 않고 **지운다**. 그대로 두면
+# "1,\u200b234" 가 "1, 234" 로 갈라져 수치가 훼손된다(인라인 태그 줄바꿈과 같은 문제).
+_ZERO_WIDTH = re.compile("[\u200b-\u200f\u2060\ufeff]")
 _HORIZONTAL_WS = re.compile(r"[ \t\r\f\v]+")
 
 
@@ -66,7 +84,7 @@ def normalize_lines(body: str) -> list[str]:
         text = strip_html(text)
     else:
         text = html_lib.unescape(text)
-    text = _SPACE_LIKE.sub(" ", text)
+    text = _ZERO_WIDTH.sub("", _SPACE_LIKE.sub(" ", text))
 
     lines = []
     for raw in text.splitlines():
@@ -131,6 +149,12 @@ _LABEL_ONLY = re.compile(rf"^(?:{_LABEL_ALT})\s*[:：]?$")
 # 값은 짧고 문장으로 끝나지 않는다 — 그 조건을 만족할 때만 한 줄 더 걷어낸다.
 _META_VALUE_MAX_CHARS = 30
 _SENTENCE_TAIL = re.compile(r"(?:[.!?。]|니다|습니다|이다|한다|였다|했다|함|임|음)$")
+# 다만 "2026. 7. 24." 처럼 마침표로 끝나는 날짜 표기가 흔하다. 문장 종결 검사에 걸려
+# 값으로 인정되지 않으면 라벨만 지워지고 날짜부터 뒤 메타행 전부가 발췌 앞에 남는다.
+_DATE_LIKE = re.compile(
+    r"^\d{4}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*[.일]?\s*"
+    r"(?:\(?[월화수목금토일]\)?)?\s*(?:\d{1,2}:\d{2})?$"
+)
 
 # 정확히 일치할 때만 지우는 메뉴·네비게이션 문구(공백 제거·소문자화 후 비교).
 _NAV_WORDS = frozenset({
@@ -149,14 +173,25 @@ _NAV_TRIM = re.compile(r"\s+")
 _BREADCRUMB = re.compile(r"^(?:홈|HOME|Home)\s*[>›》＞]\s*\S")
 
 # 줄 전체가 장식 기호뿐인 경우(구분선, 빈 불릿 등).
-_DECORATION = re.compile(r"^[\s\-=_~*·・ㆍ‧∙•▪◦□■○●◇◆※☞▶▷]+$")
+_DECORATION = re.compile(r"^[\s\-=_~*·・ㆍ‧∙•▪◦□■○●◇◆※☞▶▷─━│┃═╌┄]+$")
 
-# 첨부파일 목록 줄. "보도자료.hwp (188 KB)" 처럼 파일명(+크기)만 있는 줄만 지운다.
-_ATTACHMENT_FILE = re.compile(
-    r"^.{1,120}\.(?:hwp|hwpx|pdf|docx?|xlsx?|pptx?|zip|jpe?g|png|gif|bmp|txt|csv)"
-    r"(?:\s*\(?\s*[\d.,]+\s*[KMGkmg]?B\s*\)?)?$",
-    re.IGNORECASE,
+# 첨부파일 목록 줄. 파일명은 실제 수집 결과처럼 공백을 포함할 수 있어("1. 공고문
+# 입법예고.hwpx", tests/test_parsers.py 참고) 파일명만으로는 산문과 구분되지 않는다.
+# 그래서 두 갈래로 나눈다:
+#   ① 크기 표기가 붙은 줄("보도자료.hwp (188 KB)") — 첨부 목록 행이 거의 확실해 단독 판정.
+#   ② 크기 없는 파일명 줄 — '첨부파일' 라벨 바로 뒤(첨부 목록 문맥)에서만 지운다.
+# ②를 단독으로 지우면 "제출 파일명은 report.pdf" 같은 본문 문장이 발췌에서 사라진다.
+_FILE_EXT = r"(?:hwp|hwpx|pdf|docx?|xlsx?|pptx?|zip|jpe?g|png|gif|bmp|txt|csv)"
+_FILE_SIZE = r"\s*\(?\s*[\d.,]+\s*[KMGkmg]?B\s*\)?"
+# 콜론이 있으면 "신청 서식: 금융지원신청서.hwp" 처럼 설명문이라 파일명 줄로 보지 않는다.
+_ATTACHMENT_WITH_SIZE = re.compile(
+    rf"^[^:：]{{1,120}}\.{_FILE_EXT}{_FILE_SIZE}$", re.IGNORECASE
 )
+_BARE_FILENAME = re.compile(
+    rf"^[^:：]{{1,120}}\.{_FILE_EXT}(?:{_FILE_SIZE})?$", re.IGNORECASE
+)
+# 첨부 목록 문맥을 만드는 라벨(_META_LABELS 의 부분집합).
+_ATTACHMENT_LABEL_ONLY = re.compile(r"^(?:첨부파일|첨부)\s*[:：]?$")
 
 # 페이지 하단 만족도 조사. **줄 전체**가 그 안내문일 때만 지운다 — "만족도 조사" 는
 # 실제 보도자료 본문("금융감독원은 금융소비자 만족도 조사를 실시했다")에도 나오는 말이라
@@ -166,15 +201,27 @@ _SURVEY = re.compile(
     r"|.{0,40}만족하[십셨]\S{0,4}\s*[?？])$"        # "…정보에 만족하십니까?" 안내문
 )
 
-# 보도자료 배포 안내(엠바고·출처 표기 요청).
+# 보도자료 배포 안내(엠바고·출처 표기 요청). "출처를 표기"·"엠바고" 는 실제 규제 내용에도
+# 나오는 말이라("온라인 광고에는 자료의 출처를 표기해야 한다") 부분 일치로 보면 규제 사실이
+# 발췌에서 사라진다. 그래서 ① 줄 전체가 짧은 안내문이고 ② 요청·안내 종결("…주시기
+# 바랍니다", "…할 수 있습니다")로 끝날 때만 군더더기로 본다. 서술형("…해야 한다",
+# "…부과한다")은 본문으로 남긴다.
+_PRESS_KEYWORD = (
+    r"(?:즉시\s*보도|인용하여\s*보도|출처를?\s*(?:표기|명시|밝혀)|엠바고)"
+)
+_PRESS_REQUEST_TAIL = r"(?:바랍니다|바람|있습니다|주십시오|주세요|부탁드립니다)"
 _PRESS_NOTICE = re.compile(
-    r"배포\s*즉시\s*보도|즉시\s*보도\s*(?:하여|해)?\s*주시|인용하여\s*보도"
-    r"|출처를?\s*(?:표기|명시|밝혀)|엠바고"
+    rf"^(?=.{{0,140}}$)(?=.*{_PRESS_KEYWORD}).*{_PRESS_REQUEST_TAIL}\s*[.]?$"
 )
 
-# 자바스크립트 사용 안내. 두 조건을 함께 만족할 때만 지운다.
-_JS_WORD = re.compile(r"자바\s*스크립트|javascript", re.IGNORECASE)
-_JS_HINT = re.compile(r"지원|사용|활성|허용|enable", re.IGNORECASE)
+# 자바스크립트 사용 안내. 역시 줄 전체가 짧은 안내문이고 브라우저·사이트 문맥을 함께
+# 갖출 때만 지운다. "자바스크립트 사용 여부를 점검하도록 규정하였다" 처럼 실제 규제
+# 내용일 수 있어 '자바스크립트 + 사용' 만으로는 판정하지 않는다.
+_JS_NOTICE = re.compile(
+    r"^(?=.{0,140}$)(?=.*(?:자바\s*스크립트|javascript))"
+    r"(?=.*(?:브라우저|browser|사이트|홈페이지|페이지|활성화|설정|지원하지|enable)).*$",
+    re.IGNORECASE,
+)
 
 
 def _nav_key(line: str) -> str:
@@ -182,8 +229,13 @@ def _nav_key(line: str) -> str:
 
 
 def _looks_like_meta_value(line: str) -> bool:
-    """라벨만 있는 줄 바로 뒤에 오는 값 줄(부서명·날짜·조회수 등)로 볼 수 있는가."""
-    return 0 < len(line) <= _META_VALUE_MAX_CHARS and not _SENTENCE_TAIL.search(line)
+    """라벨만 있는 줄 바로 뒤에 오는 값 줄(부서명·날짜·조회수 등)로 볼 수 있는가.
+
+    날짜 모양을 먼저 확인한 뒤에 문장 종결 검사를 적용한다("2026. 7. 24." 도 값이다).
+    """
+    if not 0 < len(line) <= _META_VALUE_MAX_CHARS:
+        return False
+    return bool(_DATE_LIKE.match(line)) or not _SENTENCE_TAIL.search(line)
 
 
 def is_boilerplate(line: str) -> bool:
@@ -195,10 +247,10 @@ def is_boilerplate(line: str) -> bool:
         or _nav_key(line) in _NAV_WORDS
         or _BREADCRUMB.match(line)
         or _LABEL_LINE.match(line)
-        or _ATTACHMENT_FILE.match(line)
+        or _ATTACHMENT_WITH_SIZE.match(line)
         or _SURVEY.match(line)
-        or _PRESS_NOTICE.search(line)
-        or (_JS_WORD.search(line) and _JS_HINT.search(line))
+        or _PRESS_NOTICE.match(line)
+        or _JS_NOTICE.match(line)
     )
 
 
@@ -222,11 +274,21 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
             return False
         return not noise(lines[index]) and _looks_like_meta_value(lines[index])
 
+    def after_attachment_run(index: int) -> int:
+        """'첨부파일' 라벨 뒤에 이어지는 파일명 줄들을 지나친 위치."""
+        while index < len(lines) and _BARE_FILENAME.match(lines[index]):
+            index += 1
+        return index
+
     start = 0
     while start < len(lines):
         line = lines[start]
         if not noise(line):
             break
+        # '첨부파일' 라벨 뒤에는 크기 표기가 없는 파일명이 여러 줄 이어질 수 있다.
+        if _ATTACHMENT_LABEL_ONLY.match(line):
+            start = after_attachment_run(start + 1)
+            continue
         # 라벨만 있는 줄(<dt>) 다음의 값 줄(<dd>)까지 한 줄 더 걷어낸다.
         if _LABEL_ONLY.match(line) and is_value_of_label(start + 1):
             start += 1
@@ -237,6 +299,13 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
         line = lines[end - 1]
         if noise(line):
             end -= 1
+            continue
+        # 꼬리말이 "첨부파일 / 보도자료.hwp / 별첨.pdf" 처럼 끝나는 경우.
+        run = end
+        while run > start and _BARE_FILENAME.match(lines[run - 1]):
+            run -= 1
+        if run < end and run > start and _ATTACHMENT_LABEL_ONLY.match(lines[run - 1]):
+            end = run - 1
             continue
         # 꼬리말이 "담당부서 / 기업회계팀" 처럼 라벨+값 두 줄로 끝나는 경우.
         if (
