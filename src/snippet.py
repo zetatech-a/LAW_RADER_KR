@@ -12,7 +12,7 @@
     본문 가운데 문장은 어떤 경우에도 사라지지 않는다.
   - 판단은 줄 단위로, 확실한 패턴에만 적용한다(라벨+구분자, 정확히 일치하는 메뉴어 등).
     "담당자는 …" 처럼 라벨로 시작하기만 하는 정상 문장은 지우지 않는다.
-  - 결과가 비거나 지나치게 짧으면 기존 방식(원본 220자 절단)으로 되돌린다.
+  - 결과에 실질적인 문자나 숫자가 없으면 기존 방식(원본 220자 절단)으로 되돌린다.
   - 문자 단위 절삭(lstrip 등)은 하지 않는다 — "-3.5%", "△2조원" 처럼 부호가 붙은
     수치가 훼손되면 손실이 이익으로 뒤집힌다(summarizer 의 목록표식 처리와 같은 이유).
 """
@@ -56,8 +56,7 @@ _BLOCK_TAGS = (
 # 되어 문장의 주어가 사라진다. 속성 유무도 근거가 못 된다 — 예시에도 속성이 붙는다
 # ("<img src=\"x\">"). 그래서 다음 중 하나가 있을 때만 마크업으로 본다.
 #   ① 문서 골격(<!DOCTYPE>·<html>·<head>·<body>)
-#   ② 태그가 3개 이상 — 산문 속 예시는 보통 한둘이다
-#   ③ 본문 전체가 블록 요소 하나로 감싸여 있다("<p>…</p>")
+#   ② 본문 전체가 블록 요소 하나로 감싸여 있다("<p>…</p>")
 # 근거가 없으면 파싱하지 않고 글자 그대로 둔다. 태그 표기가 메일에 보이는 것이,
 # 문장 일부가 소리 없이 사라지는 것보다 낫다.
 _DOC_SKELETON = re.compile(r"<(?:!DOCTYPE|html|head|body)\b", re.IGNORECASE)
@@ -66,16 +65,11 @@ _WRAPPED_IN_BLOCK = re.compile(
     r"[^>]*>.*</\1\s*>\s*$",
     re.IGNORECASE | re.DOTALL,
 )
-_MIN_TAGS_FOR_MARKUP = 3
-
-
 def looks_like_markup(text: str) -> bool:
     """본문에 남은 것이 '잔여 마크업' 이라고 볼 근거가 있는가."""
     if not text or not _HTML_TAG.search(text):
         return False
     if _DOC_SKELETON.search(text):
-        return True
-    if len(_HTML_TAG.findall(text)) >= _MIN_TAGS_FOR_MARKUP:
         return True
     return bool(_WRAPPED_IN_BLOCK.match(text))
 
@@ -142,7 +136,7 @@ def normalize_lines(body: str) -> list[str]:
 # 제목 비교에서 무시하는 '형식' 문자 — 공백·괄호·따옴표·중점처럼 수치와 무관한 것뿐이다.
 # 글자와 숫자는 남기므로 "은행법 개정" 과 "은행법 개정안" 은 여전히 다른 것으로 본다.
 _TITLE_FORMAT = re.compile(
-    r"[\s\[\]()（）〔〕【】<>《》「」『』｢｣\"'“”‘’`·・ㆍ;|_!?]+"
+    r"[\s\[\]()（）〔〕【】《》「」『』｢｣\"'“”‘’`·・ㆍ;|_!?]+"
 )
 # 소수점·자릿점·부호·날짜·시각 구분자로도 쓰이는 문자. 숫자에 붙어 있지 않을 때만
 # 무시한다. 무조건 지우면 "수익률 3.5% 증가"와 "수익률 35% 증가", "-3.5%"와 "3.5%",
@@ -302,14 +296,10 @@ _DECORATION = re.compile(r"^[\s\-=_~*·・ㆍ‧∙•▪◦□■○●◇◆�
 
 # 첨부파일 목록 줄. 파일명은 실제 수집 결과처럼 공백을 포함할 수 있어("1. 공고문
 # 입법예고.hwpx", tests/test_parsers.py 참고) 파일명만으로는 산문과 구분되지 않는다.
-# 그래서 두 갈래로 나눈다:
-#   ① 크기 표기가 붙은 줄("보도자료.hwp (188 KB)") — 첨부 목록 행이 거의 확실해 단독 판정.
-#   ② 크기 없는 파일명 줄 — '첨부파일' 라벨 바로 뒤(첨부 목록 문맥)에서만 지운다.
-# ②를 단독으로 지우면 "제출 파일명은 report.pdf" 같은 본문 문장이 발췌에서 사라진다.
+# 그래서 '첨부파일' 라벨 바로 뒤(첨부 목록 문맥)에서만 지운다.
+# 파일 크기가 있어도 단독으로 지우면 "제출 파일은 report.pdf (10 MB)" 같은 정상 문장이
+# 발췌에서 사라진다.
 # 콜론이 있으면 "신청 서식: 금융지원신청서.hwp" 처럼 설명문이라 파일명 줄로 보지 않는다.
-_ATTACHMENT_WITH_SIZE = re.compile(
-    rf"^[^:：]{{1,120}}\.{_FILE_EXT}{_FILE_SIZE}$", re.IGNORECASE
-)
 _BARE_FILENAME = _VALUE_FILE
 # 첨부 목록 문맥을 만드는 라벨(_META_LABELS 의 부분집합).
 _ATTACHMENT_LABEL_ONLY = re.compile(r"^(?:첨부파일|첨부)\s*[:：]?$")
@@ -404,7 +394,6 @@ def is_boilerplate(line: str) -> bool:
         or _nav_key(line) in _NAV_WORDS
         or _BREADCRUMB.match(line)
         or is_labelled_value(line)
-        or _ATTACHMENT_WITH_SIZE.match(line)
         or _SURVEY.match(line)
         or _PRESS_NOTICE.match(line)
         or _JS_NOTICE.match(line)
@@ -507,14 +496,12 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
 
 
 # ── 5) 발췌 조립 ────────────────────────────────────────────────────────────
-# 정제 결과가 이보다 짧으면(글자·숫자 기준) 규칙이 과하게 걷어낸 것으로 보고 되돌린다.
-_MIN_MEANINGFUL_CHARS = 10
 _NON_WORD = re.compile(r"[^0-9A-Za-z가-힣ㄱ-ㅎㅏ-ㅣ一-龥]")
 
 
 def is_meaningful(text: str) -> bool:
-    """정제 결과를 그대로 실을 만한가. 기호만 남았거나 너무 짧으면 False."""
-    return len(_NON_WORD.sub("", text or "")) >= _MIN_MEANINGFUL_CHARS
+    """정제 결과에 한 글자 이상의 실질적인 문자 또는 숫자가 있는가."""
+    return bool(_NON_WORD.sub("", text or ""))
 
 
 def truncate_snippet(text: str, limit: int = SNIPPET_LIMIT) -> str:
@@ -531,7 +518,7 @@ def build_fallback_snippet(
     """LLM 요약이 없을 때 메일에 실을 원문 발췌를 만든다.
 
     HTML 제거 → 엔티티 정리 → 공백 정규화 → 제목 중복 제거 → 상용구/메타데이터 제거
-    → 남은 내용을 limit 자까지 발췌. 정제 결과가 비거나 너무 짧으면 정규화만 마친
+    → 남은 내용을 limit 자까지 발췌. 정제 결과에 문자나 숫자가 없으면 정규화만 마친
     원본을 같은 규칙으로 자른다(기존 동작). 본문이 없으면 빈 문자열이다.
     """
     lines = normalize_lines(body)
