@@ -287,26 +287,37 @@ def test_label_without_a_value_does_not_swallow_the_next_label():
 def test_keeps_short_heading_after_a_label_without_a_value():
     """값이 빈 라벨 뒤에 오는 짧은 소제목을 값으로 먹지 않는다.
 
-    라벨에 기대되는 값 모양(부서명·날짜·전화·조회수)이 아니면 건드리지 않는다.
+    소제목은 사람 이름·부서명과 생김새가 같으므로(추진배경/홍길동, 기대효과/은행과)
+    직급·전화 같은 사람 고유의 증거나 머리말 블록 문맥이 없으면 건드리지 않는다.
     """
     body = "담당부서\n대출한도 1억원 상향\n금융위원회는 서민금융 지원을 확대한다고 밝혔다."
     out = build_fallback_snippet(body, "서민금융 지원 확대")
     assert out.startswith("대출한도 1억원 상향")
 
-    body = "담당자\n추진 배경\n금융위원회는 규정 개정을 추진한다고 밝혔다."
-    assert build_fallback_snippet(body, "규정 개정 추진").startswith("추진 배경")
+    for label in ("담당자", "작성자", "담당", "담당부서", "부서"):
+        for heading in ("추진배경", "주요내용", "검토의견", "기대효과", "추진 성과"):
+            body = f"{label}\n{heading}\n금융위원회는 규정 개정을 추진한다고 밝혔다."
+            out = build_fallback_snippet(body, "규정 개정 추진")
+            assert out.startswith(heading), f"{label}/{heading} → {out}"
 
 
 def test_still_strips_label_values_that_match_the_label_shape():
-    """반대로 라벨에 맞는 값이면 계속 두 줄 다 걷어낸다."""
+    """반대로 라벨에 맞는 값이면 계속 두 줄 다 걷어낸다.
+
+    부서명·사람 이름처럼 소제목과 생김새가 같은 값은 머리말 블록이라는 문맥 증거가
+    있을 때만(여기서는 뒤따르는 '등록일' 라벨) 걷어낸다.
+    """
     for value in (
         "기업회계팀",
         "금융위원회 기업회계팀",
         "제재심의국",
+        "은행과",
+        "금융투자검사3국",
     ):
-        body = f"담당부서\n{value}\n{BODY_SENTENCE}"
+        body = f"담당부서\n{value}\n등록일\n2026-07-24\n{BODY_SENTENCE}"
         assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE, value
 
+    # 날짜·전화·조회수·직급은 형식만으로 메타데이터임이 드러나 문맥 증거가 필요 없다.
     for label, value in (
         ("담당자", "홍길동 사무관"),
         ("연락처", "02-2100-2600"),
@@ -315,6 +326,17 @@ def test_still_strips_label_values_that_match_the_label_shape():
     ):
         body = f"{label}\n{value}\n{BODY_SENTENCE}"
         assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE, label
+
+
+def test_lone_free_text_value_is_kept_without_block_evidence():
+    """머리말 블록이라는 증거가 없으면 자유 텍스트 값은 건드리지 않는다.
+
+    "은행과"(부서)와 "기대효과"(소제목), "홍길동"(이름)과 "추진배경"(소제목)은 생김새가
+    같아 정규식으로 가를 수 없다. 홀로 선 라벨 뒤에서는 본문 소제목일 가능성을 우선해
+    남겨 둔다 — 부서명이 발췌 앞에 한 조각 남는 쪽이, 사실이 통째로 사라지는 것보다 낫다.
+    """
+    out = build_fallback_snippet(f"담당부서\n기업회계팀\n{BODY_SENTENCE}", TITLE)
+    assert out == f"기업회계팀 {BODY_SENTENCE}"
 
 
 def test_inline_label_value_must_match_the_label_shape():
@@ -363,7 +385,8 @@ def test_does_not_touch_boilerplate_like_lines_in_the_middle():
 
 def test_strips_html_tags_and_entities():
     body = (
-        "<div class='board-view-wrap'><dl><dt>담당부서</dt><dd>기업회계팀</dd></dl>"
+        "<div class='board-view-wrap'><dl><dt>담당부서</dt><dd>기업회계팀</dd>"
+        "<dt>등록일</dt><dd>2026-07-24</dd></dl>"
         "<p>금융위원회는 &lt;주식회사 등의 외부감사에 관한 법률&gt; 개정안을 "
         "의결하였다.</p></div>"
     )
@@ -396,7 +419,8 @@ def test_block_nested_after_text_gets_a_boundary():
 def test_block_tags_still_separate_lines():
     """반대로 블록 요소·<br> 자리에서는 줄이 갈려야 한다(라벨/값 분리)."""
     body = (
-        "<div><dl><dt>담당부서</dt><dd>기업회계팀</dd></dl>"
+        "<div><dl><dt>담당부서</dt><dd>제재심의국</dd>"
+        "<dt>등록일</dt><dd>2026-07-24</dd></dl>"
         "<p>금융위원회는 1,<b>234</b>억원을 부과하였다.</p></div>"
     )
     assert build_fallback_snippet(body, "과징금 부과") == (
