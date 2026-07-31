@@ -108,6 +108,18 @@ def test_title_comparison_still_ignores_formatting_only_differences():
     assert is_duplicate_title("수익률 3.5% 증가", "수익률 3.5% 증가")
 
 
+def test_title_comparison_preserves_ascii_comparison_operators():
+    assert not is_duplicate_title("자산 < 10억원 적용", "자산 > 10억원 적용")
+    assert is_duplicate_title("자산 < 10억원 적용", "자산 < 10억원 적용")
+
+
+def test_keeps_first_body_line_with_opposite_comparison_operator():
+    body = "자산 < 10억원 적용\n세부 기준은 다음과 같다."
+    assert build_fallback_snippet(body, "자산 > 10억원 적용").startswith(
+        "자산 < 10억원 적용"
+    )
+
+
 def test_keeps_body_line_whose_numbers_differ_from_the_title():
     title = "수익률 3.5% 증가"
     body = "수익률 35% 증가\n세부 내용은 붙임과 같다."
@@ -268,9 +280,17 @@ def test_strips_attachment_rows_in_attachment_list_context():
     assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
 
 
-def test_strips_attachment_row_with_size_on_its_own():
-    """크기 표기가 붙은 줄은 첨부 목록 행이 거의 확실해 라벨 없이도 걷어낸다."""
-    body = f"보도자료.hwp (188 KB)\n{BODY_SENTENCE}"
+def test_keeps_filename_with_size_outside_attachment_context():
+    sentence = "제출 파일은 report.pdf (10 MB)"
+    assert build_fallback_snippet(f"{sentence}\n{BODY_SENTENCE}", TITLE).startswith(sentence)
+    assert build_fallback_snippet(f"{BODY_SENTENCE}\n{sentence}", TITLE).endswith(sentence)
+
+
+def test_strips_filename_with_size_in_attachment_context():
+    body = f"첨부파일\nreport.pdf (10 MB)\n{BODY_SENTENCE}"
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+    body = f"첨부파일: report.pdf (10 MB)\n{BODY_SENTENCE}"
     assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
 
 
@@ -425,6 +445,11 @@ def test_keeps_decoded_literal_tag_examples():
         assert build_fallback_snippet(body, "공시서식 안내") == body, raw
 
 
+def test_keeps_multiple_literal_tag_examples_in_one_sentence():
+    body = "허용되는 표기는 <br>, <img>, <span> 세 가지다."
+    assert build_fallback_snippet(body, "허용 표기 안내") == body
+
+
 def test_still_drops_script_and_style_in_real_markup():
     """반대로 속성·문서 골격이 있는 진짜 마크업이면 script/style 내용을 버린다."""
     body = (
@@ -568,6 +593,11 @@ def test_falls_back_when_cleanup_leaves_only_symbols():
     body = "첨부파일\n보도자료.hwp\n○ ○ ○"
     out = build_fallback_snippet(body, TITLE)
     assert out == "첨부파일 보도자료.hwp ○ ○ ○"
+
+
+def test_keeps_short_substantive_body_after_edge_cleanup():
+    body = "담당부서 : 금융위원회 기업회계팀\n등록일 : 2026-07-24\n접수 마감"
+    assert build_fallback_snippet(body, TITLE) == "접수 마감"
 
 
 # --- 수치 보존 ---
