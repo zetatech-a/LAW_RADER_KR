@@ -21,7 +21,7 @@ from __future__ import annotations
 import html as html_lib
 import re
 
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup
 
 # 메일 카드에 싣는 발췌 길이(기존 동작과 동일한 기본값).
 SNIPPET_LIMIT = 220
@@ -50,35 +50,46 @@ _BLOCK_TAGS = (
 )
 
 
-# 진짜 잔여 마크업이라는 표시 — 속성이 붙은 태그이거나 문서 골격. 스크래퍼의
-# get_text() 는 "&lt;script&gt;alert(1)&lt;/script&gt;" 를 이미 글자 그대로의
-# "<script>alert(1)</script>" 로 풀어 본문에 넣는데, 이걸 마크업으로 보고 통째로
-# 지우면(decompose) 예시 내용이 발췌에서 소리 없이 사라진다. 그래서 script/style 을
-# **삭제**하는 것은 진짜 마크업일 때로 한정한다(태그 제거 자체는 그대로 한다).
-_REAL_MARKUP = re.compile(
-    r"<(?:!DOCTYPE|html|body)\b|<[a-zA-Z][a-zA-Z0-9]*\s+[a-zA-Z-]+\s*=",
-    re.IGNORECASE,
+# 파싱을 시작할지 가르는 근거. 스크래퍼의 get_text() 는 "&lt;br&gt;" 같은 예시를
+# 이미 글자 그대로의 "<br>" 로 풀어 본문에 넣는다. 태그처럼 보인다고 무조건 파싱하면
+# "공시서식에는 <br> 태그를 사용할 수 없다" 가 "공시서식에는 태그를 사용할 수 없다" 가
+# 되어 문장의 주어가 사라진다. 속성 유무도 근거가 못 된다 — 예시에도 속성이 붙는다
+# ("<img src=\"x\">"). 그래서 다음 중 하나가 있을 때만 마크업으로 본다.
+#   ① 문서 골격(<!DOCTYPE>·<html>·<head>·<body>)
+#   ② 태그가 3개 이상 — 산문 속 예시는 보통 한둘이다
+#   ③ 본문 전체가 블록 요소 하나로 감싸여 있다("<p>…</p>")
+# 근거가 없으면 파싱하지 않고 글자 그대로 둔다. 태그 표기가 메일에 보이는 것이,
+# 문장 일부가 소리 없이 사라지는 것보다 낫다.
+_DOC_SKELETON = re.compile(r"<(?:!DOCTYPE|html|head|body)\b", re.IGNORECASE)
+_WRAPPED_IN_BLOCK = re.compile(
+    r"^\s*<(p|div|section|article|table|tbody|tr|td|th|ul|ol|li|dl|blockquote)\b"
+    r"[^>]*>.*</\1\s*>\s*$",
+    re.IGNORECASE | re.DOTALL,
 )
+_MIN_TAGS_FOR_MARKUP = 3
+
+
+def looks_like_markup(text: str) -> bool:
+    """본문에 남은 것이 '잔여 마크업' 이라고 볼 근거가 있는가."""
+    if not text or not _HTML_TAG.search(text):
+        return False
+    if _DOC_SKELETON.search(text):
+        return True
+    if len(_HTML_TAG.findall(text)) >= _MIN_TAGS_FOR_MARKUP:
+        return True
+    return bool(_WRAPPED_IN_BLOCK.match(text))
 
 
 def strip_html(text: str) -> str:
-    """본문에 HTML 이 남아 있으면 기존 프로젝트 방식(BeautifulSoup+lxml)으로 태그를 제거.
+    """잔여 마크업이면 기존 프로젝트 방식(BeautifulSoup+lxml)으로 태그를 제거.
 
     블록 요소·<br> 자리에만 줄바꿈을 넣고 인라인 노드는 공백 없이 이어 붙인다.
-    script/style 의 내용은 진짜 잔여 마크업일 때만 버린다.
     """
-    if not text or not _HTML_TAG.search(text):
+    if not looks_like_markup(text):
         return text or ""
     soup = BeautifulSoup(text, "lxml")
-    if _REAL_MARKUP.search(text):
-        for el in soup(["script", "style"]):
-            el.decompose()
-    else:
-        # 글자 그대로의 예시일 수 있으므로 내용을 살린다. bs4 는 script/style 안의
-        # 문자열을 Script·Stylesheet 타입으로 두고 get_text() 에서 건너뛰므로,
-        # 평범한 문자열로 바꿔 끼워야 발췌에 남는다.
-        for el in soup(["script", "style"]):
-            el.replace_with(NavigableString("".join(str(c) for c in el.contents)))
+    for el in soup(["script", "style"]):
+        el.decompose()
     for el in soup.find_all(_BLOCK_TAGS):
         # 앞뒤 **양쪽**에 경계를 넣는다. 뒤에만 넣으면 블록이 텍스트 뒤에 중첩된
         # "<div>머리말<ul><li>첫 항목</li></ul></div>" 이 "머리말첫 항목" 으로,
@@ -111,7 +122,7 @@ def _unescape_entities(text: str) -> str:
 def normalize_lines(body: str) -> list[str]:
     """태그·엔티티를 정리하고 줄 단위로 공백을 정규화한 뒤 빈 줄을 버린다."""
     text = body or ""
-    if _HTML_TAG.search(text):
+    if looks_like_markup(text):
         # BeautifulSoup 이 태그와 엔티티를 함께 풀어 준다. 여기서 unescape 를 한 번 더
         # 부르면 "&amp;amp;" 처럼 이중 인코딩된 문자가 과하게 풀리므로 부르지 않는다.
         text = strip_html(text)
@@ -263,6 +274,13 @@ _LABEL_ALT = "|".join(sorted(_META_LABELS, key=len, reverse=True))
 _LABEL_ONLY = re.compile(rf"^({_LABEL_ALT})\s*[:：]?$")
 _LABEL_VALUE = re.compile(rf"^({_LABEL_ALT})\s*[:：]\s*(.*)$")
 
+# 앞줄에서 낱말이 잘려 이어지는 줄. 조사 뒤에 공백을 요구해야 값 줄("은행과")을
+# 조사("은")로 오인하지 않는다.
+_CONTINUATION = re.compile(
+    r"^(?:부터|까지|에서|으로|로서|로써|보다|처럼|마다|이라|라는|이란|이며|이고"
+    r"|와|과|은|는|이|가|을|를|의|에|도|만|로)\s"
+)
+
 # 정확히 일치할 때만 지우는 메뉴·네비게이션 문구(공백 제거·소문자화 후 비교).
 _NAV_WORDS = frozenset({
     "목록", "목록으로", "목록보기", "리스트",
@@ -347,34 +365,45 @@ def _value_rule(label: str, standalone: bool = False) -> re.Pattern | None:
     return None
 
 
-def is_label_line(line: str) -> bool:
-    """'라벨' 또는 '라벨 : 값' 형태의 메타데이터 줄인가.
+def is_labelled_value(line: str) -> bool:
+    """'라벨 : 값' 한 줄 — 구분자가 함께 있어 그 자체로 메타데이터인 줄인가.
 
     값이 있으면 라벨에 맞는 모양(부서명·날짜·전화·조회수·파일명)인지까지 확인한다.
     아무 텍스트나 값으로 받으면 "문의 : 대출 상한은 어떻게 해야 합니까?" 처럼 라벨을
     머리말로 쓴 실제 문장이 지워진다.
     """
-    if _LABEL_ONLY.match(line):
-        return True
     m = _LABEL_VALUE.match(line)
     if not m:
         return False
     label, value = m.group(1), m.group(2).strip()
     if not value:
-        return True
+        return True  # "담당부서 :" — 구분자가 있으니 값이 비어도 머리말이다
     rule = _value_rule(label)
     return rule is None or bool(rule.match(value))
 
 
+def is_label_line(line: str) -> bool:
+    """메타데이터 줄로 볼 수 있는가 — 이웃이 머리말인지 판단할 때 쓴다.
+
+    구분자 없이 라벨 낱말만 있는 줄도 포함한다. 다만 그런 줄을 **그 자체로** 지울지는
+    문맥을 봐야 하므로(is_boilerplate 에는 넣지 않는다) strip_edge_noise 가 따로 정한다.
+    """
+    return bool(_LABEL_ONLY.match(line)) or is_labelled_value(line)
+
+
 def is_boilerplate(line: str) -> bool:
-    """수집 결과에서 반복적으로 확인된 상용구·메타데이터 줄인가(확실한 패턴만)."""
+    """줄 하나만 보고도 군더더기라고 단정할 수 있는가(확실한 패턴만).
+
+    구분자 없이 라벨 낱말만 있는 줄("등록일")은 여기 들지 않는다 — 인라인 강조 때문에
+    본문 첫 단어가 떨어져 나온 것일 수 있어(strip_edge_noise 가 문맥을 보고 정한다).
+    """
     if not line:
         return True
     return bool(
         _DECORATION.match(line)
         or _nav_key(line) in _NAV_WORDS
         or _BREADCRUMB.match(line)
-        or is_label_line(line)
+        or is_labelled_value(line)
         or _ATTACHMENT_WITH_SIZE.match(line)
         or _SURVEY.match(line)
         or _PRESS_NOTICE.match(line)
@@ -390,6 +419,20 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
     """
     def noise(line: str) -> bool:
         return is_duplicate_title(line, title) or is_boilerplate(line)
+
+    def is_bare_meta_label(index: int) -> bool:
+        """lines[index] 가 '값 없이 선 라벨' 인가(구분자 없는 라벨 낱말).
+
+        스크래퍼의 get_text("\\n") 은 인라인 강조 경계에서도 줄을 나눈다. 그래서
+        "<strong>등록일</strong>부터 30일 이내 …" 가 "등록일" / "부터 30일 이내 …" 두
+        줄로 들어와, 본문 첫 낱말이 라벨처럼 보인다. 이때 뒷줄은 조사로 시작하는데,
+        한국어에서 조사로 시작하는 줄은 블록의 시작일 수 없다 — 낱말이 잘린 것이다.
+        그 경우에는 라벨로 보지 않는다(지우면 문장의 주어가 사라진다).
+        """
+        if not _LABEL_ONLY.match(lines[index]):
+            return False
+        nxt = index + 1
+        return nxt >= len(lines) or not _CONTINUATION.match(lines[nxt])
 
     def is_value_of_label(label_line: str, index: int, neighbour: int) -> bool:
         """lines[index] 를 label_line(라벨만 있는 줄)의 값으로 볼 수 있는가.
@@ -413,7 +456,7 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
             return False
         rule = _value_rule(m.group(1), standalone=True)
         value = lines[index]
-        if rule is None or noise(value) or not rule.match(value):
+        if rule is None or is_label_line(value) or noise(value) or not rule.match(value):
             return False
         if any(p.match(value) for p in _SELF_EVIDENT_VALUES):
             return True
@@ -428,7 +471,7 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
     start = 0
     while start < len(lines):
         line = lines[start]
-        if not noise(line):
+        if not (noise(line) or is_bare_meta_label(start)):
             break
         # '첨부파일' 라벨 뒤에는 크기 표기가 없는 파일명이 여러 줄 이어질 수 있다.
         if _ATTACHMENT_LABEL_ONLY.match(line):
@@ -443,7 +486,7 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
     end = len(lines)
     while end > start:
         line = lines[end - 1]
-        if noise(line):
+        if noise(line) or is_bare_meta_label(end - 1):
             end -= 1
             continue
         # 꼬리말이 "첨부파일 / 보도자료.hwp / 별첨.pdf" 처럼 끝나는 경우.

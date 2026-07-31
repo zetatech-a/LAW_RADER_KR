@@ -408,23 +408,21 @@ def test_strips_html_tags_and_entities():
     assert out == "금융위원회는 <주식회사 등의 외부감사에 관한 법률> 개정안을 의결하였다."
 
 
-def test_keeps_literal_script_and_style_examples():
-    """스크래퍼가 이미 풀어 놓은 '글자 그대로의' 태그 예시를 통째로 지우지 않는다.
+def test_keeps_decoded_literal_tag_examples():
+    """스크래퍼가 이미 풀어 놓은 '글자 그대로의' 태그 표기를 파싱하지 않는다.
 
-    "&lt;script&gt;…&lt;/script&gt;" 는 get_text() 를 거치며 본문 글자로 바뀐다.
-    이걸 마크업으로 보고 decompose 하면 예시 내용이 발췌에서 소리 없이 사라진다.
+    "&lt;br&gt;" 는 get_text() 를 거치며 본문 글자 "<br>" 로 바뀐다. 태그처럼
+    보인다고 파싱하면 "공시서식에는 <br> 태그를 사용할 수 없다" 가 주어를 잃는다.
+    근거가 없으면 표기 그대로 두는 편이 낫다.
     """
-    body = html.unescape(
-        "&lt;script&gt;alert(1)&lt;/script&gt; 태그는 공시서식에서 사용할 수 없다."
-    )
-    assert build_fallback_snippet(body, "공시서식 안내") == (
-        "alert(1) 태그는 공시서식에서 사용할 수 없다."
-    )
-
-    body = html.unescape(
-        "공시서식에는 &lt;style&gt;body{color:red}&lt;/style&gt; 을 넣을 수 없다."
-    )
-    assert "body{color:red}" in build_fallback_snippet(body, "공시서식 안내")
+    for raw in (
+        "공시서식에는 &lt;br&gt; 태그를 사용할 수 없다.",
+        '공시서식에는 &lt;img src="x"&gt; 태그를 넣을 수 없다.',
+        "&lt;script&gt;alert(1)&lt;/script&gt; 태그는 공시서식에서 사용할 수 없다.",
+        "공시서식에는 &lt;style&gt;body{color:red}&lt;/style&gt; 을 넣을 수 없다.",
+    ):
+        body = html.unescape(raw)
+        assert build_fallback_snippet(body, "공시서식 안내") == body, raw
 
 
 def test_still_drops_script_and_style_in_real_markup():
@@ -440,6 +438,32 @@ def test_still_drops_script_and_style_in_real_markup():
         "<p>금융위원회는 규정을 의결하였다.</p></body></html>"
     )
     assert build_fallback_snippet(body, "규정 의결") == "금융위원회는 규정을 의결하였다."
+
+
+def test_keeps_label_word_split_out_by_inline_formatting():
+    """인라인 강조로 라벨 낱말이 떨어져 나온 줄은 지우지 않는다.
+
+    스크래퍼의 get_text("\\n") 은 "<strong>등록일</strong>부터 30일 이내 …" 를
+    "등록일" / "부터 30일 이내 …" 로 나눈다. 뒷줄이 조사로 시작하면 낱말이 잘린
+    것이므로 앞줄을 라벨로 보면 안 된다.
+    """
+    for label, rest in (
+        ("등록일", "부터 30일 이내 신고해야 한다."),
+        ("담당자", "가 위반 사실을 보고해야 한다."),
+        ("조회수", "는 공시 대상에서 제외한다."),
+        ("첨부", "와 함께 제출해야 한다."),
+    ):
+        body = f"{label}\n{rest}"
+        assert build_fallback_snippet(body, "무관한 제목입니다") == f"{label} {rest}"
+
+
+def test_still_strips_bare_label_before_a_real_block():
+    """반대로 뒷줄이 조사로 시작하지 않으면 값 없는 라벨은 그대로 걷어낸다."""
+    body = "\n".join(["담당부서", "기업회계팀", "등록일", "2026-07-24", BODY_SENTENCE])
+    assert build_fallback_snippet(body, TITLE) == BODY_SENTENCE
+
+    body = "\n".join(["담당부서", "추진배경", BODY_SENTENCE])
+    assert build_fallback_snippet(body, TITLE).startswith("추진배경")
 
 
 def test_does_not_decode_already_decoded_body_text():
@@ -495,7 +519,7 @@ def test_block_tags_still_separate_lines():
     assert build_fallback_snippet(body, "과징금 부과") == (
         "금융위원회는 1,234억원을 부과하였다."
     )
-    assert build_fallback_snippet("첫째 줄이다.<br/>둘째 줄이다.", "무제") == (
+    assert build_fallback_snippet("<p>첫째 줄이다.<br/>둘째 줄이다.</p>", "무제") == (
         "첫째 줄이다. 둘째 줄이다."
     )
 
