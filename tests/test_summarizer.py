@@ -2,6 +2,7 @@
 
 네트워크 호출은 하지 않는다 — Summarizer._generate 를 가짜 응답으로 대체한다.
 """
+import json
 import os
 import sys
 import time
@@ -14,13 +15,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import EmailConfig, LLMConfig, load_config
 from src.models import Post
 from src.notifier import build_html, build_text, missing_email_settings, send_digest
-from src.summarizer import Summarizer, SummaryUnavailable, summarize_posts
+from src.summarizer import (
+    _MAX_OUTPUT_TOKENS,
+    _MAX_OUTPUT_TOKENS_THINKING,
+    _SCHEMA,
+    _TEMPERATURE,
+    Summarizer,
+    SummaryUnavailable,
+    summarize_posts,
+)
 
 
 def _cfg(**over) -> LLMConfig:
     base = dict(
         enabled=True,
-        model="gemini-2.5-flash",
+        model="gemini-flash-latest",
         lines=3,
         max_line_chars=90,
         min_body_chars=10,
@@ -58,6 +67,51 @@ def test_config_exposes_llm_defaults():
     cfg = load_config("config.yaml")
     assert cfg.llm.lines == 3
     assert cfg.llm.model  # 모델명이 비어 있으면 안 됨
+
+
+def test_config_uses_latest_alias_and_ordered_fallbacks():
+    # 특정 버전을 하드코딩하면 그 버전 수명 종료일에 전 요청이 404 로 죽는다.
+    cfg = load_config("config.yaml")
+    assert cfg.llm.model == "gemini-flash-latest"
+    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
+    # 호출 순서: primary → fallback 순서 그대로
+    assert cfg.llm.model_chain == [
+        "gemini-flash-latest",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+    ]
+
+
+def test_model_chain_dedupes_and_preserves_order():
+    c = _cfg(model="a", fallback_models=["b", "a", "c", "b", "", "  "])
+    assert c.model_chain == ["a", "b", "c"]
+    # 공백만 있는 이름은 버린다
+    assert _cfg(model="  a  ", fallback_models=[" a "]).model_chain == ["a"]
+
+
+def test_config_allows_disabling_fallbacks(tmp_path):
+    import yaml
+
+    base = yaml.safe_load(open("config.yaml", encoding="utf-8"))
+    base["llm"]["fallback_models"] = []
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump(base, allow_unicode=True), encoding="utf-8")
+    cfg = load_config(p)
+    assert cfg.llm.fallback_models == []
+    assert cfg.llm.model_chain == ["gemini-flash-latest"]
+
+
+def test_config_defaults_fallbacks_when_key_missing(tmp_path):
+    import yaml
+
+    base = yaml.safe_load(open("config.yaml", encoding="utf-8"))
+    base["llm"].pop("fallback_models", None)
+    base["llm"].pop("model", None)
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump(base, allow_unicode=True), encoding="utf-8")
+    cfg = load_config(p)
+    assert cfg.llm.model == "gemini-flash-latest"
+    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
 
 
 def test_summarize_parses_json_schema_response():
@@ -218,6 +272,346 @@ def test_generate_passes_timeout_tuple_to_requests():
     s.summarize(_post())
     assert isinstance(sess.timeouts[0], tuple)   # 스칼라를 넘기면 2배로 늘어난다
     assert sum(sess.timeouts[0]) <= 45.0
+
+
+# --- 모델 수명 종료(404) 대응: primary alias → fallback 연쇄 ---
+
+
+class _ModelSession:
+    """모델별로 정해진 응답을 돌려주는 세션. 호출된 모델을 순서대로 기록한다."""
+
+    def __init__(self, by_model, default=None):
+        self._by_model = dict(by_model)
+        self._default = default
+        self.models = []
+        self.sent = []
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        model = url.rstrip("/").split("/")[-1].split(":")[0]
+        self.models.append(model)
+        # payload 는 재시도에서 그 자리에서 교체되므로 스냅샷으로 남긴다.
+        self.sent.append(deepcopy(json))
+        resp = self._by_model.get(model, self._default)
+        if resp is None:
+            raise AssertionError(f"호출되면 안 되는 모델: {model}")
+        if isinstance(resp, list):
+            return resp.pop(0)
+        return resp
+
+
+_PRIMARY = "gemini-flash-latest"
+_FB1 = "gemini-3.6-flash"
+_FB2 = "gemini-3.5-flash-lite"
+# thinkingBudget 을 받는 유일한 계열(과거 기본 모델)
+_M25 = "gemini-2.5-flash"
+
+
+def _chain_cfg(**over):
+    return _cfg(model=_PRIMARY, fallback_models=[_FB1, _FB2], **over)
+
+
+def _ok_resp(text='{"summary": ["첫째임", "둘째임", "셋째임"]}'):
+    return _FakeResponse(200, _envelope(text))
+
+
+def _err_resp(code, status="", message=""):
+    payload = {"error": {"code": code, "status": status, "message": message}}
+    return _FakeResponse(code, payload, text=json.dumps(payload))
+
+
+def _bare_400():
+    # 운영에서 실제로 받은 응답 — 어떤 인자가 문제인지 알려주지 않는다.
+    return _err_resp(400, "INVALID_ARGUMENT", "Request contains an invalid argument.")
+
+
+def _gone_resp(model="models/x"):
+    # 실제로 받은 응답 형태
+    return _err_resp(
+        404,
+        "NOT_FOUND",
+        f"This model {model} is no longer available to new users. "
+        "Please update your code to use a newer model.",
+    )
+
+
+def test_primary_alias_succeeds_without_touching_fallbacks():
+    s = Summarizer(_chain_cfg())
+    s.session = _ModelSession({_PRIMARY: _ok_resp()})
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    assert s.session.models == [_PRIMARY]
+
+
+def test_primary_404_falls_back_to_first_fallback():
+    s = Summarizer(_chain_cfg())
+    s.session = _ModelSession({_PRIMARY: _gone_resp(), _FB1: _ok_resp()})
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    assert s.session.models == [_PRIMARY, _FB1]
+
+
+def test_two_models_404_falls_back_to_last():
+    s = Summarizer(_chain_cfg())
+    s.session = _ModelSession(
+        {_PRIMARY: _gone_resp(), _FB1: _gone_resp(), _FB2: _ok_resp()}
+    )
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    assert s.session.models == [_PRIMARY, _FB1, _FB2]
+
+
+def test_all_models_404_falls_back_to_source_excerpt():
+    posts = [
+        _post(post_id="1", url="https://example.com/1", body="원문 발췌가 실릴 본문임. " * 6),
+        _post(post_id="2", url="https://example.com/2", body="원문 발췌가 실릴 본문임. " * 6),
+    ]
+    s = Summarizer(_chain_cfg())
+    s.session = _ModelSession(
+        {_PRIMARY: _gone_resp(), _FB1: _gone_resp(), _FB2: _gone_resp()}
+    )
+
+    # 예외가 밖으로 새지 않고(메일 실행이 죽지 않고) 0건 요약으로 끝난다
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
+    assert all(p.summary == [] for p in posts)
+
+    # 1번째 글에서 3개 모델을 다 확인했으므로, 2번째 글에서는 재시도하지 않는다
+    assert s.session.models == [_PRIMARY, _FB1, _FB2]
+
+    # 메일에는 기존 원문 발췌가 실린다
+    html = build_html({posts[0].source_name: posts})
+    assert "원문 발췌가 실릴 본문임" in html
+    assert ">AI 3줄 요약</div>" not in html
+
+
+def test_successful_model_is_cached_for_later_posts():
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(3)]
+    s = Summarizer(_chain_cfg())
+    s.session = _ModelSession({_PRIMARY: _gone_resp(), _FB1: _ok_resp()})
+    s.summarize_all({"금융위 · 보도자료": posts})
+    # 첫 글에서만 primary 를 시도하고, 이후에는 성공한 모델만 호출한다
+    assert s.session.models == [_PRIMARY, _FB1, _FB1, _FB1]
+    assert all(p.summary for p in posts)
+
+
+def test_rate_limit_does_not_chain_to_next_model():
+    # 429 는 모델 문제가 아니다 — 다른 모델로 넘기면 한 번의 한도 초과로 목록을 소진한다.
+    s = Summarizer(_chain_cfg(max_retries=0))
+    s.session = _ModelSession({_PRIMARY: _err_resp(429, "RESOURCE_EXHAUSTED", "quota")})
+    with pytest.raises(RuntimeError):
+        s.summarize(_post())
+    assert s.session.models == [_PRIMARY]
+    assert s._unavailable == set()   # 사용 불가로 낙인찍지 않는다
+
+
+def test_auth_error_does_not_chain_to_next_model():
+    for code, status in ((401, "UNAUTHENTICATED"), (403, "PERMISSION_DENIED")):
+        s = Summarizer(_chain_cfg(max_retries=0))
+        s.session = _ModelSession({_PRIMARY: _err_resp(code, status, "API key not valid")})
+        with pytest.raises(RuntimeError):
+            s.summarize(_post())
+        assert s.session.models == [_PRIMARY], code
+        assert s._unavailable == set()
+
+
+def test_server_error_keeps_retry_policy_and_does_not_chain():
+    s = Summarizer(_chain_cfg(max_retries=2, retry_backoff_sec=0))
+    s.session = _ModelSession({_PRIMARY: _err_resp(503, "UNAVAILABLE", "overloaded")})
+    with pytest.raises(RuntimeError):
+        s.summarize(_post())
+    # 기존 재시도(1+2회)는 유지하되 다른 모델로는 넘어가지 않는다
+    assert s.session.models == [_PRIMARY] * 3
+    assert s._unavailable == set()
+
+
+def test_server_error_still_trips_circuit_breaker():
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)]
+    s = Summarizer(_chain_cfg(max_retries=1, retry_backoff_sec=0, max_consecutive_failures=3))
+    s.session = _ModelSession({_PRIMARY: _err_resp(503, "UNAVAILABLE", "overloaded")})
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
+    # 3건에서 브레이커가 열리고, 각 건은 재시도 1회를 포함해 2번씩 호출
+    assert s.session.models == [_PRIMARY] * 6
+
+
+def test_timeout_does_not_chain_to_next_model():
+    import requests
+
+    s = Summarizer(_chain_cfg(max_retries=0))
+
+    class _Timeout:
+        def __init__(self):
+            self.models = []
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.models.append(url.rstrip("/").split("/")[-1].split(":")[0])
+            raise requests.ConnectTimeout("연결 시간 초과")
+
+    s.session = _Timeout()
+    with pytest.raises(requests.ConnectTimeout):
+        s.summarize(_post())
+    assert s.session.models == [_PRIMARY]
+    assert s._unavailable == set()
+
+
+def test_chains_on_400_saying_model_not_found():
+    # 404 가 아니라 400 으로 '모델 없음'을 알려주는 경우도 다음 모델로 넘어간다.
+    s = Summarizer(_chain_cfg())
+    s.session = _ModelSession(
+        {
+            _PRIMARY: _err_resp(
+                400, "INVALID_ARGUMENT", "Model gemini-flash-latest does not exist."
+            ),
+            _FB1: _ok_resp(),
+        }
+    )
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    assert s.session.models == [_PRIMARY, _FB1]
+
+
+def test_thinking_config_retry_is_per_model():
+    # thinkingConfig 는 Gemini 2.5 계열에만 보내고, 거절당하면 그 모델에만 기록한다.
+    s = Summarizer(_cfg(model=_M25, fallback_models=[_FB1], max_retries=0))
+    thinking_400 = _err_resp(
+        400, "INVALID_ARGUMENT", 'Unknown name "thinkingConfig": Cannot find field.'
+    )
+    s.session = _ModelSession({_M25: [thinking_400, _ok_resp()]})
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    assert s.session.models == [_M25, _M25]             # 같은 모델로 재시도
+    assert s._unavailable == set()                      # 사용 불가가 아니다
+    assert s._thinking_unsupported == {_M25}            # 그 모델에만 기록
+
+
+# --- 실제로 전송되는 request payload 검증 (400 INVALID_ARGUMENT 재발 방지) ---
+#
+# 거절 응답의 message 가 "Request contains an invalid argument." 한 줄뿐일 수 있어
+# 문제 필드를 알려주지 않는다. 그래서 '어떤 옵션을 보냈는지'를 테스트가 직접 본다.
+#   - thinkingConfig.thinkingBudget: Gemini 2.5 전용. Gemini 3 계열은 thinkingLevel 로
+#     대체되고 생각을 끌 수 없어 budget 0 을 보내면 400 이다.
+#   - temperature: Gemini 3 계열은 기본값 1.0 유지가 공식 권고(낮추면 루프·품질 저하).
+
+
+def _sent_cfg(model, **over):
+    return _cfg(model=model, fallback_models=[], max_retries=0, **over)
+
+
+def _payloads(model, responses=None, **over):
+    """모델 하나로 호출하고 (Summarizer, 실제로 보낸 payload 목록)을 돌려준다."""
+    s = Summarizer(_sent_cfg(model, **over))
+    sess = _stub(s, list(responses or [_ok_resp()]))
+    return s, sess.sent
+
+
+def _gen_config(model, **over):
+    s, sent = _payloads(model, **over)
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    return sent[0]["generationConfig"]
+
+
+def test_alias_payload_omits_generation_specific_options():
+    gc = _gen_config(_PRIMARY)
+    assert "thinkingConfig" not in gc
+    assert "temperature" not in gc
+    # 구조화 출력은 그대로 유지한다
+    assert gc["responseMimeType"] == "application/json"
+    assert gc["responseSchema"] == _SCHEMA
+    # 생각을 끌 수 없으므로 출력 상한은 '생각 + 응답' 합계를 담을 만큼 크게 잡는다
+    assert gc["maxOutputTokens"] == _MAX_OUTPUT_TOKENS_THINKING
+
+
+def test_gemini_3_models_get_no_thinking_budget_or_temperature():
+    for model in (_FB1, _FB2, "gemini-3-pro-preview", "gemini-flash-lite-latest"):
+        gc = _gen_config(model)
+        assert "thinkingConfig" not in gc, model
+        assert "temperature" not in gc, model
+        assert gc["responseSchema"] == _SCHEMA, model
+
+
+def test_gemini_25_payload_keeps_thinking_budget_and_temperature():
+    # 2.5 계열에서는 기존 동작(생각 끄기 + 낮은 온도)을 그대로 유지한다.
+    gc = _gen_config(_M25)
+    assert gc["thinkingConfig"] == {"thinkingBudget": 0}
+    assert gc["temperature"] == _TEMPERATURE
+    assert gc["maxOutputTokens"] == _MAX_OUTPUT_TOKENS
+
+
+def test_configured_models_never_send_thinking_budget():
+    # config.yaml 의 모델 목록이 바뀌어도 세대 종속 옵션이 새로 붙지 않게 못박는다.
+    chain = load_config("config.yaml").llm.model_chain
+    assert chain
+    for model in chain:
+        gc = _gen_config(model)
+        assert "thinkingConfig" not in gc, model
+        assert "temperature" not in gc, model
+
+
+def test_fallback_payload_also_omits_generation_specific_options():
+    s = Summarizer(_chain_cfg())
+    s.session = _ModelSession({_PRIMARY: _gone_resp(), _FB1: _ok_resp()})
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    assert s.session.models == [_PRIMARY, _FB1]
+    for model, payload in zip(s.session.models, s.session.sent):
+        gc = payload["generationConfig"]
+        assert "thinkingConfig" not in gc, model
+        assert "temperature" not in gc, model
+        assert gc["responseSchema"] == _SCHEMA, model
+
+
+def test_bare_400_neither_chains_nor_retries():
+    # 필드를 특정하지 않는 400 은 다음 모델로 넘기지도, 재시도하지도 않는다.
+    s = Summarizer(_chain_cfg(max_retries=2, retry_backoff_sec=0))
+    s.session = _ModelSession({_PRIMARY: _bare_400()})
+    with pytest.raises(RuntimeError):
+        s.summarize(_post())
+    assert s.session.models == [_PRIMARY]
+    assert s._unavailable == set()
+    assert s._thinking_unsupported == set()
+
+
+def test_bare_400_drops_thinking_config_once_and_retries():
+    # 2.5 로 알고 보냈는데 거절당하면(alias 가 그 이름으로 옮겨간 경우 등) 우리가 붙인
+    # 유일한 선택 옵션인 thinkingConfig 를 떼고 한 번만 재시도한다.
+    s, sent = _payloads(_M25, [_bare_400(), _ok_resp()])
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    assert len(sent) == 2
+    first, second = (p["generationConfig"] for p in sent)
+    assert first["thinkingConfig"] == {"thinkingBudget": 0}
+    assert "thinkingConfig" not in second
+    assert second["maxOutputTokens"] == _MAX_OUTPUT_TOKENS_THINKING
+    assert second["responseSchema"] == _SCHEMA      # 구조화 출력은 유지
+    assert s._thinking_unsupported == {_M25}
+    assert s._unavailable == set()                  # 사용 불가가 아니다
+
+
+def test_thinking_config_removal_retries_at_most_once():
+    s, sent = _payloads(_M25, [_bare_400(), _bare_400()])
+    with pytest.raises(RuntimeError):
+        s.summarize(_post())
+    assert len(sent) == 2   # 옵션 제거 재시도 1회로 끝(무한 루프 없음)
+
+
+def test_json_schema_validation_preserved_across_fallback():
+    # 폴백으로 넘어가도 3줄 JSON 검증은 그대로 적용된다.
+    s = Summarizer(_chain_cfg(lines=3))
+    s.session = _ModelSession(
+        {
+            _PRIMARY: _gone_resp(),
+            _FB1: _ok_resp('{"summary": ["1", "2", "3", "4", "5"]}'),
+        }
+    )
+    assert s.summarize(_post()) == ["1", "2", "3"]      # lines 만큼 절단
+
+    # 스키마 위반은 폴백 모델에서도 폐기된다
+    s2 = Summarizer(_chain_cfg())
+    s2.session = _ModelSession(
+        {_PRIMARY: _gone_resp(), _FB1: _ok_resp('{"summary": {"a": "b"}}')}
+    )
+    with pytest.raises(SummaryUnavailable):
+        s2.summarize(_post())
+
+
+def test_all_unavailable_reports_without_further_calls():
+    s = Summarizer(_chain_cfg())
+    s._unavailable = {_PRIMARY, _FB1, _FB2}
+    s.session = _ModelSession({})   # 어떤 호출도 하면 AssertionError
+    with pytest.raises(SummaryUnavailable):
+        s.summarize(_post())
+    assert s.session.models == []
 
 
 # --- 스키마를 어긴 / 잘린 응답 처리 ---
@@ -744,7 +1138,8 @@ def test_request_error_propagates_with_original_type():
 
 def test_generate_drops_thinking_config_without_spending_retries():
     # max_retries=0 이어도 thinkingConfig 미지원 400 은 한 번 교정 재시도한다.
-    s = Summarizer(_cfg(max_retries=0))
+    # (thinkingConfig 를 애초에 보내는 계열, 즉 Gemini 2.5 에서만 일어난다)
+    s = Summarizer(_cfg(model=_M25, max_retries=0))
     sess = _stub(
         s,
         [
