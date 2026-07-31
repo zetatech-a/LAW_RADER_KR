@@ -21,7 +21,7 @@ from __future__ import annotations
 import html as html_lib
 import re
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 # 메일 카드에 싣는 발췌 길이(기존 동작과 동일한 기본값).
 SNIPPET_LIMIT = 220
@@ -50,16 +50,35 @@ _BLOCK_TAGS = (
 )
 
 
+# 진짜 잔여 마크업이라는 표시 — 속성이 붙은 태그이거나 문서 골격. 스크래퍼의
+# get_text() 는 "&lt;script&gt;alert(1)&lt;/script&gt;" 를 이미 글자 그대로의
+# "<script>alert(1)</script>" 로 풀어 본문에 넣는데, 이걸 마크업으로 보고 통째로
+# 지우면(decompose) 예시 내용이 발췌에서 소리 없이 사라진다. 그래서 script/style 을
+# **삭제**하는 것은 진짜 마크업일 때로 한정한다(태그 제거 자체는 그대로 한다).
+_REAL_MARKUP = re.compile(
+    r"<(?:!DOCTYPE|html|body)\b|<[a-zA-Z][a-zA-Z0-9]*\s+[a-zA-Z-]+\s*=",
+    re.IGNORECASE,
+)
+
+
 def strip_html(text: str) -> str:
     """본문에 HTML 이 남아 있으면 기존 프로젝트 방식(BeautifulSoup+lxml)으로 태그를 제거.
 
     블록 요소·<br> 자리에만 줄바꿈을 넣고 인라인 노드는 공백 없이 이어 붙인다.
+    script/style 의 내용은 진짜 잔여 마크업일 때만 버린다.
     """
     if not text or not _HTML_TAG.search(text):
         return text or ""
     soup = BeautifulSoup(text, "lxml")
-    for el in soup(["script", "style"]):
-        el.decompose()
+    if _REAL_MARKUP.search(text):
+        for el in soup(["script", "style"]):
+            el.decompose()
+    else:
+        # 글자 그대로의 예시일 수 있으므로 내용을 살린다. bs4 는 script/style 안의
+        # 문자열을 Script·Stylesheet 타입으로 두고 get_text() 에서 건너뛰므로,
+        # 평범한 문자열로 바꿔 끼워야 발췌에 남는다.
+        for el in soup(["script", "style"]):
+            el.replace_with(NavigableString("".join(str(c) for c in el.contents)))
     for el in soup.find_all(_BLOCK_TAGS):
         # 앞뒤 **양쪽**에 경계를 넣는다. 뒤에만 넣으면 블록이 텍스트 뒤에 중첩된
         # "<div>머리말<ul><li>첫 항목</li></ul></div>" 이 "머리말첫 항목" 으로,
@@ -78,6 +97,16 @@ _SPACE_LIKE = re.compile("[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
 _ZERO_WIDTH = re.compile("[\u200b-\u200f\u2060\ufeff]")
 _HORIZONTAL_WS = re.compile(r"[ \t\r\f\v]+")
 
+# 세미콜론으로 끝나는 '분명한' 엔티티만 푼다. html.unescape 는 "&reg" 처럼 세미콜론
+# 없는 옛 표기까지 풀어 버려서, 스크래퍼가 이미 텍스트로 뽑아 둔 본문의
+# "…/?a=1&reg=2" 같은 URL 이 "…/?a=1®=2" 로 깨진다(&copy·&sect·&times 도 같다).
+_ENTITY = re.compile(r"&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z][a-zA-Z0-9]{1,31});")
+
+
+def _unescape_entities(text: str) -> str:
+    """세미콜론으로 끝나는 HTML 엔티티만 해제한다."""
+    return _ENTITY.sub(lambda m: html_lib.unescape(m.group(0)), text)
+
 
 def normalize_lines(body: str) -> list[str]:
     """태그·엔티티를 정리하고 줄 단위로 공백을 정규화한 뒤 빈 줄을 버린다."""
@@ -87,7 +116,7 @@ def normalize_lines(body: str) -> list[str]:
         # 부르면 "&amp;amp;" 처럼 이중 인코딩된 문자가 과하게 풀리므로 부르지 않는다.
         text = strip_html(text)
     else:
-        text = html_lib.unescape(text)
+        text = _unescape_entities(text)
     text = _ZERO_WIDTH.sub("", _SPACE_LIKE.sub(" ", text))
 
     lines = []
@@ -362,7 +391,7 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
     def noise(line: str) -> bool:
         return is_duplicate_title(line, title) or is_boilerplate(line)
 
-    def is_value_of_label(label_line: str, index: int, in_block: bool) -> bool:
+    def is_value_of_label(label_line: str, index: int, neighbour: int) -> bool:
         """lines[index] 를 label_line(라벨만 있는 줄)의 값으로 볼 수 있는가.
 
         세 가지를 모두 만족해야 한다.
@@ -371,11 +400,13 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
              할 날짜가 발췌 맨 앞에 남는다.
           ② 그 라벨에 기대되는 값 모양이다.
           ③ 값이 형식으로 메타데이터임이 드러나거나(날짜·전화·조회수·파일명·직급),
-             머리말 블록 안이라는 문맥 증거가 있다.
+             lines[neighbour] 가 또 다른 라벨이다.
 
-        ③이 필요한 이유: 부서명·사람 이름은 본문 소제목과 생김새가 같다("은행과"와
-        "기대효과", "홍길동"과 "추진배경"). 모양만 보고 값으로 삼으면 홀로 선 라벨
-        뒤의 소제목이 발췌에서 사라진다.
+        ③이 필요한 이유: 부서명·사람 이름은 본문 소제목과 생김새가 같아 정규식으로
+        가를 수 없다("은행과"와 "기대효과"·"주요성과", "홍길동"과 "추진배경"). 그래서
+        모양 대신 **구조**를 본다 — 라벨/값 쌍이 다른 라벨과 잇닿아 있으면 머리말
+        블록이고, 본문 산문과 잇닿아 있으면 소제목이다. neighbour 는 그 '바깥쪽'
+        이웃 줄(앞에서 훑을 땐 값 다음 줄, 뒤에서 훑을 땐 라벨 앞 줄)이다.
         """
         m = _LABEL_ONLY.match(label_line)
         if not m or not 0 <= index < len(lines):
@@ -386,8 +417,7 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
             return False
         if any(p.match(value) for p in _SELF_EVIDENT_VALUES):
             return True
-        # 자유 텍스트 값 — 머리말이 앞서 걷혔거나, 값 다음 줄이 또 다른 라벨일 때만.
-        return in_block or (index + 1 < len(lines) and is_label_line(lines[index + 1]))
+        return 0 <= neighbour < len(lines) and is_label_line(lines[neighbour])
 
     def after_attachment_run(index: int) -> int:
         """'첨부파일' 라벨 뒤에 이어지는 파일명 줄들을 지나친 위치."""
@@ -396,7 +426,6 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
         return index
 
     start = 0
-    in_block = False  # 이미 걷어낸 줄에 머리말(라벨·제목 반복)이 있었는가
     while start < len(lines):
         line = lines[start]
         if not noise(line):
@@ -404,21 +433,18 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
         # '첨부파일' 라벨 뒤에는 크기 표기가 없는 파일명이 여러 줄 이어질 수 있다.
         if _ATTACHMENT_LABEL_ONLY.match(line):
             start = after_attachment_run(start + 1)
-            in_block = True
             continue
         # 라벨만 있는 줄(<dt>) 다음의 값 줄(<dd>)까지 한 줄 더 걷어낸다.
-        if is_value_of_label(line, start + 1, in_block):
+        # 바깥쪽 이웃은 값 다음 줄 — 거기가 또 라벨이면 머리말 블록이다.
+        if is_value_of_label(line, start + 1, start + 2):
             start += 1
-        in_block = in_block or is_label_line(line) or is_duplicate_title(line, title)
         start += 1
 
     end = len(lines)
-    in_block = False
     while end > start:
         line = lines[end - 1]
         if noise(line):
             end -= 1
-            in_block = in_block or is_label_line(line)
             continue
         # 꼬리말이 "첨부파일 / 보도자료.hwp / 별첨.pdf" 처럼 끝나는 경우.
         run = end
@@ -426,16 +452,11 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
             run -= 1
         if run < end and run > start and _ATTACHMENT_LABEL_ONLY.match(lines[run - 1]):
             end = run - 1
-            in_block = True
             continue
         # 꼬리말이 "담당부서 / 기업회계팀" 처럼 라벨+값 두 줄로 끝나는 경우.
-        # 값 다음 줄은 이미 잘려 나갔으므로, 문맥 증거는 라벨 앞줄에서 찾는다.
-        prior_label = end - 3 >= start and is_label_line(lines[end - 3])
-        if end - 1 > start and is_value_of_label(
-            lines[end - 2], end - 1, in_block or prior_label
-        ):
+        # 값 다음 줄은 이미 잘려 나갔으므로, 바깥쪽 이웃은 라벨 앞줄이다.
+        if end - 1 > start and is_value_of_label(lines[end - 2], end - 1, end - 3):
             end -= 2
-            in_block = True
             continue
         break
 

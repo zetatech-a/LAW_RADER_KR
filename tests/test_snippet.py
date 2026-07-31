@@ -5,6 +5,7 @@
 FSC 는 `.board-view-wrap .body`, FSS 는 `.view-cont` 를 get_text("\\n") 으로 펼치므로
 라벨(<dt>)과 값(<dd>)이 각각 한 줄씩 나온다.
 """
+import html
 import os
 import sys
 
@@ -301,6 +302,19 @@ def test_keeps_short_heading_after_a_label_without_a_value():
             assert out.startswith(heading), f"{label}/{heading} → {out}"
 
 
+def test_keeps_heading_even_when_a_repeated_title_precedes_the_label():
+    """제목 반복을 걷어낸 뒤라도 소제목을 부서명으로 보지 않는다.
+
+    "주요성과"·"검토결과" 는 한 음절 부서 접미사('과')로 끝나 "은행과" 와 모양이 같다.
+    그래서 모양이 아니라 구조를 본다 — 값 다음 줄이 또 다른 라벨일 때만 머리말로 본다.
+    """
+    for heading in ("주요성과", "검토결과", "기대효과", "추진경과", "신청", "출처"):
+        for label in ("담당부서", "담당자", "부서", "작성자"):
+            body = "\n".join([TITLE, label, heading, BODY_SENTENCE])
+            out = build_fallback_snippet(body, TITLE)
+            assert out.startswith(heading), f"{label}/{heading} → {out}"
+
+
 def test_still_strips_label_values_that_match_the_label_shape():
     """반대로 라벨에 맞는 값이면 계속 두 줄 다 걷어낸다.
 
@@ -392,6 +406,61 @@ def test_strips_html_tags_and_entities():
     )
     out = build_fallback_snippet(body, TITLE)
     assert out == "금융위원회는 <주식회사 등의 외부감사에 관한 법률> 개정안을 의결하였다."
+
+
+def test_keeps_literal_script_and_style_examples():
+    """스크래퍼가 이미 풀어 놓은 '글자 그대로의' 태그 예시를 통째로 지우지 않는다.
+
+    "&lt;script&gt;…&lt;/script&gt;" 는 get_text() 를 거치며 본문 글자로 바뀐다.
+    이걸 마크업으로 보고 decompose 하면 예시 내용이 발췌에서 소리 없이 사라진다.
+    """
+    body = html.unescape(
+        "&lt;script&gt;alert(1)&lt;/script&gt; 태그는 공시서식에서 사용할 수 없다."
+    )
+    assert build_fallback_snippet(body, "공시서식 안내") == (
+        "alert(1) 태그는 공시서식에서 사용할 수 없다."
+    )
+
+    body = html.unescape(
+        "공시서식에는 &lt;style&gt;body{color:red}&lt;/style&gt; 을 넣을 수 없다."
+    )
+    assert "body{color:red}" in build_fallback_snippet(body, "공시서식 안내")
+
+
+def test_still_drops_script_and_style_in_real_markup():
+    """반대로 속성·문서 골격이 있는 진짜 마크업이면 script/style 내용을 버린다."""
+    body = (
+        '<div class="board-view-wrap"><script type="text/javascript">var a=1;</script>'
+        "<p>금융위원회는 규정을 의결하였다.</p></div>"
+    )
+    assert build_fallback_snippet(body, "규정 의결") == "금융위원회는 규정을 의결하였다."
+
+    body = (
+        "<html><body><script>var a=1;</script>"
+        "<p>금융위원회는 규정을 의결하였다.</p></body></html>"
+    )
+    assert build_fallback_snippet(body, "규정 의결") == "금융위원회는 규정을 의결하였다."
+
+
+def test_does_not_decode_already_decoded_body_text():
+    """세미콜론 없는 옛 엔티티 표기까지 풀면 URL 이 깨진다.
+
+    스크래퍼의 get_text() 가 이미 &amp; 를 풀어 놓았으므로, "?a=1&reg=2" 를 한 번 더
+    풀면 "?a=1®=2" 가 된다(&copy·&sect·&times 도 같다).
+    """
+    body = "신청은 https://example.test/?a=1&reg=2 에서 가능하다."
+    assert build_fallback_snippet(body, "신청 안내") == body
+
+    body = "조회는 https://example.test/?x=1&copy=2&sect=3&times=4 이다."
+    assert build_fallback_snippet(body, "조회 안내") == body
+
+
+def test_still_decodes_unambiguous_entities():
+    """세미콜론으로 끝나는 분명한 엔티티는 계속 해제한다."""
+    body = "금융위원회는 &lt;은행법&gt; 개정안을 &amp; 시행령을 의결하였다."
+    assert build_fallback_snippet(body, "은행법 개정") == (
+        "금융위원회는 <은행법> 개정안을 & 시행령을 의결하였다."
+    )
 
 
 def test_inline_tags_do_not_break_numbers_or_word_boundaries():
