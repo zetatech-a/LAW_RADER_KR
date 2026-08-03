@@ -57,12 +57,45 @@ def _has_summary(posts_by_source: dict[str, list[Post]]) -> bool:
     return any(p.summary for posts in posts_by_source.values() for p in posts)
 
 
-def _summary_block(p: Post, accent: str) -> str:
-    """본문 영역. LLM 3줄 요약이 있으면 그것을, 없으면 원문 발췌를 보여준다.
+# 구조화 항목 블록의 제목. AI 요약이 아니라 원문 그대로의 항목임을 나타낸다.
+_DETAILS_LABEL = "주요 정보"
 
+
+def _details_block(p: Post) -> str:
+    """상세 페이지에서 그대로 가져온 (라벨, 값) 표.
+
+    AI 생성물이 아니므로 요약 라벨·유의사항을 붙이지 않는다. 항목 순서는 post.details
+    순서를 그대로 따른다.
+    """
+    rows = "".join(
+        "<tr class='lr-detail'>"
+        "<td valign='top' style='padding:2px 14px 2px 0;font-size:12px;line-height:1.6;"
+        f"color:#64748b;white-space:nowrap'>{_esc(label)}</td>"
+        "<td style='padding:2px 0;font-size:13px;line-height:1.6;color:#0f172a'>"
+        f"{_esc(value)}</td>"
+        "</tr>"
+        for label, value in p.details
+    )
+    return (
+        "<div style='margin:10px 0 0;padding:10px 12px;background:#f8fafc;"
+        "border:1px solid #e2e8f0;border-radius:6px'>"
+        "<table role='presentation' cellpadding='0' cellspacing='0' "
+        f"style='border-collapse:collapse'>{rows}</table>"
+        "</div>"
+    )
+
+
+def _summary_block(p: Post, accent: str) -> str:
+    """본문 영역. 구조화 항목 → LLM 요약 → 원문 발췌 순으로 보여준다.
+
+    구조화 항목(details)은 상세 페이지의 라벨-값을 그대로 옮긴 것이라 요약보다 정확하고
+    AI 유의사항 대상도 아니므로 가장 먼저 쓴다.
     요약은 LLM 장애·한도 초과로 비어 있을 수 있으므로 원문 발췌 폴백을 남겨 둔다.
     폴백은 제목 중복과 반복 안내문을 걷어낸 뒤 발췌한다(src/snippet.py).
     """
+    if p.details:
+        return _details_block(p)
+
     if p.summary:
         items = "".join(
             f"<tr>"
@@ -208,7 +241,12 @@ def build_text(posts_by_source: dict[str, list[Post]]) -> str:
         lines.append(f"\n[{source_name}] ({len(posts)}건)")
         for p in posts:
             lines.append(f"  - {p.title}  {p.date}".rstrip())
-            if p.summary:
+            if p.details:
+                # 원문 그대로의 항목 — AI 요약과 구분되도록 다른 표제를 쓴다.
+                lines.append(f"    [{_DETAILS_LABEL}]")
+                for label, value in p.details:
+                    lines.append(f"      {label}: {value}")
+            elif p.summary:
                 # text/plain 파트만 보는 수신자도 이 문장이 AI 생성물임을 알 수 있어야
                 # 한다(원문 발췌와 혼동 금지). 하단 유의사항도 함께 붙는다.
                 lines.append(f"    [{_summary_label(p)}]")
