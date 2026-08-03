@@ -31,6 +31,66 @@ _FILE_HINT = ("hpdownload", "filedown", "getfile", "/cmmn/file/", "/file")
 _ID_KEYS = ("nttId", "seqno", "lrgSlno")
 _DATE_ONLY = re.compile(r"^\s*(20\d{2})[.\-/]?(\d{1,2})[.\-/]?(\d{1,2})")
 
+# --- 검사결과 제재 상세의 구조화 추출 ---
+# 이 게시판의 상세 페이지에서 눈에 보이는 정보는 사실상 아래 3개 항목뿐이고, 정작
+# 제재 내용은 첨부 PDF 에 있다. 그런데 넓은 컨테이너(#content 등)를 통째로 긁으면
+# 라벨·빈 제재내용 행·첨부 안내·주변 메뉴가 한 덩어리로 섞여, 메일 발췌가
+# "금융기관명 ○○ 제재조치일 ... 관련부서 ... 제재조치내용 ..." 같은 잡음이 된다.
+# 그래서 이 소스만 라벨-값 행에서 3개 항목을 그대로 뽑아 표로 보여준다.
+_SANCTION_KEY = "fss_sanction"
+_SANCTION_INSTITUTION = "금융기관명"
+_SANCTION_DATE = "제재조치일"
+_SANCTION_DEPT = "관련부서"
+_SANCTION_LABELS = (_SANCTION_INSTITUTION, _SANCTION_DATE, _SANCTION_DEPT)
+# 값 문자열 하나에서 날짜를 읽는다(20260723 / 2026-07-23 / 2026.07.23 / 2026년 7월 23일).
+_VALUE_DATE = re.compile(r"(20\d{2})\D{0,2}(\d{1,2})\D{0,2}(\d{1,2})")
+_WS_ALL = re.compile(r"\s+")
+
+
+def _norm_label(s: str) -> str:
+    """라벨 정규화 — 공백을 모두 지운 뒤 정확히 비교하기 위한 형태로 만든다."""
+    return _WS_ALL.sub("", s or "")
+
+
+def _iso_date(value: str) -> str:
+    """값 문자열 하나에서 날짜를 읽어 YYYY-MM-DD 로. 못 읽으면 빈 문자열."""
+    m = _VALUE_DATE.search(value or "")
+    if not m:
+        return ""
+    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if not (1 <= mo <= 12 and 1 <= d <= 31):
+        return ""
+    return f"{y:04d}-{mo:02d}-{d:02d}"
+
+
+def _label_value_pairs(soup: BeautifulSoup) -> dict[str, str]:
+    """상세 페이지의 '라벨-값' 짝만 모은다: 한 tr 안의 th/td, 그리고 dt+dd.
+
+    페이지 전체에서 '라벨 근처 텍스트'를 훑지 않는다 — 구조적으로 짝지어진 셀만
+    본다. 같은 라벨이 여러 번 나오면 먼저 나온(=상세 표) 값을 쓴다.
+    """
+    pairs: dict[str, str] = {}
+
+    def _put(label_el, value_el) -> None:
+        label = _norm_label(label_el.get_text())
+        if label and label not in pairs:
+            pairs[label] = clean_text(value_el.get_text(" "))
+
+    for row in soup.find_all("tr"):
+        # 중첩 표의 셀이 바깥 행의 짝으로 끼어들지 않도록 이 tr 직속 셀만 쓴다.
+        cells = [c for c in row.find_all(["th", "td"]) if c.find_parent("tr") is row]
+        heads = [c for c in cells if c.name == "th"]
+        values = [c for c in cells if c.name == "td"]
+        for th, td in zip(heads, values):
+            _put(th, td)
+
+    for dt in soup.find_all("dt"):
+        dd = dt.find_next_sibling()
+        if dd is not None and dd.name == "dd":
+            _put(dt, dd)
+
+    return pairs
+
 
 class FssBoardScraper(BaseScraper):
     PAGE_PARAM = "pageIndex"
@@ -160,15 +220,21 @@ class FssBoardScraper(BaseScraper):
             resp = self.fetcher.get(post.url, referer=self.list_url)
             html = self.fetcher.text(resp)
             soup = BeautifulSoup(html, "lxml")
-            body_el = (
-                soup.select_one(".view-cont")
-                or soup.select_one(".board-view")
-                or soup.select_one(".bbs-view")
-                or soup.select_one(".cont")
-                or soup.select_one("#content")
-            )
-            if body_el:
-                post.body = clean_text(body_el.get_text("\n"))
+            # 검사결과 제재만: 라벨-값 3항목을 구조화해 담는다. 성공하면 body 는 비워
+            # 두어(요약 대상에서 제외) 잡음 발췌도, LLM 할당량 소모도 없게 한다.
+            # 실패하면 details 는 비고 아래의 기존 본문 추출로 되돌아간다.
+            if post.source_key == _SANCTION_KEY:
+                post.details = self._sanction_details(soup, post)
+            if not post.details:
+                body_el = (
+                    soup.select_one(".view-cont")
+                    or soup.select_one(".board-view")
+                    or soup.select_one(".bbs-view")
+                    or soup.select_one(".cont")
+                    or soup.select_one("#content")
+                )
+                if body_el:
+                    post.body = clean_text(body_el.get_text("\n"))
             # 상세 페이지에만 있는 첨부 보강(목록에 없던 경우)
             existing = {a.url for a in post.attachments}
             for fa in soup.find_all("a", href=True):
@@ -184,6 +250,34 @@ class FssBoardScraper(BaseScraper):
 
         for a in post.attachments:
             self._download_one(post, a)
+
+    def _sanction_details(self, soup: BeautifulSoup, post: Post) -> list[tuple[str, str]]:
+        """검사결과 제재 상세에서 (금융기관명, 제재조치일, 관련부서)를 뽑는다.
+
+        세 값을 모두 안전하게 만들 수 있을 때만 결과를 돌려준다. 하나라도 못 만들면
+        빈 리스트 — 호출자가 기존 본문 추출로 되돌아가 정보를 잃지 않게 한다.
+
+        금융기관명·제재조치일은 목록에서 이미 확인한 값(post.title/post.date)이 있으므로
+        라벨이 없을 때 그대로 쓴다. 반면 관련부서는 목록 파싱이 보장하는 값이 아니라서
+        반드시 라벨이 붙은 값에서만 가져온다(잘못된 셀을 부서로 싣지 않기 위함).
+        """
+        pairs = _label_value_pairs(soup)
+        institution = pairs.get(_SANCTION_INSTITUTION, "") or post.title.strip()
+        date = _iso_date(pairs.get(_SANCTION_DATE, "")) or _iso_date(post.date)
+        dept = pairs.get(_SANCTION_DEPT, "")
+        if not (institution and date and dept):
+            log.info(
+                "[%s] 제재 상세 구조화 실패(%s 중 누락) — 기존 본문 추출로 진행: %s",
+                self.key,
+                "/".join(_SANCTION_LABELS),
+                post.url,
+            )
+            return []
+        return [
+            (_SANCTION_INSTITUTION, institution),
+            (_SANCTION_DATE, date),
+            (_SANCTION_DEPT, dept),
+        ]
 
     def _download_one(self, post: Post, att: Attachment) -> None:
         if att.data is not None:

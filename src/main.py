@@ -229,7 +229,10 @@ def _print_dry_run(posts_by_source: dict[str, list[Post]]) -> None:
         print(f"\n=== {source_name} ({len(posts)}건) ===")
         for p in posts:
             print(f"  [{p.date or '날짜미상'}] {p.title}")
-            if p.summary:
+            if p.details:
+                for label, value in p.details:
+                    print(f"      {label}: {value}")
+            elif p.summary:
                 for s in p.summary:
                     print(f"      · {s}")
             elif p.body:

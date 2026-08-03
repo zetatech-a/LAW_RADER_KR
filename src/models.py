@@ -32,6 +32,9 @@ class Post:
     # LLM 3줄 요약 (summarizer 단계에서 채움). 비어 있으면 메일에서 body 발췌로 대체.
     summary: list[str] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
+    # 상세 페이지에서 그대로 뽑은 (라벨, 값) 항목. 원문 그대로이며 AI 생성물이 아니다.
+    # 리스트 순서가 곧 메일 표시 순서. 비어 있으면(기본) 기존 summary/body 경로를 탄다.
+    details: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def uid(self) -> str:

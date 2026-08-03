@@ -83,10 +83,14 @@ def verify_source(scraper, list_limit, do_enrich):
             body_len = len(first.body or "")
             n_att = len(first.attachments)
             n_dl = sum(1 for a in first.attachments if a.data)
+            # 구조화 항목만 채우는 소스(검사결과 제재)는 body 가 비어 있는 것이 정상이므로
+            # details 도 '상세 수집 성공'으로 센다.
+            n_details = len(first.details)
+            detail_note = f" / 구조화 항목 {n_details}개" if n_details else ""
             report["enrich"] = (
-                f"본문 {body_len}자 / 첨부 {n_att}개(다운로드 {n_dl}개)"
+                f"본문 {body_len}자 / 첨부 {n_att}개(다운로드 {n_dl}개){detail_note}"
             )
-            report["enrich_ok"] = body_len > 0 or n_att > 0
+            report["enrich_ok"] = body_len > 0 or n_att > 0 or n_details > 0
         except Exception as e:  # noqa: BLE001
             report["enrich"] = f"{WARN} enrich 실패: {e}"
             report["enrich_ok"] = False
