@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.verify_sources import FAIL, OK, PARTIAL, verify_source
-from src.models import Attachment, Post
+from src.models import Attachment, Post, ProposalContentStatus as S
 
 
 class _Scraper:
@@ -55,39 +55,95 @@ def _run(key, enrich=None, posts=None, do_enrich=True):
     return verify_source(sc, 30, do_enrich)[0]
 
 
-# --- 의안: 상세 본문이 필수 ---
+# --- 의안: available 검증과 pending 검증을 따로 한다 ---
 
 
-def test_assembly_list_ok_but_empty_body_is_partial():
-    r = _run("assembly_bill", enrich=lambda p: None)   # 아무것도 채우지 못함
-    assert r["status"] == PARTIAL
-    assert r["list_ok"] is True
-    assert r["detail_ok"] is False
-    assert "목록 수집 성공" in r["detail"] and "상세 본문 0자" in r["detail"]
+def _bills(n=3):
+    return [_post("assembly_bill") for _ in range(n)]
 
 
-def test_assembly_with_body_is_ok():
-    r = _run("assembly_bill", enrich=lambda p: setattr(p, "body", "제안이유 " * 20))
+def _statuses(*states):
+    """표본 각 건에 지정한 상태를 부여하는 enrich 를 만든다."""
+    it = iter(states)
+
+    def _enrich(p):
+        st = next(it)
+        p.proposal_status = st
+        if st is S.AVAILABLE:
+            p.body = "제안이유 및 주요내용 " * 20
+
+    return _enrich
+
+
+def test_assembly_all_available_is_ok():
+    r = _run("assembly_bill", enrich=_statuses(S.AVAILABLE, S.AVAILABLE, S.AVAILABLE),
+             posts=_bills())
     assert r["status"] == OK
     assert r["detail_ok"] is True
+    assert r["proposal_counts"] == {
+        "sampled": 3, "available": 3, "pending": 0, "failed": 0
+    }
 
 
-def test_assembly_enrich_exception_is_partial():
+def test_assembly_mixed_available_and_pending_is_ok():
+    """등록 대기가 섞여 있어도 available 이 하나라도 있으면 추출은 확인된 것이다."""
+    r = _run("assembly_bill", enrich=_statuses(S.PENDING, S.AVAILABLE, S.PENDING),
+             posts=_bills())
+    assert r["status"] == OK
+    assert r["proposal_counts"]["available"] == 1
+    assert r["proposal_counts"]["pending"] == 2
+    assert "available 1 / pending 2" in r["enrich"]
+
+
+def test_assembly_all_pending_is_partial_not_fail():
+    """전부 등록 대기 = 고장은 아니지만 available 을 확인하지 못했다."""
+    r = _run("assembly_bill", enrich=_statuses(S.PENDING, S.PENDING, S.PENDING),
+             posts=_bills())
+    assert r["status"] == PARTIAL          # ❌ 가 아니다
+    assert r["detail_ok"] is False
+    assert "모두 등록 대기" in r["detail"]
+    assert r["proposal_counts"]["failed"] == 0
+
+
+def test_assembly_any_error_is_fail_even_with_available():
+    """수집 실패가 섞이면 등록 대기와 달리 구조가 깨진 것이므로 실패다."""
+    r = _run("assembly_bill", enrich=_statuses(S.AVAILABLE, S.ERROR, S.PENDING),
+             posts=_bills())
+    assert r["status"] == FAIL
+    assert "제안이유 수집 실패 1건" in r["detail"]
+
+
+def test_assembly_all_error_is_fail():
+    r = _run("assembly_bill", enrich=_statuses(S.ERROR, S.ERROR, S.ERROR),
+             posts=_bills())
+    assert r["status"] == FAIL
+    assert r["proposal_counts"]["failed"] == 3
+
+
+def test_assembly_enrich_exception_counts_as_failed():
     def _boom(p):
         raise RuntimeError("HTTP 400")
 
-    r = _run("assembly_bill", enrich=_boom)
-    assert r["status"] == PARTIAL
-    assert r["body_len"] == 0
+    r = _run("assembly_bill", enrich=_boom, posts=_bills())
+    assert r["status"] == FAIL
+    assert r["proposal_counts"]["failed"] == 3
 
 
-def test_assembly_attachments_alone_do_not_count_as_detail_success():
+def test_assembly_unknown_status_counts_as_failed():
+    # enrich 가 상태를 남기지 않으면(구현 누락) 성공으로 세면 안 된다.
+    r = _run("assembly_bill", enrich=lambda p: None, posts=_bills())
+    assert r["status"] == FAIL
+    assert r["proposal_counts"]["failed"] == 3
+
+
+def test_assembly_attachments_alone_do_not_count_as_available():
     # 의안은 첨부가 아니라 '제안이유 본문'이 요약 입력이다.
     def _att(p):
+        p.proposal_status = S.ERROR
         p.attachments.append(Attachment(filename="x.pdf", url="https://x/x.pdf"))
 
-    r = _run("assembly_bill", enrich=_att)
-    assert r["status"] == PARTIAL
+    r = _run("assembly_bill", enrich=_att, posts=_bills())
+    assert r["status"] == FAIL
 
 
 def test_assembly_list_failure_is_still_fail():

@@ -120,8 +120,8 @@ def test_logs_detail_and_ai_counts(caplog):
         _log_run_summary(cfg, posts, _stats(5, 3), _stats(2, 1))
 
     text = caplog.text
-    assert "상세 수집 집계(전체) — 시도 5건 / 성공 3건 / 실패 2건" in text
-    assert "상세 수집 집계(의안) — 시도 2건 / 성공 1건 / 실패 1건" in text
+    assert "상세 수집 집계(전체) — 시도 5건 / 성공 3건 / 등록대기 0건 / 실패 2건" in text
+    assert "의안 제안이유 집계 — attempted 2 / available 1 / pending 0 / failed 1" in text
     assert "AI 요약 집계 — 대상 2건 / 요약 1건 / 발췌 폴백 1건" in text
 
 
@@ -136,7 +136,7 @@ def test_zero_detail_success_logs_error(caplog):
     assert "성공률 0%" in errors[0].getMessage()
     assert "의안" not in errors[0].getMessage()   # 의안 시도가 0이면 의안 ERROR 는 없다
     # 집계 로그는 그대로 남는다(ERROR 가 나머지를 삼키지 않는다)
-    assert "상세 수집 집계(전체) — 시도 7건 / 성공 0건 / 실패 7건" in caplog.text
+    assert "상세 수집 집계(전체) — 시도 7건 / 성공 0건 / 등록대기 0건 / 실패 7건" in caplog.text
 
 
 def test_no_error_when_nothing_was_attempted(caplog):
@@ -145,8 +145,8 @@ def test_no_error_when_nothing_was_attempted(caplog):
     with caplog.at_level(logging.INFO, logger="law_rader"):
         _log_run_summary(cfg, {}, _stats(0, 0), _stats(0, 0))
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert "상세 수집 집계(전체) — 시도 0건 / 성공 0건 / 실패 0건" in caplog.text
-    assert "상세 수집 집계(의안) — 시도 0건 / 성공 0건 / 실패 0건" in caplog.text
+    assert "상세 수집 집계(전체) — 시도 0건 / 성공 0건 / 등록대기 0건 / 실패 0건" in caplog.text
+    assert "의안 제안이유 집계 — attempted 0 / available 0 / pending 0 / failed 0" in caplog.text
 
 
 def test_no_error_when_some_details_succeeded(caplog):
@@ -167,7 +167,7 @@ def test_assembly_total_failure_is_reported_even_when_others_succeed(caplog):
 
     errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
     assert len(errors) == 1
-    assert "의안 상세(제안이유) 수집 성공률 0%" in errors[0]
+    assert "의안 제안이유 수집 available 0건" in errors[0]
     assert "시도 3건" in errors[0]
 
 
@@ -187,7 +187,7 @@ def test_both_errors_are_emitted_when_everything_failed(caplog):
 
     errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
     assert len(errors) == 2
-    assert any("의안 상세(제안이유)" in m for m in errors)
+    assert any("의안 제안이유 수집 available 0건" in m for m in errors)
     assert any(m.startswith("상세 수집 성공률 0%") for m in errors)
 
 
@@ -278,9 +278,9 @@ def test_detail_success_is_counted_from_filled_fields(tmp_path, monkeypatch, cap
     with caplog.at_level(logging.INFO, logger="law_rader"):
         main_mod.run(["--state", str(state_path), "--only", "fss_press"])
 
-    assert "상세 수집 집계(전체) — 시도 3건 / 성공 1건 / 실패 2건" in caplog.text
+    assert "상세 수집 집계(전체) — 시도 3건 / 성공 1건 / 등록대기 0건 / 실패 2건" in caplog.text
     # 의안이 섞이지 않은 실행이므로 의안 집계는 0이고 의안 ERROR 도 없다
-    assert "상세 수집 집계(의안) — 시도 0건 / 성공 0건 / 실패 0건" in caplog.text
+    assert "의안 제안이유 집계 — attempted 0 / available 0 / pending 0 / failed 0" in caplog.text
     # 일부라도 성공하면 ERROR 는 없다
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
@@ -356,10 +356,10 @@ def test_mixed_run_reports_assembly_failure_despite_other_source_success(
         tmp_path, monkeypatch, caplog, assembly_ok=False, fss_ok=True
     )
     assert rc == 0 and sent == 1                       # 메일은 정상 발송
-    assert "상세 수집 집계(전체) — 시도 5건 / 성공 3건 / 실패 2건" in text
-    assert "상세 수집 집계(의안) — 시도 2건 / 성공 0건 / 실패 2건" in text
+    assert "상세 수집 집계(전체) — 시도 5건 / 성공 3건 / 등록대기 0건 / 실패 2건" in text
+    assert "의안 제안이유 집계 — attempted 2 / available 0 / pending 0 / failed 2" in text
     assert len(errors) == 1
-    assert "의안 상세(제안이유) 수집 성공률 0%" in errors[0]
+    assert "의안 제안이유 수집 available 0건" in errors[0]
 
 
 def test_mixed_run_stays_quiet_when_assembly_succeeds(tmp_path, monkeypatch, caplog):
@@ -368,7 +368,7 @@ def test_mixed_run_stays_quiet_when_assembly_succeeds(tmp_path, monkeypatch, cap
         tmp_path, monkeypatch, caplog, assembly_ok=True, fss_ok=False
     )
     assert rc == 0 and sent == 1
-    assert "상세 수집 집계(의안) — 시도 2건 / 성공 2건 / 실패 0건" in text
+    assert "의안 제안이유 집계 — attempted 2 / available 2 / pending 0 / failed 0" in text
     assert errors == []          # 합계도 2/5 라 전체 ERROR 도 없다
 
 
@@ -377,7 +377,7 @@ def test_mixed_run_all_success_has_no_errors(tmp_path, monkeypatch, caplog):
         tmp_path, monkeypatch, caplog, assembly_ok=True, fss_ok=True
     )
     assert rc == 0 and sent == 1
-    assert "상세 수집 집계(전체) — 시도 5건 / 성공 5건 / 실패 0건" in text
+    assert "상세 수집 집계(전체) — 시도 5건 / 성공 5건 / 등록대기 0건 / 실패 0건" in text
     assert errors == []
 
 
@@ -387,7 +387,7 @@ def test_mixed_run_all_failure_emits_both_errors(tmp_path, monkeypatch, caplog):
     )
     assert rc == 0 and sent == 1          # 전면 실패여도 메일은 나간다
     assert len(errors) == 2
-    assert any("의안 상세(제안이유)" in m for m in errors)
+    assert any("의안 제안이유 수집 available 0건" in m for m in errors)
 
 
 # --- 상세 URL 폴백 설정(요구 5의 교정 경로) ---

@@ -36,6 +36,10 @@ PARTIAL = "🟠"
 # body 가 비는 것이 정상이므로 기존 판정 기준(본문·첨부·구조화항목 중 하나)을 유지한다.
 _BODY_REQUIRED = {"assembly_bill"}
 
+# 의안은 여러 건을 표본으로 본다. 목록 맨 위는 갓 접수된 의안이라 원문이 아직 없을 수
+# 있어(PENDING), 첫 건만 보면 '등록 대기'와 '수집 고장'을 구분할 수 없다.
+_ASSEMBLY_SAMPLE = 3
+
 
 def _sample(posts, n=5):
     lines = []
@@ -45,7 +49,7 @@ def _sample(posts, n=5):
     return "\n".join(lines)
 
 
-def verify_source(scraper, list_limit, do_enrich):
+def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMPLE):
     key = scraper.key
     report = {"key": key, "name": scraper.name}
 
@@ -84,6 +88,9 @@ def verify_source(scraper, list_limit, do_enrich):
         report["pagination"] = "— (페이지네이션 미지원 소스)"
 
     # --- 상세/첨부(enrich) ---
+    if do_enrich and key in _BODY_REQUIRED:
+        return _verify_assembly_detail(scraper, page1, report, assembly_sample), page1
+
     if do_enrich:
         first = page1[0]
         try:
@@ -105,22 +112,78 @@ def verify_source(scraper, list_limit, do_enrich):
             report["enrich"] = f"{WARN} enrich 실패: {e}"
             report["enrich_ok"] = False
 
-        # 본문이 필수인 소스는 '목록만 성공'을 전체 성공으로 표시하지 않는다.
-        if key in _BODY_REQUIRED and report.get("body_len", 0) == 0:
-            report["status"] = PARTIAL
-            report["detail"] = (
-                f"목록 수집 성공({len(page1)}건) / 상세 본문 0자 — 상세 수집 실패. "
-                "브라우저 XHR 캡처(scripts/capture_assembly_network.py)로 실제 endpoint "
-                "계약을 확인하세요."
-            )
-            report["list_ok"] = True
-            report["detail_ok"] = False
-            return report, page1
-
     report["status"] = OK
     report["list_ok"] = True
     report["detail_ok"] = report.get("enrich_ok", True)
     return report, page1
+
+
+def _verify_assembly_detail(scraper, page1, report, sample_size=_ASSEMBLY_SAMPLE):
+    """의안 상세를 표본으로 검증한다 — available 과 pending 을 **따로** 판정한다.
+
+    '원문이 아직 등록되지 않음(PENDING)'은 고장이 아니다. 그래서 두 질문을 나눠 묻는다:
+      ① available 검증 — 원문이 있는 의안에서 실제로 본문을 뽑아내는가?
+      ② pending 검증  — 원문이 없는 의안을 '실패'가 아니라 '등록 대기'로 판정하는가?
+
+    표본 안에 ERROR 가 하나라도 있으면 구조·전송이 깨진 것이므로 실패다.
+    ERROR 가 없는데 available 이 0이면 ①을 확인하지 못한 것이므로 부분 실패로 둔다
+    (초록불로 넘기면 '전부 등록 대기'라는 말에 고장이 숨을 수 있다).
+    """
+    from src.models import ProposalContentStatus as S
+
+    sample = page1[: max(1, sample_size)]
+    counts = {S.AVAILABLE: 0, S.PENDING: 0, S.ERROR: 0, S.UNKNOWN: 0}
+    lines = []
+    for p in sample:
+        try:
+            scraper.enrich(p)
+        except Exception as e:  # noqa: BLE001 - enrich 는 원래 삼키지만 방어
+            p.proposal_status = S.ERROR
+            p.proposal_note = f"{type(e).__name__}: {e}"
+        counts[p.proposal_status] = counts.get(p.proposal_status, 0) + 1
+        lines.append(
+            f"      - {p.proposal_status.value:<9} 본문 {len(p.body or '')}자  "
+            f"{p.post_id}  {p.proposal_note[:70]}"
+        )
+
+    available = counts[S.AVAILABLE]
+    pending = counts[S.PENDING]
+    failed = counts[S.ERROR] + counts[S.UNKNOWN]
+    report["body_len"] = max((len(p.body or "") for p in sample), default=0)
+    report["proposal_counts"] = {
+        "sampled": len(sample),
+        "available": available,
+        "pending": pending,
+        "failed": failed,
+    }
+    report["enrich"] = (
+        f"표본 {len(sample)}건 — available {available} / pending {pending} / "
+        f"failed {failed}\n" + "\n".join(lines)
+    )
+    report["enrich_ok"] = available > 0
+    report["list_ok"] = True
+
+    if failed:
+        report["status"] = FAIL
+        report["detail"] = (
+            f"목록 수집 성공({len(page1)}건) / 제안이유 수집 실패 {failed}건 — "
+            "구조·endpoint 확인 필요. scripts/capture_assembly_network.py 로 실제 "
+            "XHR 계약을 확인하세요."
+        )
+        report["detail_ok"] = False
+    elif available == 0:
+        # 전부 등록 대기. 고장은 아니지만 available 을 확인하지 못했다.
+        report["status"] = PARTIAL
+        report["detail"] = (
+            f"목록 수집 성공({len(page1)}건) / 표본 {len(sample)}건이 모두 등록 대기 — "
+            "제안이유 추출 자체는 확인하지 못했습니다. 원문이 있는 오래된 의안으로 "
+            "재확인하세요(--assembly-sample 로 표본을 늘릴 수 있습니다)."
+        )
+        report["detail_ok"] = False
+    else:
+        report["status"] = OK
+        report["detail_ok"] = True
+    return report
 
 
 def main(argv=None):
@@ -128,6 +191,12 @@ def main(argv=None):
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--only", default="")
     ap.add_argument("--no-enrich", action="store_true")
+    ap.add_argument(
+        "--assembly-sample",
+        type=int,
+        default=_ASSEMBLY_SAMPLE,
+        help="의안 상세를 몇 건까지 표본으로 볼지(등록 대기와 고장을 구분하기 위함)",
+    )
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -149,7 +218,9 @@ def main(argv=None):
             continue
         scraper = build_scraper(src, fetcher)
         print(f"\n[{src.key}] {src.name}")
-        report, page1 = verify_source(scraper, cfg.fetch.list_limit, not args.no_enrich)
+        report, page1 = verify_source(
+            scraper, cfg.fetch.list_limit, not args.no_enrich, args.assembly_sample
+        )
         reports.append(report)
         # 0건 소스의 원본(HTML/JSON) 덤프는 각 스크래퍼가 내부에서 처리한다.
 
@@ -172,7 +243,13 @@ def main(argv=None):
     for r in reports:
         pg = r.get("page1_count", "-")
         line = f"  {r['status']} {r['key']:<20} 목록 {pg}건  {r.get('pagination','')}"
-        if r["status"] == PARTIAL:
+        pc = r.get("proposal_counts")
+        if pc:
+            line += (
+                f"  [제안이유 available {pc['available']} / pending {pc['pending']}"
+                f" / failed {pc['failed']}]"
+            )
+        elif r["status"] == PARTIAL:
             line += f"  [상세 본문 {r.get('body_len', 0)}자]"
         print(line)
 

@@ -1,0 +1,12 @@
+<!-- 손으로 만든 구조 fixture (실제 캡처 아님).
+     알려진 컨테이너가 아예 없는 경우 = 구조 변경. 등록 대기로 오인하면 안 된다. -->
+<html><head><meta charset="utf-8"><title>의안상세 - 구조 변경</title></head>
+<body>
+  <form id="form" action="/bill/bi/billDetailPage.do" method="get">
+    <input type="hidden" name="billId" value="PRC_SYNTH_CHANGED"/>
+  </form>
+  <ul class="tabType01">
+    <li><a href="#" data-tabnm="billInfo" onclick="app.Tab.tabClick(this)">심사정보</a></li>
+  </ul>
+  <div id="tab_billInfo_sect"></div>
+</body></html>

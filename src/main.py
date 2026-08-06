@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 from .config import load_config
 from .fetcher import Fetcher
-from .models import ASSEMBLY_SOURCE_KEY, Post
+from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
 from .notifier import missing_email_settings, send_digest, verify_smtp_login
 from .scrapers import build_scraper
 from .state import State
@@ -35,18 +35,27 @@ log = logging.getLogger("law_rader")
 
 @dataclass
 class _DetailStats:
-    """상세(enrich) 수집 시도/성공 집계."""
+    """상세(enrich) 수집 집계.
+
+    '등록 대기(pending)'는 실패가 아니다. 갓 접수된 의안은 원문이 아직 공개되지
+    않아 본문이 비는 것이 정상이고, 그것을 실패로 세면 매 실행마다 거짓 실패가
+    쌓여 진짜 고장을 가린다. 그래서 succeeded/pending/failed 를 따로 센다.
+    """
 
     attempted: int = 0
     succeeded: int = 0
+    pending: int = 0
 
     @property
     def failed(self) -> int:
-        return self.attempted - self.succeeded
+        return self.attempted - self.succeeded - self.pending
 
-    def count(self, ok: bool) -> None:
+    def count(self, ok: bool, pending: bool = False) -> None:
         self.attempted += 1
-        self.succeeded += 1 if ok else 0
+        if pending:
+            self.pending += 1
+        elif ok:
+            self.succeeded += 1
 
 
 def parse_args(argv=None):
@@ -180,11 +189,16 @@ def run(argv=None) -> int:
             # 않도록) 예외 유무가 아니라 '무언가 채워졌는지'로 성공을 센다.
             # verify_sources.py 의 enrich_ok 와 같은 기준이다.
             ok_detail = bool(p.body or p.details or p.attachments)
-            detail.count(ok_detail)
+            # 등록 대기는 실패가 아니다(원문이 아직 공개되지 않았을 뿐).
+            is_pending = (
+                p.source_key == ASSEMBLY_SOURCE_KEY
+                and p.proposal_status is ProposalContentStatus.PENDING
+            )
+            detail.count(ok_detail, pending=is_pending)
             # 의안 통계는 의안 게시물로만 만든다. 다른 소스(상세가 원래 비는 게시판
             # 등)의 실패가 섞이면 있지도 않은 의안 장애를 보고하게 된다.
             if p.source_key == ASSEMBLY_SOURCE_KEY:
-                assembly_detail.count(ok_detail)
+                assembly_detail.count(ok_detail, pending=is_pending)
 
         # 신규(초과분 포함)는 '메일 성공 후'에만 seen 처리하도록 보류한다.
         pending_seen.append((src.key, all_new_ids))
@@ -278,18 +292,22 @@ def _log_run_summary(
     편이 알림 자체가 끊기는 것보다 낫다(전체 설계 원칙).
     """
     log.info(
-        "상세 수집 집계(전체) — 시도 %d건 / 성공 %d건 / 실패 %d건",
+        "상세 수집 집계(전체) — 시도 %d건 / 성공 %d건 / 등록대기 %d건 / 실패 %d건",
         detail.attempted,
         detail.succeeded,
+        detail.pending,
         detail.failed,
     )
+    # 의안은 요구된 이름 그대로 attempted / available / pending / failed 를 남긴다.
     log.info(
-        "상세 수집 집계(의안) — 시도 %d건 / 성공 %d건 / 실패 %d건",
+        "의안 제안이유 집계 — attempted %d / available %d / pending %d / failed %d",
         assembly_detail.attempted,
         assembly_detail.succeeded,
+        assembly_detail.pending,
         assembly_detail.failed,
     )
-    if detail.attempted > 0 and detail.succeeded == 0:
+    # 등록 대기가 하나라도 있으면 '전멸'이 아니다 — 원문이 아직 공개되지 않은 것뿐이다.
+    if detail.attempted > 0 and detail.succeeded == 0 and detail.pending == 0:
         log.error(
             "상세 수집 성공률 0%% (시도 %d건 전부 실패) — 파서/마크업 확인 필요. "
             "메일은 제목·링크만으로 계속 발송합니다. debug/ 덤프를 확인하세요.",
@@ -297,13 +315,27 @@ def _log_run_summary(
         )
     # 전체 ERROR 와 별개로 판정한다. 다른 소스가 성공해 위 조건이 거짓이어도
     # 의안만 전멸했다면 반드시 드러나야 한다.
-    if assembly_detail.attempted > 0 and assembly_detail.succeeded == 0:
+    if (
+        assembly_detail.attempted > 0
+        and assembly_detail.succeeded == 0
+        and assembly_detail.pending == 0
+    ):
         log.error(
-            "의안 상세(제안이유) 수집 성공률 0%% (시도 %d건 전부 실패) — 상세 페이지 "
-            "구조/폼 변경 의심. 의안은 요약 없이 제목·링크만 발송됩니다. "
-            "debug/assembly_bill_detail_*.txt 를 확인하고 "
-            "scripts/capture_assembly_fixture.py 로 재캡처하세요.",
+            "의안 제안이유 수집 available 0건 (시도 %d건 전부 실패, 등록대기 0건) — "
+            "상세 페이지 구조/endpoint 변경 의심. 의안은 요약 없이 제목·링크만 "
+            "발송됩니다. debug/assembly_bill_detail_*.txt 를 확인하고 "
+            "scripts/capture_assembly_network.py 로 실제 XHR 계약을 확인하세요.",
             assembly_detail.attempted,
+        )
+    elif assembly_detail.failed > 0:
+        # available=0 이어도 pending>0 이면 전면 실패로 보지 않는다(요구사항).
+        # 다만 실패가 섞여 있다면 조용히 넘기지 않고 경고로 남긴다.
+        log.warning(
+            "의안 제안이유 수집 실패 %d건 (available %d / pending %d) — "
+            "debug/assembly_bill_detail_*.txt 확인.",
+            assembly_detail.failed,
+            assembly_detail.succeeded,
+            assembly_detail.pending,
         )
 
     targets = ai_target_count(cfg.llm, posts_by_source)

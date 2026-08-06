@@ -8,7 +8,7 @@ from email.message import EmailMessage
 from email.utils import formataddr
 
 from .config import EmailConfig
-from .models import ASSEMBLY_SOURCE_KEY, Post
+from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
 from .snippet import build_fallback_snippet
 
 log = logging.getLogger(__name__)
@@ -53,6 +53,18 @@ _AI_NOTICE = (
 _ASSEMBLY_SUMMARY_PREFIX = "제안이유 및 주요내용 · "
 _ASSEMBLY_BODY_LABEL = "제안이유 및 주요내용 발췌"
 _BODY_LABEL = "원문 발췌"
+
+# 등록 대기(PENDING): 원문이 아직 공개되지 않은 상태. 수집 실패와 다르므로 문구도
+# 다르다 — 수신자가 '시스템 고장'이 아니라 '아직 안 올라옴'임을 알 수 있어야 한다.
+_PENDING_LABEL = "제안이유 및 주요내용 · 등록 대기"
+_PENDING_TEXT = "의안정보시스템에 제안이유 및 주요내용이 아직 공개되지 않았습니다."
+
+
+def _is_pending(p: Post) -> bool:
+    return (
+        p.source_key == ASSEMBLY_SOURCE_KEY
+        and p.proposal_status is ProposalContentStatus.PENDING
+    )
 
 
 def _summary_label(p: Post) -> str:
@@ -145,6 +157,17 @@ def _summary_block(p: Post, accent: str) -> str:
                 f"font-weight:700;color:{accent}'>{_esc(_body_label(p))}</div>{snippet}"
             )
         return snippet
+
+    # 원문이 아직 공개되지 않은 의안. 빈 카드로 두면 수집이 깨진 것처럼 보인다.
+    if _is_pending(p):
+        return (
+            "<div style='margin:10px 0 0;padding:10px 12px;background:#f8fafc;"
+            "border:1px solid #e2e8f0;border-radius:6px'>"
+            f"<div style='margin:0 0 6px;font-size:10px;letter-spacing:.8px;"
+            f"font-weight:700;color:{accent}'>{_esc(_PENDING_LABEL)}</div>"
+            "<div style='font-size:13px;line-height:1.6;color:#475569'>"
+            f"{_esc(_PENDING_TEXT)}</div></div>"
+        )
     return ""
 
 
@@ -280,6 +303,9 @@ def build_text(posts_by_source: dict[str, list[Post]]) -> str:
             elif p.body:
                 lines.append(f"    [{_body_label(p)}]")
                 lines.append(f"      {build_fallback_snippet(p.body, p.title)}")
+            elif _is_pending(p):
+                lines.append(f"    [{_PENDING_LABEL}]")
+                lines.append(f"      {_PENDING_TEXT}")
             lines.append(f"    {p.url}")
             for a in p.attachments:
                 lines.append(f"      첨부: {a.filename} ({a.url})")

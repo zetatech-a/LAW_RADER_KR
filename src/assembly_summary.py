@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .models import ASSEMBLY_SOURCE_KEY, Post
+from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
 from .summarizer import _LIST_PREFIX, _MIN_CALL_SEC, _unfence
 
 if TYPE_CHECKING:  # pragma: no cover - 타입 힌트 전용
@@ -151,9 +151,16 @@ def _targets(
     """source_key 가 의안이고 본문(제안이유)이 있는 글만 모은다."""
     items: list[_Item] = []
     seen: set[str] = set()
+    pending = 0
     for posts in posts_by_source.values():
         for p in posts:
             if p.source_key != ASSEMBLY_SOURCE_KEY:
+                continue
+            # 등록 대기 의안은 요약할 원문이 아예 없다. 호출해도 지어낸 요약만
+            # 나오므로 배치 대상에서 명시적으로 제외한다(본문이 비어 있어 어차피
+            # 걸러지지만, 의도를 코드에 남긴다).
+            if p.proposal_status is ProposalContentStatus.PENDING:
+                pending += 1
                 continue
             text = " ".join((p.body or "").split())
             # bill_id 가 없으면 결과를 되돌려 붙일 수 없다(순서 매핑은 쓰지 않는다).
@@ -168,6 +175,8 @@ def _targets(
                     text=text[: cfg.max_input_chars_per_bill],
                 )
             )
+    if pending:
+        log.info("등록 대기 의안 %d건은 요약 대상에서 제외(원문 미공개)", pending)
     if len(items) > cfg.max_bills:
         log.warning(
             "의안 요약 대상 %d건 — 상한(%d)을 넘어 최신 %d건만 요약합니다.",

@@ -27,11 +27,12 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from enum import Enum
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from ..models import Post
+from ..models import Post, ProposalContentStatus
 from .base import BaseScraper, clean_text
 
 log = logging.getLogger(__name__)
@@ -68,6 +69,43 @@ _SUMMARY_SELECTORS = ("pre#prntSummary", "#prntSummary", "#summaryContentDiv")
 # 수준의 짧은 텍스트를 '수집 성공'으로 보면 요약도 발췌도 못 쓰는 본문이 실린다.
 _MIN_SUMMARY_CHARS = 20
 
+# 상세 페이지가 '그 의안이 없다'고 답하는 경우(죽은 구 경로 등). 이건 등록 대기가
+# 아니라 우리가 잘못된 주소를 부른 것이므로 ERROR 다.
+_NOT_FOUND_MARKERS = (
+    "의안정보가존재하지않",
+    "의안정보가없습니다",
+    "해당의안정보가존재하지않",
+    "페이지를찾을수없",
+)
+
+# 알려진 컨테이너 '안에서만' 찾는 등록 대기 안내 문구. 컨테이너 밖의 아무 문구나
+# 보면 안 된다(첨부 없음·검색결과 없음 등이 걸린다).
+#
+# ※ 실제 문구는 라이브 확인이 필요하다. 확인 전까지 주 신호는 '컨테이너가 있는데
+#   내용이 비어 있다'이고, 아래 패턴은 보조 신호다.
+_PENDING_NOTICE = re.compile(
+    r"등록\s*(예정|대기|중)|준비\s*중|아직\s*(등록|제공|공개)|"
+    r"(내용|자료|정보)가\s*없|제공되지\s*않"
+)
+
+_WS_ALL = re.compile(r"\s+")
+
+
+class SummaryProbe(str, Enum):
+    """제안이유 컨테이너를 들여다본 결과.
+
+    이 세 값이 곧 상태 판정의 근거다:
+      FOUND      쓸 만한 본문이 있다            → AVAILABLE
+      EMPTY      컨테이너는 있는데 비어 있다     → PENDING (구조는 멀쩡함이 확인됨)
+      MISSING    컨테이너 자체가 없다            → ERROR (셀렉터/구조 변경)
+      UNEXPECTED 컨테이너에 알 수 없는 내용      → ERROR (예상하지 못한 응답)
+    """
+
+    FOUND = "found"
+    EMPTY = "empty"
+    MISSING = "missing"
+    UNEXPECTED = "unexpected"
+
 # 폼 action 으로 허용하는 호스트. 상세 페이지에는 외부 링크 폼(검색·공유 등)이 섞일 수
 # 있고, 그 action 으로 hidden input(세션 식별자·CSRF 포함)을 보내면 안 된다.
 _ALLOWED_HOST = "likms.assembly.go.kr"
@@ -97,16 +135,48 @@ def _allowed_action(url: str) -> bool:
     return parts.scheme == "https" and parts.hostname == _ALLOWED_HOST
 
 
-def _extract_summary(soup: BeautifulSoup) -> str:
-    """'제안이유 및 주요내용' 텍스트. 못 찾거나 사실상 비어 있으면 빈 문자열."""
+def _is_not_found_page(html: str) -> bool:
+    """상세 페이지가 '해당 의안 정보가 존재하지 않습니다' 류를 응답했는지."""
+    squished = _WS_ALL.sub("", html or "")
+    return any(m in squished for m in _NOT_FOUND_MARKERS)
+
+
+def _probe_summary(soup: BeautifulSoup) -> tuple[SummaryProbe, str]:
+    """제안이유 컨테이너를 들여다보고 (판정, 텍스트) 를 돌려준다.
+
+    컨테이너가 여럿 걸리면 가장 좋은 결과를 쓴다(FOUND > EMPTY > UNEXPECTED). 하나가
+    비어 있어도 다른 하나에 본문이 있으면 본문을 쓴다는 뜻이다.
+    """
+    best = SummaryProbe.MISSING
+    best_text = ""
+    rank = {
+        SummaryProbe.MISSING: 0,
+        SummaryProbe.UNEXPECTED: 1,
+        SummaryProbe.EMPTY: 2,
+        SummaryProbe.FOUND: 3,
+    }
     for sel in _SUMMARY_SELECTORS:
         el = soup.select_one(sel)
         if el is None:
-            continue
+            continue                      # 이 셀렉터는 없음 — 다음 후보로
         text = clean_text(el.get_text("\n"))
         if len(text) >= _MIN_SUMMARY_CHARS:
-            return text
-    return ""
+            probe, value = SummaryProbe.FOUND, text
+        elif not text or _PENDING_NOTICE.search(text):
+            # 컨테이너는 있는데 내용이 없다 = 구조는 멀쩡, 원문이 아직 없음.
+            probe, value = SummaryProbe.EMPTY, ""
+        else:
+            # 짧은데 안내문도 아니다 — 뭘 받은 건지 알 수 없다.
+            probe, value = SummaryProbe.UNEXPECTED, text
+        if rank[probe] > rank[best]:
+            best, best_text = probe, value
+    return best, best_text
+
+
+def _extract_summary(soup: BeautifulSoup) -> str:
+    """'제안이유 및 주요내용' 텍스트. 못 찾거나 사실상 비어 있으면 빈 문자열."""
+    probe, text = _probe_summary(soup)
+    return text if probe is SummaryProbe.FOUND else ""
 
 
 def _hidden_inputs(form) -> dict[str, str]:
@@ -321,12 +391,19 @@ class AssemblyBillScraper(BaseScraper):
     def enrich(self, post: Post) -> None:
         """상세 페이지에서 '제안이유 및 주요내용'을 가져와 post.body 에 담는다.
 
+        본문을 못 채워도 그 사유를 post.proposal_status 로 남긴다 — '아직 등록 안 됨
+        (PENDING)'과 '수집 실패(ERROR)'는 다른 사건이고, 메일 문구도 집계도 달라진다.
+
         어떤 실패도 밖으로 던지지 않는다 — 의안 한 건의 수집 실패가 다른 의안이나
-        메일 발송을 막아서는 안 된다. 본문이 비면 메일에는 제목·링크만 실린다.
+        메일 발송을 막아서는 안 된다.
         """
         try:
             self._fill_proposal_reason(post)
         except Exception as e:  # noqa: BLE001
+            # 네트워크·HTTP 오류는 '등록 대기'가 아니다. 반드시 ERROR 로 센다.
+            self._set_status(
+                post, ProposalContentStatus.ERROR, f"{type(e).__name__}: {e}"
+            )
             log.warning(
                 "[%s] 제안이유 수집 실패(%s) %s: %s",
                 self.key,
@@ -335,31 +412,94 @@ class AssemblyBillScraper(BaseScraper):
                 e,
             )
 
+    def _set_status(
+        self, post: Post, status: ProposalContentStatus, note: str = ""
+    ) -> None:
+        post.proposal_status = status
+        post.proposal_note = note
+
     def _fill_proposal_reason(self, post: Post) -> None:
         resp = self.fetcher.get(post.url, referer=self.list_url)
         html = self.fetcher.text(resp)
+
+        # 0) 상세 페이지 자체가 유효한가. '해당 의안 정보가 존재하지 않습니다' 는
+        #    등록 대기가 아니라 우리가 잘못된 주소를 부른 것이다.
+        if _is_not_found_page(html):
+            self._set_status(
+                post,
+                ProposalContentStatus.ERROR,
+                "상세 페이지가 '의안 정보 없음'을 응답 — 상세 URL(detail_url) 확인 필요",
+            )
+            self._dump(post, html)
+            return
+
         soup = BeautifulSoup(html, "lxml")
 
         # 1) 상세 HTML 에 이미 실려 있으면 그대로 쓴다(추가 요청 없음).
-        text = _extract_summary(soup)
-        if text:
+        inline_probe, text = _probe_summary(soup)
+        if inline_probe is SummaryProbe.FOUND:
             post.body = text
+            self._set_status(post, ProposalContentStatus.AVAILABLE, "상세 HTML 에 포함")
             return
 
-        # 2) 별도 요청으로 채워지는 구조: 폼을 찾아 그대로 되돌려 보낸다.
-        text, follow_html = self._request_summary(soup, post)
-        if text:
-            post.body = text
+        # 2) 아직 못 찾았다면 별도 원천(폼)을 **먼저 소진**한다.
+        #    상세 HTML 의 빈 컨테이너는 '등록 대기'일 수도 있고 후속 요청이 채울
+        #    자리표시자일 수도 있다. 소진하기 전에 PENDING 으로 확정하면, 원천이
+        #    살아 있는데도 매번 '등록 대기'로 잘못 알린다.
+        req = self.build_summary_request(soup, post)
+
+        if req is None:
+            # 알려진 후속 원천이 없다 → 상세 페이지 자체가 유일한 원천이다.
+            if inline_probe is SummaryProbe.EMPTY:
+                # 정상 응답 + 알려진 컨테이너 존재 + 내용 없음 = 등록 대기.
+                self._set_status(
+                    post,
+                    ProposalContentStatus.PENDING,
+                    "상세 페이지의 제안이유 컨테이너가 비어 있음(후속 원천 없음)",
+                )
+                return
+            note = (
+                f"제안이유 컨테이너에 예상하지 못한 내용: {text[:80]}"
+                if inline_probe is SummaryProbe.UNEXPECTED
+                else "제안이유 원천을 찾지 못함(셀렉터/endpoint 미확정) — "
+                "scripts/capture_assembly_network.py 로 실제 XHR 계약을 확인하세요"
+            )
+            self._fail(post, note, html)
             return
 
-        # 3) 그래도 없으면 셀렉터/폼 판정을 고칠 수 있도록 bill_id 별로 덤프한다.
-        log.info(
-            "[%s] 제안이유 및 주요내용을 찾지 못함(%s) — 디버그 덤프.", self.key, post.post_id
+        # 3) 원천에 실제로 요청을 보낸다(전송 오류는 enrich 가 ERROR 로 받는다).
+        follow_probe, follow_text, follow_html = self._send_summary_request(req, post)
+        if follow_probe is SummaryProbe.FOUND:
+            post.body = follow_text
+            self._set_status(post, ProposalContentStatus.AVAILABLE, "후속 요청 응답")
+            return
+        if follow_probe is SummaryProbe.EMPTY:
+            # 확인된 원천이 정상 응답했는데 내용이 비어 있다 = 등록 대기.
+            self._set_status(
+                post,
+                ProposalContentStatus.PENDING,
+                "후속 요청은 정상인데 제안이유 컨테이너가 비어 있음",
+            )
+            return
+
+        # 4) 맞다고 판단한 원천에 물었는데 읽을 수 없는 응답이 왔다. 등록 대기인지
+        #    구조가 바뀐 것인지 구분할 근거가 없으므로 ERROR 다 — 여기서 PENDING 으로
+        #    넘기면 셀렉터 변경이나 endpoint 오판이 '정상'으로 위장된다.
+        note = (
+            f"후속 응답이 예상과 다름: {follow_text[:80]}"
+            if follow_probe is SummaryProbe.UNEXPECTED
+            else "후속 응답에 제안이유 컨테이너가 없음(셀렉터/endpoint 확인 필요)"
         )
-        dump = html
-        if follow_html:
-            dump = f"{html}\n\n<!-- ===== 후속 응답 ===== -->\n{follow_html}"
-        self._dump_debug(f"detail_{_UNSAFE_NAME.sub('_', post.post_id)}", dump)
+        self._fail(post, note, f"{html}\n\n<!-- ===== 후속 응답 ===== -->\n{follow_html}")
+
+    def _fail(self, post: Post, note: str, dump: str) -> None:
+        """ERROR 로 판정하고 진단용 덤프를 남긴다."""
+        self._set_status(post, ProposalContentStatus.ERROR, note)
+        log.info("[%s] 제안이유 미확보(%s): %s", self.key, post.post_id, note)
+        self._dump(post, dump)
+
+    def _dump(self, post: Post, content: str) -> None:
+        self._dump_debug(f"detail_{_UNSAFE_NAME.sub('_', post.post_id)}", content)
 
     def build_summary_request(
         self, soup: BeautifulSoup, post: Post
@@ -397,14 +537,24 @@ class AssemblyBillScraper(BaseScraper):
         return SummaryRequest(method=method, action=action, data=data, headers=headers)
 
     def _request_summary(self, soup: BeautifulSoup, post: Post) -> tuple[str, str]:
-        """상세 페이지의 폼을 그대로 재전송해 제안이유를 받아온다.
+        """상세 페이지의 폼을 그대로 재전송해 제안이유를 받아온다(호환용 얇은 래퍼).
 
         반환값은 (제안이유 텍스트, 후속 응답 HTML). 보낼 만한 폼이 없으면 ("", "").
+        상태 판정은 _fill_proposal_reason 이 _send_summary_request 로 직접 한다.
         """
         req = self.build_summary_request(soup, post)
         if req is None:
             return "", ""
+        probe, text, html = self._send_summary_request(req, post)
+        return (text if probe is SummaryProbe.FOUND else ""), html
 
+    def _send_summary_request(
+        self, req: SummaryRequest, post: Post
+    ) -> tuple[SummaryProbe, str, str]:
+        """발견한 요청을 실제로 보내고 (판정, 텍스트, 응답 HTML) 을 돌려준다.
+
+        전송 오류(네트워크·HTTP)는 호출자(enrich)가 ERROR 로 받도록 그대로 올린다.
+        """
         if req.method == "get":
             resp = self.fetcher.get(
                 req.action, params=req.data, referer=post.url, headers=req.headers
@@ -414,7 +564,11 @@ class AssemblyBillScraper(BaseScraper):
                 req.action, data=req.data, referer=post.url, headers=req.headers
             )
         html = self.fetcher.text(resp)
-        return _extract_summary(BeautifulSoup(html, "lxml")), html
+        if _is_not_found_page(html):
+            # 후속 요청이 '정보 없음'을 답한 것은 등록 대기가 아니라 잘못된 요청이다.
+            return SummaryProbe.UNEXPECTED, "의안 정보 없음 응답", html
+        probe, text = _probe_summary(BeautifulSoup(html, "lxml"))
+        return probe, text, html
 
     def _summary_form(self, soup: BeautifulSoup, post: Post):
         """제안이유를 돌려줄 것으로 보이는 폼과 그 action URL. 없으면 None.

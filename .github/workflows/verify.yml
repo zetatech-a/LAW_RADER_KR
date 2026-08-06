@@ -25,6 +25,14 @@ on:
         description: "의안 상세 URL 직접 지정(입력하면 BILL_ID 보다 우선)"
         required: false
         default: ""
+      pending_bill_id:
+        description: "등록 대기(PENDING) 판정 확인용 BILL_ID — 방금 접수돼 제안이유가 아직 없는 의안"
+        required: false
+        default: ""
+      assembly_sample:
+        description: "의안 상세 표본 건수(available/pending 구분용, 기본 3)"
+        required: false
+        default: "3"
 
 jobs:
   verify:
@@ -60,8 +68,10 @@ jobs:
         env:
           ASSEMBLY_API_KEY: ${{ secrets.ASSEMBLY_API_KEY }}
           ONLY: ${{ inputs.only }}
+          SAMPLE: ${{ inputs.assembly_sample }}
         run: |
-          python scripts/verify_sources.py --only "$ONLY" | tee verify_report.txt
+          python scripts/verify_sources.py --only "$ONLY" \
+            --assembly-sample "${SAMPLE:-3}" | tee verify_report.txt
 
       # ── 주 진단: 브라우저가 실제로 보내는 XHR 캡처 ──────────────────────────
       #
@@ -105,6 +115,56 @@ jobs:
               | tee capture_report.txt
           fi
 
+      # ── pending 검증: available 검증과 **따로** 수행한다 ──────────────────────
+      #
+      # 방금 접수돼 제안이유가 아직 없는 의안을 넣으면, 그 의안이 ERROR 가 아니라
+      # PENDING 으로 판정되는지 확인한다. '본문 없음'을 '수집 실패'로 세면 매 실행마다
+      # 거짓 ERROR 가 쌓여 진짜 고장을 가린다.
+      #
+      # 여기서 캡처 스크립트가 exit 2 로 끝나는 것은 **정상**이다(제안이유가 없으니까).
+      # 확인할 것은 종료코드가 아니라 상태 판정이므로 continue-on-error 로 둔다.
+      - name: Verify PENDING classification
+        id: pendingcheck
+        if: ${{ !cancelled() && inputs.pending_bill_id != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          PENDING_BILL_ID: ${{ inputs.pending_bill_id }}
+        run: |
+          python - <<'PY' | tee pending_check_report.txt
+          import os, sys
+          sys.path.insert(0, ".")
+          from src.config import SourceConfig
+          from src.fetcher import Fetcher
+          from src.models import Post, ProposalContentStatus as S
+          from src.scrapers.assembly import AssemblyBillScraper, _DETAIL
+
+          bill_id = os.environ["PENDING_BILL_ID"]
+          src = SourceConfig(
+              key="assembly_bill", name="의안정보시스템 · 계류의안",
+              type="assembly_bill",
+              list_url="https://likms.assembly.go.kr/bill/bi/bill/state/mooringBillPage.do",
+              extra={},
+          )
+          sc = AssemblyBillScraper(src, Fetcher(timeout=30.0, delay=0.5))
+          p = Post(source_key="assembly_bill", source_name=src.name, post_id=bill_id,
+                   title="(pending check)", url=_DETAIL.format(bill_id=bill_id))
+          sc.enrich(p)
+          print(f"bill_id      : {bill_id}")
+          print(f"url          : {p.url}")
+          print(f"status       : {p.proposal_status.value}")
+          print(f"note         : {p.proposal_note}")
+          print(f"body length  : {len(p.body or '')}")
+          if p.proposal_status is S.PENDING:
+              print("\n✅ 등록 대기로 올바르게 판정되었습니다(실패로 세지 않음).")
+              sys.exit(0)
+          if p.proposal_status is S.AVAILABLE:
+              print("\n⚠️ 이 의안에는 이미 제안이유가 있습니다 — 더 최근 의안으로 다시 확인하세요.")
+              sys.exit(1)
+          print("\n❌ 등록 대기가 아니라 ERROR 로 판정되었습니다. 구조/endpoint 확인 필요.")
+          sys.exit(2)
+          PY
+
       # 캡처가 성공했다면 fixture 가 있으므로 skip 이 0 이어야 한다.
       - name: Test against captured fixture
         if: ${{ steps.capture.outcome == 'success' }}
@@ -129,6 +189,7 @@ jobs:
             verify_report.txt
             network_capture_report.txt
             capture_report.txt
+            pending_check_report.txt
             fixture_test_report.txt
             debug/
             tests/fixtures/
@@ -151,6 +212,20 @@ jobs:
           fi
           echo "제안이유/주요내용 확보 — assembly_xhr_manifest.json 의 요청이 확정할 계약입니다."
 
+      # pending 검증은 available 검증과 별개로 판정한다.
+      - name: Gate on PENDING classification
+        if: ${{ !cancelled() && inputs.pending_bill_id != '' }}
+        shell: bash
+        env:
+          PEND: ${{ steps.pendingcheck.outcome }}
+        run: |
+          if [ "$PEND" != "success" ]; then
+            echo "::error::등록 대기(PENDING) 판정 확인 실패. pending_check_report.txt 확인."
+            echo "::error::ERROR 로 판정됐다면 구조/endpoint 문제이고, AVAILABLE 이면 더 최근 의안으로 다시 확인하세요."
+            exit 1
+          fi
+          echo "등록 대기 판정 정상 — 본문 없음을 수집 실패로 세지 않습니다."
+
       - name: Gate on source verification
         if: ${{ !cancelled() }}
         shell: bash
@@ -158,6 +233,7 @@ jobs:
           VERIFY: ${{ steps.verify.outcome }}
         run: |
           if [ "$VERIFY" != "success" ]; then
-            echo "::error::소스 검증 실패(목록 실패 또는 의안 상세 부분실패). verify_report.txt 확인."
+            echo "::error::소스 검증 실패. verify_report.txt 의 '제안이유 available/pending/failed' 를 확인하세요."
+            echo "::error::failed>0 이면 구조·endpoint 문제이고, available=0 & pending>0 이면 표본이 전부 신규 의안입니다(--assembly-sample 상향)."
             exit 1
           fi
