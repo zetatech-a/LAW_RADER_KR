@@ -301,6 +301,131 @@ def test_malformed_entries_are_rejected(bad):
     assert posts[0].summary == []      # 발췌 폴백
 
 
+# --- 문장 길이(max_line_chars) 검증 ---
+
+
+def test_line_over_90_chars_is_rejected():
+    # 프롬프트로 '90자 이내'를 지시해도 지켜지지 않을 수 있다. 응답에서 다시 검사한다.
+    posts = [_bill(0)]
+    long_line = "가" * 91
+    cfg = _cfg(batch=AssemblyBatchConfig(retry_missing_once=False))
+    ok, _ = _run(
+        posts,
+        cfg,
+        reply=lambda req, n: _envelope(
+            json.dumps(
+                {"summaries": [{"bill_id": "PRC_0000",
+                                "summary": ["정상 문장임", long_line, "정상 문장임"]}]},
+                ensure_ascii=False,
+            )
+        ),
+    )
+    assert ok == 0
+    assert posts[0].summary == []      # 긴 줄 하나 때문에 그 의안 전체를 버린다
+
+
+def test_line_exactly_at_limit_is_accepted():
+    posts = [_bill(0)]
+    exact = "가" * 90
+    ok, _ = _run(
+        posts,
+        reply=lambda req, n: _envelope(
+            json.dumps(
+                {"summaries": [{"bill_id": "PRC_0000", "summary": [exact] * 3}]},
+                ensure_ascii=False,
+            )
+        ),
+    )
+    assert ok == 1
+    assert posts[0].summary == [exact] * 3
+
+
+def test_over_long_line_becomes_missing_and_is_re_requested_once():
+    # 길이 위반은 '누락'과 같은 취급 — 해당 ID 만 한 번 다시 요청한다.
+    posts = [_bill(0), _bill(1)]
+
+    def _long_then_ok(requested, n):
+        if n == 1:
+            return _envelope(
+                json.dumps(
+                    {
+                        "summaries": [
+                            {"bill_id": "PRC_0000", "summary": ["가" * 200] * 3},
+                            {"bill_id": "PRC_0001", "summary": _lines("PRC_0001")},
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return _reply(requested)
+
+    ok, rec = _run(posts, reply=_long_then_ok)
+    assert ok == 2
+    assert rec.calls[1] == ["PRC_0000"]          # 길이를 어긴 의안만 재요청
+    assert posts[0].summary == _lines("PRC_0000")
+
+
+@pytest.mark.parametrize(
+    "max_line_chars,length,expect_ok",
+    [
+        (30, 31, 0),     # 설정을 줄이면 더 짧은 줄도 거부된다
+        (30, 30, 1),
+        (200, 150, 1),   # 설정을 늘리면 90자 초과도 통과한다
+        (200, 201, 0),
+        (0, 500, 1),     # 0 = 길이 제한 없음
+    ],
+)
+def test_line_length_limit_follows_config(max_line_chars, length, expect_ok):
+    posts = [_bill(0)]
+    cfg = _cfg(
+        max_line_chars=max_line_chars,
+        batch=AssemblyBatchConfig(retry_missing_once=False),
+    )
+    ok, _ = _run(
+        posts,
+        cfg,
+        reply=lambda req, n: _envelope(
+            json.dumps(
+                {"summaries": [{"bill_id": "PRC_0000", "summary": ["가" * length] * 3}]},
+                ensure_ascii=False,
+            )
+        ),
+    )
+    assert ok == expect_ok
+
+
+def test_length_is_measured_after_cleanup():
+    # 공백 정리·목록표식 제거를 마친 '실제 발행될' 문자열로 재야 한다.
+    # 아래는 원문 96자지만 정리 후 90자라 통과해야 한다.
+    posts = [_bill(0)]
+    raw = "- " + "가" * 45 + "    " + "나" * 45
+    assert len(raw) > 90 and len(" ".join(raw[2:].split())) == 91
+    cleaned_ok = "- " + "가" * 45 + "    " + "나" * 44   # 정리 후 90자
+    ok, _ = _run(
+        posts,
+        reply=lambda req, n: _envelope(
+            json.dumps(
+                {"summaries": [{"bill_id": "PRC_0000", "summary": [cleaned_ok] * 3}]},
+                ensure_ascii=False,
+            )
+        ),
+    )
+    assert ok == 1
+    assert all(len(s) == 90 for s in posts[0].summary)
+
+
+def test_general_single_path_line_length_is_unchanged():
+    # 요구 3은 의안 배치 검증에만 적용한다. 일반 단건 요약의 기존 동작(길이를
+    # 프롬프트로만 지시하고 응답은 그대로 수용)을 바꾸지 않는다.
+    p = _general(0)
+    s = Summarizer(_cfg())
+    long_line = "가" * 300
+    s._generate = lambda prompt, deadline=None: _envelope(
+        json.dumps({"summary": [long_line]}, ensure_ascii=False)
+    )
+    assert s.summarize(p) == [long_line]
+
+
 def test_list_markers_are_stripped_from_valid_lines():
     posts = [_bill(0)]
     ok, _ = _run(

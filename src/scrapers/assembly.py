@@ -35,6 +35,16 @@ from .base import BaseScraper, clean_text
 
 log = logging.getLogger(__name__)
 
+# 상세 URL 폴백. 평상시엔 쓰이지 않는다 — Open API 응답의 LINK_URL(공식 상세 주소)이
+# 있으면 그것을 그대로 쓰고, 없을 때만 이 템플릿으로 URL 을 만든다.
+#
+# 주의: 이 경로는 라이브 확인이 필요하다. 의안정보시스템이 상세 경로를
+# /bill/billDetail.do 에서 /bill/bi/billDetailPage.do 로 옮겼다는 보고가 있고, 구 경로가
+# redirect 되지 않으면 LINK_URL 이 빈 레코드에서만 조용히 404 가 난다(다른 레코드는
+# 정상이라 전면 실패로 드러나지 않는다). 확인 전까지 기본값을 바꾸지 않는 이유는,
+# 현재 경로가 살아 있는데 성급히 바꾸면 멀쩡한 폴백까지 깨지기 때문이다.
+# 확인 후에는 코드 수정 없이 config.yaml 의 assembly 소스에 detail_url 로 덮어쓸 수 있다:
+#   detail_url: "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId={bill_id}"
 _DETAIL = "https://likms.assembly.go.kr/bill/billDetail.do?billId={bill_id}"
 
 # --- 제안이유 및 주요내용 수집 ---
@@ -135,6 +145,9 @@ class AssemblyBillScraper(BaseScraper):
         # AGE 는 계류의안 서비스의 요청인자가 아니므로 명시 설정된 경우에만 전송
         self.age = str(ex["age"]) if ex.get("age") not in (None, "") else ""
         self.page_size = int(ex.get("page_size", 100))
+        # LINK_URL 이 없는 레코드에만 쓰는 상세 URL 폴백. 사이트가 경로를 옮기면
+        # 코드 배포 없이 config 로 고칠 수 있게 덮어쓰기를 허용한다.
+        self.detail_url = str(ex.get("detail_url") or _DETAIL)
         self.api_key = os.environ.get("ASSEMBLY_API_KEY", "")
 
     def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
@@ -202,7 +215,11 @@ class AssemblyBillScraper(BaseScraper):
             title = f"{name} ({proposer})" if proposer else name
             # 공식 상세 URL(LINK_URL)이 있으면 사용, 없으면 billDetail 로 구성
             link = clean_text(self._first(row, _URL_FIELDS))
-            url = link if link.startswith("http") else _DETAIL.format(bill_id=bill_id)
+            url = (
+                link
+                if link.startswith("http")
+                else self.detail_url.format(bill_id=bill_id)
+            )
             posts.append(
                 Post(
                     source_key=self.key,

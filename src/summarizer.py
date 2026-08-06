@@ -165,6 +165,18 @@ def _model_unavailable_reason(resp) -> str:
     return ""
 
 
+def _prepare_body(cfg: LLMConfig, post: Post) -> str:
+    """일반 게시물의 요약 입력(공백 정규화 + 길이 절단). 대상이 아니면 빈 문자열.
+
+    Summarizer 인스턴스 없이도 '이 글이 요약 대상인가'를 물을 수 있도록 모듈 함수로
+    둔다(집계 로그가 같은 규칙을 쓰게 하기 위함).
+    """
+    body = " ".join((post.body or "").split())
+    if len(body) < cfg.min_body_chars:
+        return ""
+    return body[: cfg.max_input_chars]
+
+
 class SummaryUnavailable(RuntimeError):
     """호출은 됐지만 쓸 수 있는 요약을 얻지 못함(차단·잘림·스키마 위반).
 
@@ -362,10 +374,7 @@ class Summarizer:
 
     def _prepared_body(self, post: Post) -> str:
         """호출에 쓸 본문(공백 정규화 + 길이 절단). 요약 대상이 아니면 빈 문자열."""
-        body = " ".join((post.body or "").split())
-        if len(body) < self.cfg.min_body_chars:
-            return ""
-        return body[: self.cfg.max_input_chars]
+        return _prepare_body(self.cfg, post)
 
     def summarize(self, post: Post, deadline: float | None = None) -> list[str]:
         """게시글 1건을 요약해 문장 리스트를 돌려준다(실패 시 예외).
@@ -700,6 +709,27 @@ class Summarizer:
             if joined.strip():
                 return joined.strip()
         return ""
+
+
+def ai_target_count(cfg: LLMConfig, posts_by_source: dict[str, list[Post]]) -> int:
+    """요약 호출 대상이 될 수 있었던 글 수(집계 로그용).
+
+    상한(max_posts / max_bills)을 적용하기 전의 '대상' 수다 — 상한에 걸려 요약되지
+    못한 글도 발췌로 나가므로 폴백 건수에 포함되어야 한다. 판정 기준은 실제 요약
+    경로와 같은 것을 쓴다(여기서 따로 정의하면 로그와 동작이 어긋난다).
+    """
+    n = 0
+    for posts in posts_by_source.values():
+        for p in posts:
+            if p.details:
+                # 구조화 항목이 있는 글은 애초에 요약 경로를 타지 않는다.
+                continue
+            if p.source_key == ASSEMBLY_SOURCE_KEY:
+                # 의안 배치는 min_body_chars 를 쓰지 않는다(본문 유무만 본다).
+                n += 1 if (p.body or "").strip() else 0
+            elif _prepare_body(cfg, p):
+                n += 1
+    return n
 
 
 def summarize_posts(cfg: LLMConfig, posts_by_source: dict[str, list[Post]]) -> int:

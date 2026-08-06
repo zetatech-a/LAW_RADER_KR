@@ -315,6 +315,7 @@ def _parse(
         raise _Splittable(f"요청 스키마(summaries 배열)와 다름: {body[:120]}")
 
     lines_n = summarizer.cfg.lines
+    max_chars = summarizer.cfg.max_line_chars
     out: dict[str, list[str]] = {}
     rejected: set[str] = set()   # 중복으로 확인돼 통째로 버린 ID
     for row in rows:
@@ -337,19 +338,28 @@ def _parse(
             out.pop(bill_id, None)
             rejected.add(bill_id)
             continue
-        lines = _valid_lines(row.get("summary"), lines_n)
+        lines = _valid_lines(row.get("summary"), lines_n, max_chars)
         if lines is None:
-            log.info("의안 %s 요약이 %d줄 문자열 배열이 아님 — 버림", bill_id, lines_n)
+            log.info(
+                "의안 %s 요약이 %d줄·%d자 이내 문자열 배열이 아님 — 버림(재요청 대상)",
+                bill_id,
+                lines_n,
+                max_chars,
+            )
             continue
         out[bill_id] = lines
     return out
 
 
-def _valid_lines(raw, lines_n: int) -> list[str] | None:
-    """정확히 lines_n 개의 비지 않은 문장일 때만 리스트, 아니면 None.
+def _valid_lines(raw, lines_n: int, max_chars: int) -> list[str] | None:
+    """정확히 lines_n 개의, 설정 길이를 지킨 문장일 때만 리스트. 아니면 None.
 
-    한 문장이라도 문자열이 아니거나 정리 후 실질 내용이 없으면 그 의안 전체를 버린다.
-    절반만 실린 요약은 '3줄 요약' 라벨과 어긋나고, 무엇이 빠졌는지 수신자가 알 수 없다.
+    한 문장이라도 문자열이 아니거나, 정리 후 실질 내용이 없거나, max_line_chars 를
+    넘으면 그 의안 전체를 버린다(= 누락으로 돌려 한 번 재요청한다). 절반만 실린 요약은
+    '3줄 요약' 라벨과 어긋나고, 길이를 넘긴 줄은 메일 카드 레이아웃을 무너뜨린다.
+
+    길이는 프롬프트로 '지시'만 해서는 지켜지지 않으므로 응답에서 다시 검사한다.
+    max_chars <= 0 이면 길이 제한 없음.
     """
     if not isinstance(raw, list) or len(raw) != lines_n:
         return None
@@ -362,6 +372,9 @@ def _valid_lines(raw, lines_n: int) -> list[str] | None:
         # 글자도 숫자도 없는 줄("-", "•", "…" 등)은 빈 문장과 같다. 그대로 실으면
         # 메일에 내용 없는 불릿이 'AI 요약'으로 찍힌다.
         if not _HAS_CONTENT.search(s):
+            return None
+        # 길이는 공백 정리·목록표식 제거를 마친 '실제 발행될' 문자열로 잰다.
+        if max_chars > 0 and len(s) > max_chars:
             return None
         out.append(s)
     return out

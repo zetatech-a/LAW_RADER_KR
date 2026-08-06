@@ -26,7 +26,7 @@ from .models import Post
 from .notifier import missing_email_settings, send_digest, verify_smtp_login
 from .scrapers import build_scraper
 from .state import State
-from .summarizer import summarize_posts
+from .summarizer import ai_target_count, summarize_posts
 
 log = logging.getLogger("law_rader")
 
@@ -68,6 +68,10 @@ def run(argv=None) -> int:
     errors: list[str] = []
     selected = 0   # 실행 대상(활성+선택) 소스 수
     succeeded = 0  # 목록 수집에 성공한 소스 수
+    # 상세(enrich) 집계 — 실행 종료 시 한 번에 보고한다. 상세 수집이 전멸하면
+    # 메일은 제목·링크만 남은 채로 계속 나가므로, 로그를 보지 않으면 알아채기 어렵다.
+    detail_attempted = 0
+    detail_succeeded = 0
 
     for src in cfg.sources:
         if not src.enabled:
@@ -146,10 +150,16 @@ def run(argv=None) -> int:
 
         log.info("[%s] 신규 %d건 발견 — 상세 수집", src.key, len(new_posts))
         for p in new_posts:
+            detail_attempted += 1
             try:
                 scraper.enrich(p)
             except Exception as e:  # noqa: BLE001
                 log.warning("[%s] enrich 실패 %s: %s", src.key, p.url, e)
+            # 스크래퍼 대부분은 실패를 내부에서 삼키므로(한 건 실패가 나머지를 막지
+            # 않도록) 예외 유무가 아니라 '무언가 채워졌는지'로 성공을 센다.
+            # verify_sources.py 의 enrich_ok 와 같은 기준이다.
+            if p.body or p.details or p.attachments:
+                detail_succeeded += 1
 
         # 신규(초과분 포함)는 '메일 성공 후'에만 seen 처리하도록 보류한다.
         pending_seen.append((src.key, all_new_ids))
@@ -201,6 +211,9 @@ def run(argv=None) -> int:
     elif args.no_llm:
         log.info("--no-llm: LLM 요약 생략")
 
+    # 실행 집계. 발송 직전에 남겨 실패 여부와 무관하게 항상 기록되게 한다.
+    _log_run_summary(cfg, posts_by_source, detail_attempted, detail_succeeded)
+
     if args.dry_run:
         _print_dry_run(posts_by_source)
         log.info("--dry-run: 메일 미발송, state 미저장")
@@ -222,6 +235,44 @@ def run(argv=None) -> int:
     if errors:
         log.warning("일부 소스 오류: %s", "; ".join(errors))
     return 0
+
+
+def _log_run_summary(
+    cfg,
+    posts_by_source: dict[str, list[Post]],
+    detail_attempted: int,
+    detail_succeeded: int,
+) -> None:
+    """실행 종료 집계: 상세 수집과 AI 요약의 시도/성공/실패 건수.
+
+    상세 수집 성공률 0% 는 파서·마크업이 통째로 어긋났다는 뜻이라 ERROR 로 남긴다.
+    다만 발송은 막지 않는다 — 본문 없이라도 제목·링크가 담긴 알림이 나가는 편이
+    알림 자체가 끊기는 것보다 낫다(전체 설계 원칙).
+    """
+    detail_failed = detail_attempted - detail_succeeded
+    log.info(
+        "상세 수집 집계 — 시도 %d건 / 성공 %d건 / 실패 %d건",
+        detail_attempted,
+        detail_succeeded,
+        detail_failed,
+    )
+    if detail_attempted > 0 and detail_succeeded == 0:
+        log.error(
+            "상세 수집 성공률 0%% (시도 %d건 전부 실패) — 파서/마크업 확인 필요. "
+            "메일은 제목·링크만으로 계속 발송합니다. debug/ 덤프를 확인하세요.",
+            detail_attempted,
+        )
+
+    targets = ai_target_count(cfg.llm, posts_by_source)
+    summarized = sum(
+        1 for posts in posts_by_source.values() for p in posts if p.summary
+    )
+    log.info(
+        "AI 요약 집계 — 대상 %d건 / 요약 %d건 / 발췌 폴백 %d건",
+        targets,
+        summarized,
+        max(targets - summarized, 0),
+    )
 
 
 def _print_dry_run(posts_by_source: dict[str, list[Post]]) -> None:

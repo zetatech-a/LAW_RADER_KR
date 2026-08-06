@@ -11,6 +11,10 @@ on:
         description: "특정 소스만 검증(쉼표구분 key, 비우면 전체)"
         required: false
         default: ""
+      capture_bill_id:
+        description: "의안 상세 fixture 캡처용 BILL_ID(비우면 캡처 생략)"
+        required: false
+        default: ""
 
 jobs:
   verify:
@@ -33,6 +37,16 @@ jobs:
           python scripts/verify_sources.py --only "${{ github.event.inputs.only }}" \
             | tee verify_report.txt
 
+      # 의안 상세('제안이유 및 주요내용') 수집 경로의 라이브 검증.
+      # 개발 환경에서 likms.assembly.go.kr 접속이 막힌 경우 여기서 한 번 캡처해
+      # tests/fixtures/ 에 커밋하면 이후에는 네트워크 없이 회귀 테스트가 돈다.
+      # 결과 JSON 에 최종 URL·redirect·form 필드명·CSRF 전달 방식이 기록된다.
+      - name: Capture assembly detail fixture
+        if: inputs.capture_bill_id != ''
+        run: |
+          python scripts/capture_assembly_fixture.py \
+            --bill-id "${{ inputs.capture_bill_id }}" | tee capture_report.txt
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7
@@ -40,6 +54,8 @@ jobs:
           name: verify-results
           path: |
             verify_report.txt
+            capture_report.txt
             debug/
+            tests/fixtures/
           if-no-files-found: warn
           retention-days: 7
