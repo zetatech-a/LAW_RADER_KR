@@ -36,17 +36,22 @@ from .base import BaseScraper, clean_text
 
 log = logging.getLogger(__name__)
 
-# 상세 URL 폴백. 평상시엔 쓰이지 않는다 — Open API 응답의 LINK_URL(공식 상세 주소)이
-# 있으면 그것을 그대로 쓰고, 없을 때만 이 템플릿으로 URL 을 만든다.
+# 상세 URL 템플릿.
 #
-# 주의: 이 경로는 라이브 확인이 필요하다. 의안정보시스템이 상세 경로를
-# /bill/billDetail.do 에서 /bill/bi/billDetailPage.do 로 옮겼다는 보고가 있고, 구 경로가
-# redirect 되지 않으면 LINK_URL 이 빈 레코드에서만 조용히 404 가 난다(다른 레코드는
-# 정상이라 전면 실패로 드러나지 않는다). 확인 전까지 기본값을 바꾸지 않는 이유는,
-# 현재 경로가 살아 있는데 성급히 바꾸면 멀쩡한 폴백까지 깨지기 때문이다.
-# 확인 후에는 코드 수정 없이 config.yaml 의 assembly 소스에 detail_url 로 덮어쓸 수 있다:
-#   detail_url: "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId={bill_id}"
-_DETAIL = "https://likms.assembly.go.kr/bill/billDetail.do?billId={bill_id}"
+# 2026-08 라이브 확인 결과:
+#   - Open API 의 LINK_URL 은 아직 구 경로 /bill/billDetail.do 를 돌려주는데, 최신
+#     의안에서 그 경로는 "해당 의안 정보가 존재하지 않습니다" 를 응답한다(redirect 없음).
+#   - 현재 경로 /bill/bi/billDetailPage.do 는 HTTP 200 이다.
+# 그래서 LINK_URL 을 그대로 믿지 않고 BILL_ID 로 현재 경로를 다시 만든다(canonicalize).
+# config.yaml 의 assembly 소스에 detail_url 로 덮어쓸 수 있다.
+_DETAIL = "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId={bill_id}"
+
+# LINK_URL 이 이 경로들로 오면 무시하고 위 템플릿으로 다시 만든다. 경로 목록을 좁게
+# 유지하는 이유: 우리가 모르는 다른 상세 경로(예: 예산안·청원 전용)가 오면 그것은
+# 그대로 써야 하기 때문이다. '아는 죽은 경로'만 갈아끼운다.
+_LEGACY_DETAIL_PATHS = frozenset(
+    {"/bill/billdetail.do", "/bill/jsp/billdetail.jsp"}
+)
 
 # --- 제안이유 및 주요내용 수집 ---
 #
@@ -69,6 +74,22 @@ _ALLOWED_HOST = "likms.assembly.go.kr"
 
 # 디버그 덤프 파일명에 bill_id 를 그대로 쓰면 경로 조작이 될 수 있다.
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]")
+
+def _canonical_detail_url(link: str, bill_id: str, template: str) -> str:
+    """상세 URL 을 현재 유효한 경로로 맞춘다.
+
+    Open API 의 LINK_URL 이 죽은 구 경로(/bill/billDetail.do)를 돌려주므로, 그 경로가
+    오면 BILL_ID 로 현재 경로를 다시 만든다. 그 외의 LINK_URL 은 공식 값이므로
+    존중한다 — 우리가 모르는 상세 경로를 임의로 갈아끼우면 오히려 깨진다.
+    """
+    link = (link or "").strip()
+    if not link.lower().startswith("http"):
+        return template.format(bill_id=bill_id)
+    parts = urlparse(link)
+    if parts.hostname == _ALLOWED_HOST and parts.path.lower() in _LEGACY_DETAIL_PATHS:
+        return template.format(bill_id=bill_id)
+    return link
+
 
 def _allowed_action(url: str) -> bool:
     """폼 action 이 의안정보시스템의 HTTPS 주소인지."""
@@ -242,13 +263,9 @@ class AssemblyBillScraper(BaseScraper):
             seen.add(bill_id)
             proposer = clean_text(self._first(row, _PROPOSER_FIELDS))
             title = f"{name} ({proposer})" if proposer else name
-            # 공식 상세 URL(LINK_URL)이 있으면 사용, 없으면 billDetail 로 구성
+            # LINK_URL 이 죽은 구 경로면 BILL_ID 로 현재 경로를 다시 만든다.
             link = clean_text(self._first(row, _URL_FIELDS))
-            url = (
-                link
-                if link.startswith("http")
-                else self.detail_url.format(bill_id=bill_id)
-            )
+            url = _canonical_detail_url(link, bill_id, self.detail_url)
             posts.append(
                 Post(
                     source_key=self.key,
@@ -400,11 +417,22 @@ class AssemblyBillScraper(BaseScraper):
         return _extract_summary(BeautifulSoup(html, "lxml")), html
 
     def _summary_form(self, soup: BeautifulSoup, post: Post):
-        """제안이유를 돌려줄 것으로 보이는 폼과 그 action URL.
+        """제안이유를 돌려줄 것으로 보이는 폼과 그 action URL. 없으면 None.
 
-        점수가 0 인(= 이 의안과의 연관 근거가 하나도 없는) 폼에는 보내지 않는다.
-        상세 페이지에는 검색·통계 등 무관한 폼이 함께 있고, 그런 폼에 hidden input 을
-        되쏘면 엉뚱한 요청이 된다.
+        **폼 이름/id/action 에 'summary' 가 있을 때만 보낸다.**
+
+        2026-08 라이브 확인에서 이 조건이 필요하다는 것이 드러났다. 상세 페이지에는
+        id="form" 인 기본 GET 폼이 있고 그 안에 billId hidden 이 들어 있다. '의안 ID 를
+        들고 있다'만으로 연관 폼이라 판정했더니 그 기본 폼을 골랐고, 상세 URL 에 이미
+        billId 가 있는 채로 같은 파라미터를 또 붙여 billId 가 중복되면서 서버가 HTTP 400
+        을 돌려줬다.
+
+        중복 파라미터를 지우거나 GET 을 POST 로 바꿔 '통과시키는' 방향은 택하지 않는다 —
+        애초에 그 폼이 제안이유 조회용이라는 근거가 없기 때문이다. 근거 없는 요청은
+        보내지 않는 편이 낫다(요청이 없으면 본문이 비고, 메일은 제목·링크로 나간다).
+
+        실제 계약은 scripts/capture_assembly_network.py 로 브라우저 XHR 을 캡처해
+        확정한다. 그 전까지 여기에 endpoint 를 추측해 넣지 않는다.
         """
         best = None
         best_score = 0
@@ -412,13 +440,14 @@ class AssemblyBillScraper(BaseScraper):
             action = urljoin(post.url, (form.get("action") or "").strip())
             if not _allowed_action(action):
                 continue
-            hidden = _hidden_inputs(form)
             blob = " ".join(
                 (form.get("id") or "", form.get("name") or "", action)
             ).lower()
-            score = 0
-            if "summary" in blob:
-                score += 4
+            if "summary" not in blob:
+                continue   # 근거 없는 폼에는 보내지 않는다
+            # 'summary' 폼이 여럿이면 이 의안과의 연관이 뚜렷한 쪽을 고른다.
+            hidden = _hidden_inputs(form)
+            score = 1
             if post.post_id and post.post_id in hidden.values():
                 score += 2
             if any(k.lower() in _BILL_ID_FIELDS for k in hidden):

@@ -421,28 +421,83 @@ def test_detail_url_fallback_is_configurable(monkeypatch):
     )
 
 
-def test_link_url_from_api_still_wins_over_fallback(monkeypatch):
-    # 공식 LINK_URL 이 있으면 폴백 템플릿을 쓰지 않는다(경로 변경에 자동으로 따라감).
+def _assembly_urls(monkeypatch, rows, extra=None):
+    """rows 로 fetch_list 를 돌려 생성된 상세 URL 목록을 돌려준다."""
     from src.scrapers.assembly import AssemblyBillScraper
 
     monkeypatch.setenv("ASSEMBLY_API_KEY", "dummy")
+    base = {"api_service": "svc"}
+    base.update(extra or {})
     src = SourceConfig(
         key="assembly_bill", name="a", type="assembly_bill",
-        list_url="https://likms.assembly.go.kr/bill/",
-        extra={"api_service": "svc", "detail_url": "https://example.com/{bill_id}"},
+        list_url="https://likms.assembly.go.kr/bill/", extra=base,
     )
     sc = AssemblyBillScraper(src, fetcher=None)
-    official = "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A1"
 
     class _R:
         def json(self):
-            return {"svc": [{"head": []}, {"row": [
-                {"BILL_ID": "PRC_A1", "BILL_NAME": "테스트법률안", "LINK_URL": official}
-            ]}]}
+            return {"svc": [{"head": []}, {"row": rows}]}
 
     class _F:
         def get(self, *a, **k):
             return _R()
 
     sc.fetcher = _F()
-    assert sc.fetch_list(30, page=1)[0].url == official
+    return [p.url for p in sc.fetch_list(30, page=1)]
+
+
+_CANON = "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A1"
+
+
+def test_default_detail_url_is_current_path(monkeypatch):
+    # LINK_URL 이 없으면 현재 경로(/bill/bi/billDetailPage.do)로 만든다.
+    urls = _assembly_urls(monkeypatch, [{"BILL_ID": "PRC_A1", "BILL_NAME": "법률안"}])
+    assert urls == [_CANON]
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://likms.assembly.go.kr/bill/billDetail.do?billId=PRC_A1",
+        "https://likms.assembly.go.kr/bill/billDetail.do?billId=PRC_A1&ageFrom=22",
+        "https://likms.assembly.go.kr/bill/BillDetail.do?billId=PRC_A1",   # 대소문자
+        "https://likms.assembly.go.kr/bill/jsp/BillDetail.jsp?bill_id=PRC_A1",
+    ],
+)
+def test_dead_legacy_link_url_is_canonicalized(monkeypatch, link):
+    # 라이브 확인(2026-08): Open API 의 LINK_URL 은 아직 구 경로를 주는데, 최신 의안에서
+    # 그 경로는 "해당 의안 정보가 존재하지 않습니다" 를 응답한다. BILL_ID 로 다시 만든다.
+    urls = _assembly_urls(
+        monkeypatch, [{"BILL_ID": "PRC_A1", "BILL_NAME": "법률안", "LINK_URL": link}]
+    )
+    assert urls == [_CANON]
+
+
+def test_current_path_link_url_is_kept(monkeypatch):
+    # 이미 현재 경로면 그대로 둔다(쿼리 파라미터도 보존).
+    link = _CANON + "&ageFrom=22"
+    urls = _assembly_urls(
+        monkeypatch, [{"BILL_ID": "PRC_A1", "BILL_NAME": "법률안", "LINK_URL": link}]
+    )
+    assert urls == [link]
+
+
+def test_unknown_link_url_path_is_respected(monkeypatch):
+    # 우리가 모르는 상세 경로(예산안·청원 전용 등)는 공식 값이므로 존중한다.
+    link = "https://likms.assembly.go.kr/bill/bi/budget/budgetDetail.do?billId=PRC_A1"
+    urls = _assembly_urls(
+        monkeypatch, [{"BILL_ID": "PRC_A1", "BILL_NAME": "법률안", "LINK_URL": link}]
+    )
+    assert urls == [link]
+
+
+def test_detail_url_override_applies_to_canonicalized_links(monkeypatch):
+    # config 로 덮어쓴 템플릿이 canonicalize 결과에도 적용된다.
+    tmpl = "https://likms.assembly.go.kr/bill/bi/other.do?billId={bill_id}"
+    urls = _assembly_urls(
+        monkeypatch,
+        [{"BILL_ID": "PRC_A1", "BILL_NAME": "법률안",
+          "LINK_URL": "https://likms.assembly.go.kr/bill/billDetail.do?billId=PRC_A1"}],
+        extra={"detail_url": tmpl},
+    )
+    assert urls == ["https://likms.assembly.go.kr/bill/bi/other.do?billId=PRC_A1"]

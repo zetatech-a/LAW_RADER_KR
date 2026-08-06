@@ -4,6 +4,12 @@ name: Verify sources (live)
 # 대상 사이트 파서/페이지 파라미터가 실제로 동작하는지 GitHub 러너에서 확인한다.
 # 메일을 보내지 않고 state 도 바꾸지 않으며, 결과 로그와 debug/ 원본 HTML 을
 # 아티팩트로 업로드한다. Actions 탭에서 "Run workflow" 로 수동 실행.
+#
+# capture_bill_id 또는 capture_bill_url 을 넣으면 '의안 캡처 모드'가 켜진다:
+#   1) Playwright 로 브라우저를 띄워 심사정보 탭이 실제로 보내는 XHR 을 캡처(주 진단)
+#   2) requests 기반 fixture 캡처(보조 진단 — 초기 HTML 만 보는 경로)
+#   3) fixture 회귀 테스트
+# 제안이유/주요내용을 어디에서도 찾지 못하면 job 을 exit 2 로 실패시킨다.
 on:
   workflow_dispatch:
     inputs:
@@ -12,7 +18,7 @@ on:
         required: false
         default: ""
       capture_bill_id:
-        description: "의안 상세 fixture 캡처용 BILL_ID(비우면 캡처 생략)"
+        description: "의안 상세 캡처용 BILL_ID(비우면 캡처 생략)"
         required: false
         default: ""
       capture_bill_url:
@@ -23,6 +29,9 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      # 캡처 모드 여부를 한 곳에서 정한다(각 step 의 if 조건이 흩어지지 않도록).
+      CAPTURE_MODE: ${{ (inputs.capture_bill_id != '' || inputs.capture_bill_url != '') && 'on' || 'off' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -34,9 +43,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pytest
 
+      # Playwright 는 진단 전용이다. requirements.txt(생산 의존성)에는 넣지 않고
+      # 캡처 모드에서만 설치한다 — 평소 검증 실행이 느려지지 않게.
+      - name: Install Playwright (capture mode only)
+        if: ${{ env.CAPTURE_MODE == 'on' }}
+        run: |
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+
       # 입력값은 env 로 넘긴다. run 블록에 ${{ }} 를 직접 끼워 넣으면 입력 문자열이
       # 셸 스크립트로 해석될 수 있다(script injection).
       - name: Run verification
+        id: verify
+        continue-on-error: true
         shell: bash
         env:
           ASSEMBLY_API_KEY: ${{ secrets.ASSEMBLY_API_KEY }}
@@ -44,19 +63,35 @@ jobs:
         run: |
           python scripts/verify_sources.py --only "$ONLY" | tee verify_report.txt
 
-      # 의안 상세('제안이유 및 주요내용') 수집 경로의 라이브 검증.
-      # 개발 환경에서 likms.assembly.go.kr 접속이 막힌 경우 여기서 한 번 캡처해
-      # tests/fixtures/ 에 커밋하면 이후에는 네트워크 없이 회귀 테스트가 돈다.
-      # 결과 JSON 에 최종 URL·redirect·form 필드명·CSRF 전달 방식이 기록된다.
+      # ── 주 진단: 브라우저가 실제로 보내는 XHR 캡처 ──────────────────────────
       #
-      # 스크립트는 제안이유를 확보하지 못하면 exit 2 로 끝난다. shell: bash 가
-      # pipefail 을 켜므로 tee 를 거쳐도 그 종료코드가 그대로 job 실패로 이어진다.
-      #
-      # 앞 단계(verify_sources)가 실패해도 캡처는 시도한다 — 다른 소스가 깨진 것과
-      # 의안 상세 확인은 별개이고, 이 워크플로를 도는 목적이 캡처인 경우가 많다.
-      - name: Capture assembly detail fixture
+      # 초기 HTML 에는 제안이유가 없고 심사정보 탭을 JS 가 채운다. requests 로는 그
+      # endpoint 를 알 수 없으므로 브라우저를 띄워 그대로 기록한다.
+      # requests 기반 캡처보다 **먼저** 돌린다 — 이쪽이 계약을 확정하는 도구다.
+      - name: Capture assembly network (Playwright)
+        id: netcapture
+        if: ${{ env.CAPTURE_MODE == 'on' && !cancelled() }}
+        continue-on-error: true     # 아티팩트를 남기고 마지막 게이트에서 실패시킨다
+        shell: bash
+        env:
+          BILL_ID: ${{ inputs.capture_bill_id }}
+          BILL_URL: ${{ inputs.capture_bill_url }}
+        run: |
+          if [ -n "$BILL_URL" ]; then
+            python scripts/capture_assembly_network.py --url "$BILL_URL" \
+              | tee network_capture_report.txt
+          else
+            python scripts/capture_assembly_network.py --bill-id "$BILL_ID" \
+              | tee network_capture_report.txt
+          fi
+
+      # ── 보조 진단: requests 기반 fixture 캡처 ────────────────────────────────
+      # 초기 HTML·폼 구조를 기록한다. 현재는 실패가 예상되지만(제안이유가 XHR 로 옴)
+      # 초기 HTML 스냅샷 자체가 비교 자료가 된다.
+      - name: Capture assembly fixture (requests)
         id: capture
-        if: ${{ !cancelled() && (inputs.capture_bill_url != '' || inputs.capture_bill_id != '') }}
+        if: ${{ env.CAPTURE_MODE == 'on' && !cancelled() }}
+        continue-on-error: true
         shell: bash
         env:
           BILL_ID: ${{ inputs.capture_bill_id }}
@@ -70,11 +105,10 @@ jobs:
               | tee capture_report.txt
           fi
 
-      # 캡처 직후, 방금 받은 실제 응답으로 상세 수집 경로를 검증한다.
-      # 캡처가 성공했다면 fixture 가 있으므로 skip 이 0 이어야 한다 — skip 이 남으면
-      # fixture 가 제대로 생성되지 않은 것이므로 실패로 잡는다.
+      # 캡처가 성공했다면 fixture 가 있으므로 skip 이 0 이어야 한다.
       - name: Test against captured fixture
         if: ${{ steps.capture.outcome == 'success' }}
+        continue-on-error: true
         shell: bash
         run: |
           python -m pytest tests/test_assembly_fixture.py -q -rs \
@@ -85,6 +119,7 @@ jobs:
           fi
 
       # 실패해도 진단 자료는 반드시 남긴다(가장 필요한 순간이다).
+      # 아티팩트에는 sanitize 된 HAR 만 들어간다 — 원본 HAR 은 스크립트가 지운다.
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7
@@ -92,9 +127,37 @@ jobs:
           name: verify-results
           path: |
             verify_report.txt
+            network_capture_report.txt
             capture_report.txt
             fixture_test_report.txt
             debug/
             tests/fixtures/
           if-no-files-found: warn
           retention-days: 7
+
+      # ── 최종 판정 ────────────────────────────────────────────────────────────
+      # 업로드 뒤에 둔다. 여기서 실패해도 아티팩트는 이미 올라가 있다.
+      - name: Gate on capture result
+        if: ${{ !cancelled() && env.CAPTURE_MODE == 'on' }}
+        shell: bash
+        env:
+          NET: ${{ steps.netcapture.outcome }}
+        run: |
+          echo "Playwright 네트워크 캡처 결과: $NET"
+          if [ "$NET" != "success" ]; then
+            echo "::error::제안이유/주요내용을 렌더링 HTML·XHR 응답 어디에서도 찾지 못했습니다."
+            echo "::error::verify-results 아티팩트의 assembly_xhr_manifest.json / assembly_js_report.txt 를 확인하세요."
+            exit 2
+          fi
+          echo "제안이유/주요내용 확보 — assembly_xhr_manifest.json 의 요청이 확정할 계약입니다."
+
+      - name: Gate on source verification
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          VERIFY: ${{ steps.verify.outcome }}
+        run: |
+          if [ "$VERIFY" != "success" ]; then
+            echo "::error::소스 검증 실패(목록 실패 또는 의안 상세 부분실패). verify_report.txt 확인."
+            exit 1
+          fi

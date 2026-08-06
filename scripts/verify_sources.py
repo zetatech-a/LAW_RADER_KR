@@ -27,6 +27,14 @@ from src.scrapers import build_scraper
 OK = "✅"
 WARN = "⚠️"
 FAIL = "❌"
+# 목록은 됐지만 상세가 안 된 상태. '전체 성공'과 구분해야 한다 — 의안은 상세 본문이
+# 곧 요약 입력이라, 목록만 되고 본문이 비면 메일에 제목·링크만 나간다.
+PARTIAL = "🟠"
+
+# 상세 본문(body)이 반드시 있어야 하는 소스.
+# 다른 소스는 상세가 PDF 직접 다운로드(fss_mgmt_notice)거나 JS 팝업(better_reply)이라
+# body 가 비는 것이 정상이므로 기존 판정 기준(본문·첨부·구조화항목 중 하나)을 유지한다.
+_BODY_REQUIRED = {"assembly_bill"}
 
 
 def _sample(posts, n=5):
@@ -87,15 +95,31 @@ def verify_source(scraper, list_limit, do_enrich):
             # details 도 '상세 수집 성공'으로 센다.
             n_details = len(first.details)
             detail_note = f" / 구조화 항목 {n_details}개" if n_details else ""
+            report["body_len"] = body_len
             report["enrich"] = (
                 f"본문 {body_len}자 / 첨부 {n_att}개(다운로드 {n_dl}개){detail_note}"
             )
             report["enrich_ok"] = body_len > 0 or n_att > 0 or n_details > 0
         except Exception as e:  # noqa: BLE001
+            report["body_len"] = 0
             report["enrich"] = f"{WARN} enrich 실패: {e}"
             report["enrich_ok"] = False
 
+        # 본문이 필수인 소스는 '목록만 성공'을 전체 성공으로 표시하지 않는다.
+        if key in _BODY_REQUIRED and report.get("body_len", 0) == 0:
+            report["status"] = PARTIAL
+            report["detail"] = (
+                f"목록 수집 성공({len(page1)}건) / 상세 본문 0자 — 상세 수집 실패. "
+                "브라우저 XHR 캡처(scripts/capture_assembly_network.py)로 실제 endpoint "
+                "계약을 확인하세요."
+            )
+            report["list_ok"] = True
+            report["detail_ok"] = False
+            return report, page1
+
     report["status"] = OK
+    report["list_ok"] = True
+    report["detail_ok"] = report.get("enrich_ok", True)
     return report, page1
 
 
@@ -147,12 +171,22 @@ def main(argv=None):
     print("=" * 70)
     for r in reports:
         pg = r.get("page1_count", "-")
-        print(f"  {r['status']} {r['key']:<20} 목록 {pg}건  {r.get('pagination','')}")
+        line = f"  {r['status']} {r['key']:<20} 목록 {pg}건  {r.get('pagination','')}"
+        if r["status"] == PARTIAL:
+            line += f"  [상세 본문 {r.get('body_len', 0)}자]"
+        print(line)
 
     n_fail = sum(1 for r in reports if r["status"] == FAIL)
+    n_partial = sum(1 for r in reports if r["status"] == PARTIAL)
     print(f"\n실패(수정 필요) 소스: {n_fail}/{len(reports)}")
+    if n_partial:
+        # 목록만 되는 상태를 초록불로 넘기면, 메일에 제목·링크만 실리는 채로 운영이 계속된다.
+        print(f"부분 실패(목록 성공 / 상세 실패) 소스: {n_partial}/{len(reports)}")
+        for r in reports:
+            if r["status"] == PARTIAL:
+                print(f"  {PARTIAL} {r['key']}: {r.get('detail', '')}")
     print("원본 HTML 은 debug/ 에 저장되었습니다. 0건 소스는 이 파일로 셀렉터를 확인하세요.")
-    return 1 if n_fail else 0
+    return 1 if (n_fail or n_partial) else 0
 
 
 if __name__ == "__main__":

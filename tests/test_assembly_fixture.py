@@ -207,6 +207,36 @@ def test_fixture_presence_is_reported():
 # --- 실제 응답 기반 검증 ---
 
 
+def test_no_raw_har_is_committed():
+    """원본 HAR 은 쿠키·토큰을 그대로 담는다 — 저장소에 들어오면 안 된다.
+
+    fixture 유무와 무관하게 항상 검사한다(캡처가 중단되면 남을 수 있다).
+    """
+    stray = list(FIXTURES.glob("*.raw.har"))
+    assert not stray, f"원본 HAR 이 남아 있습니다(삭제 필요): {[p.name for p in stray]}"
+
+
+def test_committed_fixture_files_contain_no_session_values():
+    """tests/fixtures/ 의 **모든** 텍스트 파일에 세션값이 없어야 한다.
+
+    HTML·meta 뿐 아니라 sanitize 된 HAR·XHR 본문·콘솔 로그까지 함께 본다. 캡처
+    아티팩트가 늘어나도 이 검사는 자동으로 따라간다.
+    """
+    checked = 0
+    for path in sorted(FIXTURES.iterdir()):
+        if not path.is_file() or path.name == "README.md":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        checked += 1
+        for marker in _MUST_NOT_APPEAR:
+            assert marker not in text, f"{path.name} 에 세션값이 남아 있음: {marker}"
+    # 파일이 없으면(미캡처) 검사할 것이 없다 — 그 사실은 다른 테스트가 드러낸다.
+    assert checked >= 0
+
+
 @_SKIP
 def test_fixture_and_meta_contain_no_secret_values():
     """fixture·meta 어디에도 토큰/세션 '값'이 남아 있으면 안 된다."""

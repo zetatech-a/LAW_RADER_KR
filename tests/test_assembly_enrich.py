@@ -285,8 +285,33 @@ def test_unrelated_form_is_not_submitted(tmp_path, monkeypatch):
     assert p.body == ""
 
 
-def test_form_matched_by_bill_id_value_without_summary_name(tmp_path, monkeypatch):
-    # 폼 이름에 'summary' 가 없어도 이 의안 ID 를 들고 있으면 연관 폼으로 본다.
+def test_default_page_form_with_bill_id_is_not_submitted(tmp_path, monkeypatch):
+    """라이브 회귀(2026-08): id="form" 인 기본 GET 폼에 되쏘면 안 된다.
+
+    상세 페이지에는 billId hidden 을 가진 기본 폼이 있는데, 상세 URL 자체에도 billId 가
+    있어서 그 폼을 그대로 보내면 billId 가 중복되고 서버가 HTTP 400 을 돌려준다.
+    '의안 ID 를 들고 있다'는 것만으로는 제안이유 조회용 폼이라는 근거가 되지 않는다.
+    """
+    monkeypatch.chdir(tmp_path)
+    page = f"""
+    <html><body>
+      <form id="form" action="/bill/bi/billDetailPage.do" method="get">
+        <input type="hidden" name="billId" value="{_BILL_ID}"/>
+        <input type="hidden" name="ageFrom" value="22"/>
+      </form>
+      <div id="tab_billInfo_sect"></div>
+    </body></html>"""
+    f = _Fetcher(page, _POST_RESULT)
+    p = _post()
+    _scraper(f).enrich(p)
+
+    assert f.posts == []
+    assert len(f.gets) == 1        # 상세 GET 1회뿐 — 후속 요청 없음
+    assert p.body == ""            # 본문은 비고, 메일은 제목·링크로 나간다
+
+
+def test_form_with_bill_id_but_no_summary_name_is_not_submitted(tmp_path, monkeypatch):
+    # 이름·action 어디에도 summary 근거가 없으면 의안 ID 를 들고 있어도 보내지 않는다.
     monkeypatch.chdir(tmp_path)
     page = f"""
     <html><body>
@@ -297,7 +322,28 @@ def test_form_matched_by_bill_id_value_without_summary_name(tmp_path, monkeypatc
     f = _Fetcher(page, _POST_RESULT)
     p = _post()
     _scraper(f).enrich(p)
+    assert f.posts == []
+    assert p.body == ""
+
+
+def test_summary_named_form_is_still_submitted(tmp_path, monkeypatch):
+    # 대조군: action 에 summary 근거가 있으면 예전처럼 보낸다.
+    monkeypatch.chdir(tmp_path)
+    page = """
+    <html><body>
+      <form id="form" action="/bill/bi/billDetailPage.do" method="get">
+        <input type="hidden" name="billId" value="PRC_A2Z5C1D0"/>
+      </form>
+      <form name="popup" action="/bill/summaryPopup.do" method="post">
+        <input type="hidden" name="billId" value=""/>
+      </form>
+    </body></html>"""
+    f = _Fetcher(page, _POST_RESULT)
+    p = _post()
+    _scraper(f).enrich(p)
+
     assert len(f.posts) == 1
+    assert f.posts[0]["url"] == "https://likms.assembly.go.kr/bill/summaryPopup.do"
     assert "예치금 분리보관" in p.body
 
 

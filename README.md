@@ -23,16 +23,24 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 목록 파서는 실제 사이트 HTML/응답으로 검증되어 제목·URL·날짜·본문·첨부를 수집합니다.
 (`fss_mgmt_notice` 는 상세가 PDF 직접 다운로드, `better_reply` 는 상세가 JS 함수라 목록 링크로 안내)
 
-> ⚠️ **미검증 항목**: 계류의안의 **상세 페이지 수집('제안이유 및 주요내용')** 은 아직 실제 응답으로 검증되지 않았습니다.
-> 상세 HTML 에서 폼을 발견해 되쏘는 방식이라 실제 마크업 확인이 필요한데, 개발 환경에서 `likms.assembly.go.kr` 접속이 차단되어 캡처하지 못했습니다.
-> 아래를 한 번 실행해 `tests/fixtures/` 를 커밋하면 검증이 완료되고 `tests/test_assembly_fixture.py` 의 skip 이 사라집니다.
+> ⚠️ **미해결**: 계류의안의 **상세 수집('제안이유 및 주요내용')은 현재 동작하지 않습니다.**
+>
+> 2026-08 라이브 실행으로 확인된 사실:
+> - 목록(Open API)과 페이지네이션은 정상입니다.
+> - Open API 의 `LINK_URL` 은 구 경로 `/bill/billDetail.do` 를 주는데, 최신 의안에서 그 경로는 "해당 의안 정보가 존재하지 않습니다"를 응답합니다(redirect 없음). → `BILL_ID` 로 현재 경로 `/bill/bi/billDetailPage.do` 로 교정하도록 고쳤습니다.
+> - 상세페이지 **초기 HTML 에는 제안이유가 없습니다.** `pre#prntSummary`·`#summaryContentDiv` 도 없고, 심사정보 탭(`#tab_billInfo_sect`)이 빈 채로 있다가 JS(`app.Tab.tabClick`)가 채웁니다.
+> - HTML 폼을 되쏘는 방식은 실패했습니다. 기본 GET 폼(`id="form"`)을 잘못 골라 `billId` 가 중복되면서 HTTP 400 이 났습니다. → 근거 없는 폼에는 **아예 요청을 보내지 않도록** 조건을 좁혔습니다.
+>
+> 실제 endpoint 는 **추측하지 않고** 브라우저가 보내는 XHR 을 캡처해 확정합니다:
 >
 > ```bash
-> python scripts/capture_assembly_fixture.py --bill-id PRC_XXXXXXXXXXXX
+> python -m pip install playwright && python -m playwright install --with-deps chromium
+> python scripts/capture_assembly_network.py --bill-id PRC_XXXXXXXXXXXX
 > ```
 >
-> GitHub Actions 에서는 **Verify sources (live)** 워크플로의 `capture_bill_id`(또는 `capture_bill_url`) 입력으로 같은 일을 할 수 있습니다.
-> 캡처가 끝날 때까지 의안 본문은 비어 있을 수 있고, 그 경우 메일에는 제목·링크만 실립니다(발송 자체는 정상).
+> GitHub Actions 에서는 **Verify sources (live)** 워크플로의 `capture_bill_id`(또는 `capture_bill_url`) 입력으로 실행하면 됩니다. 제안이유를 찾지 못하면 job 이 exit 2 로 실패하고, 진단 자료(HAR·XHR 본문·`billDetail.js` 분석)는 `verify-results` 아티팩트로 올라옵니다.
+>
+> 그때까지 의안 본문은 비어 있고, 메일에는 **제목·링크만** 실립니다(발송 자체는 정상). 실행 로그의 `상세 수집 집계(의안)` 과 ERROR 가 이 상태를 드러냅니다.
 
 ## 동작 방식
 
@@ -192,6 +200,10 @@ python -m pytest -q
 
 리포트는 소스별로 **① 목록 건수 ② 제목 샘플 ③ 페이지네이션 동작 ④ 본문/첨부 추출 여부** 를 보여줍니다. 0건인 소스는 `debug/<key>_list.txt` 원본을 열어 실제 셀렉터를 확인한 뒤 해당 스크래퍼의 `_parse_list` 를 수정하면 됩니다.
 
+판정은 세 가지입니다 — ✅ 정상 / 🟠 **부분 실패(목록 성공·상세 실패)** / ❌ 실패. 계류의안은 상세 본문이 곧 요약 입력이라, 목록만 되고 본문이 0자면 🟠 로 표시하고 스크립트가 non-zero 로 종료합니다(초록불로 넘어가지 않습니다). 상세가 PDF 직접 다운로드(`fss_mgmt_notice`)거나 JS 팝업(`better_reply`)인 소스는 본문이 비어도 정상으로 봅니다.
+
+의안 상세 endpoint 를 조사할 때는 `capture_bill_id`(또는 `capture_bill_url`) 입력을 함께 넣으세요. Playwright 로 브라우저를 띄워 심사정보 탭이 실제로 보내는 XHR 을 캡처하고, HAR·XHR 본문·`billDetail.js` 분석 보고서를 아티팩트로 올립니다(세션·토큰 값은 제거되고 헤더·필드 **이름은 유지**됩니다).
+
 ## 프로젝트 구조
 
 ```
@@ -206,6 +218,7 @@ src/
   state.py   notifier.py    # 신규 판별 상태(원자적 저장) / 이메일 렌더·발송
   summarizer.py             # 일반 게시물 3줄 요약(1건당 1회, 실패 시 원문 발췌 폴백)
   assembly_summary.py       # 계류의안 배치 3줄 요약(최대 25건/요청, BILL_ID 로 매핑)
+                            # ※ 상세 수집이 아직 미해결이라 현재는 입력이 비어 있음
   snippet.py                # 요약 실패 시 쓰는 원문 발췌 정제(제목 중복·상용구 제거)
   models.py                 # Post, Attachment
   scrapers/
@@ -215,7 +228,10 @@ src/
 state/seen.json             # 이미 본 글 ID (자동 커밋)
 scripts/
   send_test_email.py        # SMTP 설정 확인
-  verify_sources.py         # 소스 점검
+  verify_sources.py         # 소스 점검(목록/상세를 구분해 판정)
+  capture_assembly_network.py  # [진단] 의안 상세 XHR 캡처(Playwright, HAR·JS 분석)
+  capture_assembly_fixture.py  # [진단] 의안 상세 HTML fixture 캡처(requests)
+tests/fixtures/             # 캡처한 실제 응답(회귀 테스트용, README 참고)
 ```
 
 새 게시판을 추가하려면 `config.yaml` 의 `sources` 에 항목을 추가하고, 알맞은 `type`(파서)을 지정하면 됩니다.
