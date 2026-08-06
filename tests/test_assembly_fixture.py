@@ -21,12 +21,16 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import SourceConfig
-from src.models import Post
-from src.scrapers.assembly import AssemblyBillScraper
+from src.models import Post, ProposalContentStatus
+from src.scrapers.assembly import (
+    _BILLINFO_ENDPOINT,
+    _CSRF_HEADER,
+    AssemblyBillScraper,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GET_HTML = FIXTURES / "assembly_detail_get.html"
-POST_HTML = FIXTURES / "assembly_detail_post.html"
+BILLINFO_HTML = FIXTURES / "assembly_billinfo_response.html"
 META = FIXTURES / "assembly_capture_meta.json"
 
 HAS_FIXTURE = GET_HTML.exists()
@@ -46,7 +50,8 @@ _SKIP = pytest.mark.skipif(
 _MUST_NOT_APPEAR = ("JSESSIONID=", "WMONID=")
 
 # meta JSON 이 가져도 되는 키. 값(토큰·세션)을 담는 키가 새로 생기면 실패한다.
-_ALLOWED_CSRF_META_KEYS = {"has_token", "header", "parameter"}
+# 확정 계약에서는 selector 와 '있는지 여부'만 남긴다 — 토큰 값은 절대 저장하지 않는다.
+_ALLOWED_CSRF_META_KEYS = {"selector", "has_token"}
 _ALLOWED_REQUEST_KEYS = {"method", "action", "data_keys", "header_keys"}
 
 
@@ -88,6 +93,8 @@ class _FixtureFetcher:
             }
         )
         return ("follow", 0)
+
+    # NOTE: 확정 계약에서는 후속 요청이 항상 POST 다. GET 이 기록되면 회귀다.
 
     def post(self, url, referer=None, data=None, headers=None):
         self.requests.append(
@@ -141,7 +148,7 @@ def _replay():
     meta = _meta()
     f = _FixtureFetcher(
         GET_HTML.read_text(encoding="utf-8"),
-        POST_HTML.read_text(encoding="utf-8") if POST_HTML.exists() else "",
+        BILLINFO_HTML.read_text(encoding="utf-8") if BILLINFO_HTML.exists() else "",
     )
     p = _post(meta)
     _scraper(f).enrich(p)
@@ -240,7 +247,7 @@ def test_committed_fixture_files_contain_no_session_values():
 @_SKIP
 def test_fixture_and_meta_contain_no_secret_values():
     """fixture·meta 어디에도 토큰/세션 '값'이 남아 있으면 안 된다."""
-    for path in (GET_HTML, POST_HTML):
+    for path in (GET_HTML, BILLINFO_HTML):
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8")
@@ -263,11 +270,12 @@ def test_real_response_fills_proposal_reason_into_body():
     """실제 응답으로 post.body 에 '제안이유 및 주요내용'이 저장되어야 한다."""
     _, p, _f = _replay()
 
+    assert p.proposal_status is ProposalContentStatus.AVAILABLE, p.proposal_note
     assert p.body, (
         "실제 응답에서 제안이유를 뽑지 못했다. tests/fixtures/assembly_capture_meta.json 의 "
-        "prnt_summary_selector_hits / forms 를 보고 셀렉터·폼 판정을 고쳐야 한다."
+        "prnt_summary_selector_hits / request_build_error 를 보고 고쳐야 한다."
     )
-    assert len(p.body) >= 20
+    assert len(p.body) >= 20        # AVAILABLE 은 20자 이상일 때만
     # 제안이유는 body 에만 담고 details 에는 담지 않는다
     assert p.details == []
 
@@ -299,8 +307,8 @@ def test_replayed_request_matches_captured_shape():
 
     captured = meta.get("follow_up_request")
     assert captured, (
-        "캡처 당시 후속 요청을 보내지 않았다(연관 폼 미발견). "
-        "meta 의 forms 를 보고 _summary_form 판정을 넓혀야 한다."
+        "캡처 당시 후속 요청을 보내지 않았다. meta 의 request_build_error 를 보고 "
+        "form#form / meta[name=\"_csrf\"] / billId 를 확인해야 한다."
     )
     assert len(f.requests) == 1, f"후속 요청이 1회여야 한다: {f.requests}"
     replayed = f.requests[0]
@@ -310,5 +318,8 @@ def test_replayed_request_matches_captured_shape():
     assert replayed["data_keys"] == captured["data_keys"]
     assert replayed["header_keys"] == captured["header_keys"]
 
-    # action 은 반드시 HTTPS + 의안정보시스템 호스트여야 한다
-    assert replayed["action"].startswith("https://likms.assembly.go.kr/")
+    # 확정된 계약과도 대조한다(캡처 meta 가 낡아도 계약 위반을 잡아내도록).
+    assert replayed["method"] == "post"
+    assert replayed["action"] == _BILLINFO_ENDPOINT
+    assert replayed["header_keys"] == [_CSRF_HEADER]
+    assert any(k.lower() in ("billid", "bill_id") for k in replayed["data_keys"])

@@ -23,24 +23,24 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 목록 파서는 실제 사이트 HTML/응답으로 검증되어 제목·URL·날짜·본문·첨부를 수집합니다.
 (`fss_mgmt_notice` 는 상세가 PDF 직접 다운로드, `better_reply` 는 상세가 JS 함수라 목록 링크로 안내)
 
-> ⚠️ **미해결**: 계류의안의 **상세 수집('제안이유 및 주요내용')은 현재 동작하지 않습니다.**
+> **확정된 수집 계약** (2026-08 Playwright 라이브 캡처):
 >
-> 2026-08 라이브 실행으로 확인된 사실:
-> - 목록(Open API)과 페이지네이션은 정상입니다.
-> - Open API 의 `LINK_URL` 은 구 경로 `/bill/billDetail.do` 를 주는데, 최신 의안에서 그 경로는 "해당 의안 정보가 존재하지 않습니다"를 응답합니다(redirect 없음). → `BILL_ID` 로 현재 경로 `/bill/bi/billDetailPage.do` 로 교정하도록 고쳤습니다.
-> - 상세페이지 **초기 HTML 에는 제안이유가 없습니다.** `pre#prntSummary`·`#summaryContentDiv` 도 없고, 심사정보 탭(`#tab_billInfo_sect`)이 빈 채로 있다가 JS(`app.Tab.tabClick`)가 채웁니다.
-> - HTML 폼을 되쏘는 방식은 실패했습니다. 기본 GET 폼(`id="form"`)을 잘못 골라 `billId` 가 중복되면서 HTTP 400 이 났습니다. → 근거 없는 폼에는 **아예 요청을 보내지 않도록** 조건을 좁혔습니다.
->
-> 실제 endpoint 는 **추측하지 않고** 브라우저가 보내는 XHR 을 캡처해 확정합니다:
->
-> ```bash
-> python -m pip install playwright && python -m playwright install --with-deps chromium
-> python scripts/capture_assembly_network.py --bill-id PRC_XXXXXXXXXXXX
+> ```
+> 1) GET  https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId={BILL_ID}
+>          → 초기 HTML 에는 제안이유가 없다. form#form 과 meta[name="_csrf"] 만 있다.
+> 2) POST https://likms.assembly.go.kr/bill/bi/bill/detail/billInfo.do
+>          payload : form#form 의 named hidden input 전체 (URL-encoded)
+>          header  : X-CSRF-TOKEN = meta[name="_csrf"] 의 content
+>                    Referer     = 위 상세 URL
+>          쿠키    : 상세 GET 과 같은 requests.Session
+>          응답    : HTML — 본문은 pre#prntSummary
 > ```
 >
-> GitHub Actions 에서는 **Verify sources (live)** 워크플로의 `capture_bill_id`(또는 `capture_bill_url`) 입력으로 실행하면 됩니다. 제안이유를 찾지 못하면 job 이 exit 2 로 실패하고, 진단 자료(HAR·XHR 본문·`billDetail.js` 분석)는 `verify-results` 아티팩트로 올라옵니다.
+> `form#form` 은 **payload 원천일 뿐**입니다. 그 폼의 빈 `action` 과 기본 GET 을 그대로 replay 하면 안 됩니다 — JavaScript 가 폼을 serialize 한 뒤 별도 endpoint 로 POST 하기 때문입니다(replay 했다가 `billId` 중복으로 HTTP 400 을 받았습니다).
 >
-> 그때까지 의안 본문은 비어 있고, 메일에는 **제목·링크만** 실립니다(발송 자체는 정상). 실행 로그의 `의안 제안이유 집계` 와 ERROR 가 이 상태를 드러냅니다.
+> Open API 의 `LINK_URL` 은 아직 구 경로 `/bill/billDetail.do` 를 주는데 최신 의안에서 그 경로는 "해당 의안 정보가 존재하지 않습니다"를 응답합니다(redirect 없음). 그래서 `BILL_ID` 로 현재 경로를 다시 만듭니다.
+>
+> 요청을 만들 수 없으면(`form#form` 없음 / CSRF 없음 / 폼의 `billId` 가 목록의 `BILL_ID` 와 다름) **요청을 보내지 않고** `ERROR` 로 둡니다 — 근거가 어긋난 요청은 남의 의안 본문을 받거나 400 을 반복할 뿐입니다.
 
 ### 제안이유 상태 (`ProposalContentStatus`)
 
@@ -245,7 +245,6 @@ src/
   state.py   notifier.py    # 신규 판별 상태(원자적 저장) / 이메일 렌더·발송
   summarizer.py             # 일반 게시물 3줄 요약(1건당 1회, 실패 시 원문 발췌 폴백)
   assembly_summary.py       # 계류의안 배치 3줄 요약(최대 25건/요청, BILL_ID 로 매핑)
-                            # ※ 상세 수집이 아직 미해결이라 현재는 입력이 비어 있음
   snippet.py                # 요약 실패 시 쓰는 원문 발췌 정제(제목 중복·상용구 제거)
   models.py                 # Post, Attachment
   scrapers/

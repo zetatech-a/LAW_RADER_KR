@@ -13,9 +13,12 @@
   python scripts/capture_assembly_fixture.py --bill-id PRC_XXXXXXXXXXXX
   python scripts/capture_assembly_fixture.py --url "https://likms.assembly.go.kr/..."
 
-결과: tests/fixtures/assembly_detail_get.html
-      tests/fixtures/assembly_detail_post.html   (별도 요청이 있었던 경우에만)
-      tests/fixtures/assembly_capture_meta.json  (요청 URL·method·필드명 기록)
+결과: tests/fixtures/assembly_detail_get.html         (상세 GET 응답)
+      tests/fixtures/assembly_billinfo_response.html  (billInfo.do 응답, 보냈을 때만)
+      tests/fixtures/assembly_capture_meta.json       (method/action/필드명만 기록)
+
+요청은 **생산 코드의 빌더**(AssemblyBillScraper.build_summary_request)를 그대로 쓴다.
+도구가 조립 규칙을 따로 구현하면 fixture 가 생산 동작을 검증하지 못한다.
 
 저장 전에 세션값·토큰·개인정보를 제거한다(아래 _sanitize 참고). 그래도 커밋 전에
 반드시 눈으로 한 번 확인하라 — 자동 치환은 알려진 패턴만 덮는다.
@@ -36,10 +39,11 @@ from src.config import SourceConfig  # noqa: E402
 from src.fetcher import Fetcher  # noqa: E402
 from src.models import Post  # noqa: E402
 from src.scrapers.assembly import (  # noqa: E402
-    _csrf_from_meta,
+    _CSRF_META_SELECTOR,
     _extract_summary,
     _hidden_inputs,
     AssemblyBillScraper,
+    SummaryRequestError,
 )
 
 # 종료 코드: 0 = 제안이유 확보(검증 성공), 2 = 응답은 받았으나 제안이유를 못 찾음.
@@ -156,9 +160,12 @@ def main(argv=None) -> int:
                 "hidden_input_names": sorted(_hidden_inputs(form)),
             }
         )
-    token, header, param = _csrf_from_meta(soup)
-    # 토큰 '값'은 기록하지 않는다. 있는지 여부와 이름만 남긴다.
-    meta["csrf_meta"] = {"has_token": bool(token), "header": header, "parameter": param}
+    # 토큰 '값'은 기록하지 않는다. 있는지 여부와 selector 만 남긴다.
+    csrf_meta_el = soup.select_one(_CSRF_META_SELECTOR)
+    meta["csrf_meta"] = {
+        "selector": _CSRF_META_SELECTOR,
+        "has_token": bool(csrf_meta_el and (csrf_meta_el.get("content") or "").strip()),
+    }
     meta["prnt_summary_selector_hits"] = {
         sel: bool(soup.select_one(sel))
         for sel in ("pre#prntSummary", "#prntSummary", "#summaryContentDiv")
@@ -176,22 +183,32 @@ def main(argv=None) -> int:
         url=resp.url,
     )
 
-    # GET 에 제안이유가 없으면 실제 스크래퍼와 똑같이 폼을 재전송해 본다.
+    # GET 에 제안이유가 없으면 **생산 코드와 똑같은 요청 빌더**로 billInfo.do 를 부른다.
+    # 도구가 조립 규칙을 따로 구현하면 fixture 가 생산 동작을 검증하지 못한다.
     # 여기서 예외가 나도 아래 저장은 반드시 수행한다(진단 자료가 가장 필요한 순간이다).
     if not meta["summary_in_get_html"]:
-        req = scraper.build_summary_request(soup, post)
-        meta["chosen_form_action"] = req.action if req else ""
-        if req is None:
-            print("  ! 제안이유 요청에 쓸 폼을 찾지 못했습니다.")
-        else:
+        try:
+            req = scraper.build_summary_request(soup, post)
+        except SummaryRequestError as e:
+            req = None
+            meta["request_build_error"] = str(e)
+            print(f"  ! 요청을 만들 수 없음: {e}")
+        if req is not None:
             # 값이 아니라 '형태'만 남긴다(토큰·세션값은 저장소에 들어가면 안 된다).
             meta["follow_up_request"] = req.shape()
+            meta["chosen_form_action"] = req.action
             print(f"  {req.method.upper()} {req.action}")
             try:
-                text, follow_html = scraper._request_summary(soup, post)
+                resp2 = fetcher.post(
+                    req.action, data=req.data, referer=post.url, headers=req.headers
+                )
+                follow_html = fetcher.text(resp2)
                 # 요청을 '보냈는지'가 기준이다. 응답 HTML 이 비어도 보낸 것은 보낸 것.
                 meta["follow_up_request_made"] = True
-                meta["summary_in_follow_up"] = bool(text)
+                meta["follow_up_status"] = resp2.status_code
+                meta["summary_in_follow_up"] = bool(
+                    _extract_summary(BeautifulSoup(follow_html, "lxml"))
+                )
             except Exception as e:  # noqa: BLE001
                 meta["follow_up_request_made"] = True
                 meta["follow_up_error"] = f"{type(e).__name__}: {e}"
@@ -200,7 +217,7 @@ def main(argv=None) -> int:
     # --- 저장은 성공/실패와 무관하게 먼저 한다 ---
     _write(out_dir / "assembly_detail_get.html", _sanitize(get_html))
     if follow_html:
-        _write(out_dir / "assembly_detail_post.html", _sanitize(follow_html))
+        _write(out_dir / "assembly_billinfo_response.html", _sanitize(follow_html))
     _write(
         out_dir / "assembly_capture_meta.json",
         json.dumps(meta, ensure_ascii=False, indent=2),
@@ -245,10 +262,10 @@ def _print_diagnosis(meta: dict) -> None:
         )
 
     if not meta.get("follow_up_request_made"):
-        if meta.get("chosen_form_action") == "":
+        if meta.get("request_build_error"):
+            print(f"  · 요청을 만들지 못했습니다: {meta['request_build_error']}")
             print(
-                "  · 연관 폼을 고르지 못했습니다(점수 0). 아래 forms 를 보고 "
-                "_summary_form 의 판정 조건을 넓히세요."
+                "    → form#form / meta[name=\"_csrf\"] / billId 를 확인하세요."
             )
         print("  · 후속 요청은 보내지 않았습니다.")
     else:
@@ -262,7 +279,7 @@ def _print_diagnosis(meta: dict) -> None:
         else:
             print(
                 "    → 응답에 제안이유가 없습니다. "
-                "tests/fixtures/assembly_detail_post.html 을 열어 확인하세요."
+                "tests/fixtures/assembly_billinfo_response.html 을 열어 확인하세요."
             )
 
     if meta.get("redirects"):

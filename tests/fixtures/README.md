@@ -29,15 +29,15 @@ GitHub Actions 에서는 **Verify sources (live)** 워크플로의 `capture_bill
 | `2` | 응답은 받았지만 제안이유를 찾지 못했다. **fixture 와 meta 는 저장되며** 진단이 출력된다 |
 
 `2` 로 끝나도 저장은 되므로, 그 파일을 열어 실제 컨테이너·폼을 확인하고
-`src/scrapers/assembly.py` 의 `_SUMMARY_SELECTORS` 나 `_summary_form` 판정을 고치면 된다.
+`src/scrapers/assembly.py` 의 `_SUMMARY_SELECTORS` 나 `build_summary_request` 를 고치면 된다.
 
 ### 생성물
 
 | 파일 | 내용 |
 | --- | --- |
 | `assembly_detail_get.html` | 상세 GET 응답(민감값 치환됨) |
-| `assembly_detail_post.html` | 후속 요청 응답(별도 요청을 실제로 보냈고 응답이 있을 때만) |
-| `assembly_capture_meta.json` | 최종 URL·redirect·HTTP 상태·form 목록·CSRF 전달 방식·셀렉터 적중 여부·후속 요청 형태 |
+| `assembly_billinfo_response.html` | billInfo.do 응답(요청을 실제로 보냈을 때만) |
+| `assembly_capture_meta.json` | 최종 URL·redirect·HTTP 상태·form 목록·CSRF 유무·셀렉터 적중 여부·후속 요청 형태(method/action/data_keys/header_keys) |
 
 `assembly_capture_meta.json` 에는 **값이 아니라 이름만** 담긴다
 (`follow_up_request.data_keys` / `header_keys`, `csrf_meta.has_token`).

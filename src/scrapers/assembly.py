@@ -28,7 +28,7 @@ import os
 import re
 from dataclasses import dataclass
 from enum import Enum
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
@@ -54,16 +54,33 @@ _LEGACY_DETAIL_PATHS = frozenset(
     {"/bill/billdetail.do", "/bill/jsp/billdetail.jsp"}
 )
 
-# --- 제안이유 및 주요내용 수집 ---
+# --- 제안이유 및 주요내용 수집 (2026-08 Playwright 캡처로 확정된 계약) ---
 #
-# 상세 페이지의 '제안이유 및 주요내용'은 페이지에 함께 실려 오기도 하고, 별도 요청으로
-# 채워지기도 한다. 어느 쪽인지는 사이트 개편에 따라 바뀌므로 두 경로를 모두 지원한다.
+#   1) 상세 GET  : billDetailPage.do?billId=...  (초기 HTML 에는 제안이유가 없다)
+#   2) 후속 POST : billInfo.do
+#        payload : 상세 HTML form#form 의 named hidden input 전체(URL-encoded)
+#        header  : X-CSRF-TOKEN = meta[name="_csrf"], Referer = 상세 URL
+#        쿠키    : 같은 세션(Fetcher 가 requests.Session 을 공유한다)
+#        응답    : HTML, 본문은 pre#prntSummary
 #
-# 두 번째 경로(별도 요청)에서 POST URL·필드명(CSRF 포함)을 코드에 박아 두지 않는다.
-# 사이트가 필드명을 바꾸면 조용히 빈 본문만 남기 때문이다. 대신 받은 HTML 에서 폼을
-# 찾아 그 폼의 action·method·hidden input 을 '그대로' 되돌려 보낸다 — CSRF 토큰도
-# hidden input 이면 자동으로 포함되고, meta 태그로 오는 경우만 따로 보탠다.
+# form#form 은 payload '원천'일 뿐이다 — 그 폼의 빈 action·기본 GET 을 replay 하면
+# 안 된다. JavaScript 가 폼을 serialize 한 뒤 별도 endpoint 로 POST 한다.
+_BILLINFO_ENDPOINT = "https://likms.assembly.go.kr/bill/bi/bill/detail/billInfo.do"
+_PAYLOAD_FORM_SELECTOR = "form#form"
+_CSRF_META_SELECTOR = 'meta[name="_csrf"]'
+_CSRF_HEADER = "X-CSRF-TOKEN"
+
+# 본문 selector. pre#prntSummary 가 확정된 것이고, 나머지는 구형 페이지 폴백이다.
 _SUMMARY_SELECTORS = ("pre#prntSummary", "#prntSummary", "#summaryContentDiv")
+
+
+class SummaryRequestError(ValueError):
+    """확정된 계약대로 요청을 만들 수 없음(form#form·CSRF·billId 문제).
+
+    이 예외가 나면 **요청을 보내지 않고** ERROR 로 처리한다. 근거가 어긋난 요청을
+    보내면 남의 의안 본문을 받거나 서버에 400 을 반복해서 던지게 된다.
+    """
+
 
 # 상세 페이지에는 값이 채워지기 전의 빈 컨테이너가 먼저 있을 수 있다. 공백·안내문
 # 수준의 짧은 텍스트를 '수집 성공'으로 보면 요약도 발췌도 못 쓰는 본문이 실린다.
@@ -106,12 +123,13 @@ class SummaryProbe(str, Enum):
     MISSING = "missing"
     UNEXPECTED = "unexpected"
 
-# 폼 action 으로 허용하는 호스트. 상세 페이지에는 외부 링크 폼(검색·공유 등)이 섞일 수
-# 있고, 그 action 으로 hidden input(세션 식별자·CSRF 포함)을 보내면 안 된다.
+
+# 상세 URL canonicalize 에 쓰는 호스트.
 _ALLOWED_HOST = "likms.assembly.go.kr"
 
 # 디버그 덤프 파일명에 bill_id 를 그대로 쓰면 경로 조작이 될 수 있다.
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]")
+
 
 def _canonical_detail_url(link: str, bill_id: str, template: str) -> str:
     """상세 URL 을 현재 유효한 경로로 맞춘다.
@@ -127,12 +145,6 @@ def _canonical_detail_url(link: str, bill_id: str, template: str) -> str:
     if parts.hostname == _ALLOWED_HOST and parts.path.lower() in _LEGACY_DETAIL_PATHS:
         return template.format(bill_id=bill_id)
     return link
-
-
-def _allowed_action(url: str) -> bool:
-    """폼 action 이 의안정보시스템의 HTTPS 주소인지."""
-    parts = urlparse(url)
-    return parts.scheme == "https" and parts.hostname == _ALLOWED_HOST
 
 
 def _is_not_found_page(html: str) -> bool:
@@ -191,45 +203,18 @@ def _hidden_inputs(form) -> dict[str, str]:
     return out
 
 
-def _csrf_from_meta(soup: BeautifulSoup) -> tuple[str, str, str]:
-    """meta 태그로 실려 오는 CSRF 정보 (토큰, 헤더명, 파라미터명).
-
-    필드명을 추측하지 않는다 — 이름에 'csrf' 가 든 meta 만 보고, 그 이름이 header/
-    parameter 중 무엇을 뜻하는지도 meta 이름 자체로 판단한다.
-    """
-    token = header = param = ""
-    for m in soup.find_all("meta"):
-        name = (m.get("name") or "").strip().lower()
-        content = (m.get("content") or "").strip()
-        if not content or "csrf" not in name:
-            continue
-        if "header" in name:
-            header = header or content
-        elif "param" in name:
-            param = param or content
-        else:
-            token = token or content
-    return token, header, param
-
-
-# 값이 비어 있으면 의안 ID 를 채워 줄 hidden input 이름(소문자 비교).
-# '없는 필드를 만들어 보내는' 것이 아니라, 폼에 이미 있는 빈 칸만 채운다.
+# form#form 안에서 의안 ID 를 담는 hidden input 이름(소문자 비교).
 _BILL_ID_FIELDS = ("billid", "bill_id")
-
-# form 에 method 가 없을 때 쓰는 기본값. HTML 표준(및 모든 브라우저)이 GET 이다.
-# 여기서 POST 를 기본으로 두면 method 를 생략한 폼에 브라우저와 다른 요청을 보내
-# 405/빈 응답을 받는다.
-_DEFAULT_FORM_METHOD = "get"
 
 
 @dataclass(frozen=True)
 class SummaryRequest:
-    """제안이유를 받아오기 위해 보낼 요청. 상세 HTML 에서 발견한 그대로다."""
+    """제안이유를 받아오기 위해 보낼 요청(확정된 계약대로 조립된 것)."""
 
-    method: str            # "get" | "post"
-    action: str            # 절대 URL(HTTPS + likms.assembly.go.kr 로 검증됨)
-    data: dict[str, str]   # 폼 hidden input (+ meta CSRF 파라미터)
-    headers: dict[str, str]  # meta 가 지정한 CSRF 헤더
+    method: str              # 확정 계약상 항상 "post"
+    action: str              # billInfo.do 절대 URL
+    data: dict[str, str]     # form#form 의 named hidden input 전체
+    headers: dict[str, str]  # {"X-CSRF-TOKEN": meta[name="_csrf"] 값}
 
     def shape(self) -> dict:
         """값을 뺀 요청 '형태'. 캡처 도구가 저장소에 기록하는 용도.
@@ -435,62 +420,56 @@ class AssemblyBillScraper(BaseScraper):
 
         soup = BeautifulSoup(html, "lxml")
 
-        # 1) 상세 HTML 에 이미 실려 있으면 그대로 쓴다(추가 요청 없음).
-        inline_probe, text = _probe_summary(soup)
+        # 1) 구형 페이지 지원: 상세 HTML 에 제안이유가 **실제로 실려 있으면** 쓴다.
+        #    비어 있다는 이유로 PENDING 으로 넘기지 않는다 — 현행 페이지는 초기 HTML 의
+        #    컨테이너가 비어 있는 것이 정상이고, 내용은 billInfo.do 가 준다.
+        inline_probe, inline_text = _probe_summary(soup)
         if inline_probe is SummaryProbe.FOUND:
-            post.body = text
+            post.body = inline_text
             self._set_status(post, ProposalContentStatus.AVAILABLE, "상세 HTML 에 포함")
             return
 
-        # 2) 아직 못 찾았다면 별도 원천(폼)을 **먼저 소진**한다.
-        #    상세 HTML 의 빈 컨테이너는 '등록 대기'일 수도 있고 후속 요청이 채울
-        #    자리표시자일 수도 있다. 소진하기 전에 PENDING 으로 확정하면, 원천이
-        #    살아 있는데도 매번 '등록 대기'로 잘못 알린다.
-        req = self.build_summary_request(soup, post)
-
-        if req is None:
-            # 알려진 후속 원천이 없다 → 상세 페이지 자체가 유일한 원천이다.
-            if inline_probe is SummaryProbe.EMPTY:
-                # 정상 응답 + 알려진 컨테이너 존재 + 내용 없음 = 등록 대기.
-                self._set_status(
-                    post,
-                    ProposalContentStatus.PENDING,
-                    "상세 페이지의 제안이유 컨테이너가 비어 있음(후속 원천 없음)",
-                )
-                return
-            note = (
-                f"제안이유 컨테이너에 예상하지 못한 내용: {text[:80]}"
-                if inline_probe is SummaryProbe.UNEXPECTED
-                else "제안이유 원천을 찾지 못함(셀렉터/endpoint 미확정) — "
-                "scripts/capture_assembly_network.py 로 실제 XHR 계약을 확인하세요"
-            )
-            self._fail(post, note, html)
+        # 2) 확정된 계약대로 billInfo.do 요청을 만든다.
+        #    만들 수 없으면(폼·CSRF·billId 문제) **요청을 보내지 않고** ERROR 다.
+        try:
+            req = self.build_summary_request(soup, post)
+        except SummaryRequestError as e:
+            self._fail(post, str(e), html)
             return
 
-        # 3) 원천에 실제로 요청을 보낸다(전송 오류는 enrich 가 ERROR 로 받는다).
-        follow_probe, follow_text, follow_html = self._send_summary_request(req, post)
-        if follow_probe is SummaryProbe.FOUND:
-            post.body = follow_text
-            self._set_status(post, ProposalContentStatus.AVAILABLE, "후속 요청 응답")
+        # 3) 전송. 네트워크·HTTP 오류는 enrich 가 ERROR 로 받는다(2xx 만 여기 도달).
+        resp = self.fetcher.post(
+            req.action, data=req.data, referer=post.url, headers=req.headers
+        )
+        body_html = self.fetcher.text(resp)
+        if _is_not_found_page(body_html):
+            self._fail(post, "billInfo.do 가 '의안 정보 없음'을 응답", body_html)
             return
-        if follow_probe is SummaryProbe.EMPTY:
-            # 확인된 원천이 정상 응답했는데 내용이 비어 있다 = 등록 대기.
+
+        # 4) 확정된 selector(pre#prntSummary)로 판정한다.
+        probe, text = _probe_summary(BeautifulSoup(body_html, "lxml"))
+        if probe is SummaryProbe.FOUND:
+            post.body = text
+            self._set_status(post, ProposalContentStatus.AVAILABLE, "billInfo.do 응답")
+            return
+        if probe is SummaryProbe.EMPTY:
+            # 확정된 endpoint 가 2xx 정상 HTML 을 줬고 알려진 selector 도 있는데
+            # 내용만 비어 있다 = 원문이 아직 등록되지 않음.
             self._set_status(
                 post,
                 ProposalContentStatus.PENDING,
-                "후속 요청은 정상인데 제안이유 컨테이너가 비어 있음",
+                "billInfo.do 응답의 pre#prntSummary 가 비어 있음",
             )
             return
 
-        # 4) 맞다고 판단한 원천에 물었는데 읽을 수 없는 응답이 왔다. 등록 대기인지
-        #    구조가 바뀐 것인지 구분할 근거가 없으므로 ERROR 다 — 여기서 PENDING 으로
-        #    넘기면 셀렉터 변경이나 endpoint 오판이 '정상'으로 위장된다.
+        # selector 자체가 없거나 읽을 수 없는 내용 → 구조 변경. PENDING 으로 넘기면
+        # 고장이 '정상'으로 위장된다.
         note = (
-            f"후속 응답이 예상과 다름: {follow_text[:80]}"
-            if follow_probe is SummaryProbe.UNEXPECTED
-            else "후속 응답에 제안이유 컨테이너가 없음(셀렉터/endpoint 확인 필요)"
+            f"billInfo.do 응답이 예상과 다름: {text[:80]}"
+            if probe is SummaryProbe.UNEXPECTED
+            else "billInfo.do 응답에 pre#prntSummary 가 없음(selector/계약 확인 필요)"
         )
-        self._fail(post, note, f"{html}\n\n<!-- ===== 후속 응답 ===== -->\n{follow_html}")
+        self._fail(post, note, body_html)
 
     def _fail(self, post: Post, note: str, dump: str) -> None:
         """ERROR 로 판정하고 진단용 덤프를 남긴다."""
@@ -503,109 +482,66 @@ class AssemblyBillScraper(BaseScraper):
 
     def build_summary_request(
         self, soup: BeautifulSoup, post: Post
-    ) -> SummaryRequest | None:
-        """상세 HTML 에서 '제안이유 요청'을 조립한다(전송은 하지 않는다).
+    ) -> SummaryRequest:
+        """확정된 계약대로 billInfo.do POST 요청을 만든다(전송은 하지 않는다).
 
-        전송과 분리해 둔 이유는 캡처 도구(scripts/capture_assembly_fixture.py)가
-        실제로 보낼 요청의 형태(method·action·필드명)를 기록할 수 있어야 하기
+        2026-08 Playwright 캡처로 확정된 계약:
+            POST https://likms.assembly.go.kr/bill/bi/bill/detail/billInfo.do
+            payload : 상세 HTML form#form 의 named hidden input 전체(URL-encoded)
+            header  : X-CSRF-TOKEN = meta[name="_csrf"] 의 content
+                      Referer     = 해당 상세 URL
+            쿠키    : 상세 GET 과 **같은 세션**(Fetcher 가 세션을 공유한다)
+            응답    : HTML, 본문은 pre#prntSummary
+
+        form#form 은 payload '원천'일 뿐이다. 그 폼의 빈 action 과 기본 GET 을 그대로
+        replay 하면 안 된다 — JavaScript 가 폼을 serialize 한 뒤 별도 endpoint 로
+        POST 하기 때문이다(그렇게 replay 했다가 billId 가 중복되어 HTTP 400 을 받았다).
+
+        전송과 분리해 둔 이유는 캡처 도구가 '실제로 보낼 요청'의 형태를 기록해야 하기
         때문이다. 도구가 조립 규칙을 따로 구현하면 본 코드와 어긋난다.
+
+        요청을 만들 수 없으면 SummaryRequestError — 호출자는 **전송하지 않고** ERROR 로
+        처리한다. 근거가 어긋난 요청을 보내는 것보다 보내지 않는 편이 안전하다.
         """
-        found = self._summary_form(soup, post)
-        if found is None:
-            log.debug("[%s] 제안이유 요청에 쓸 폼을 찾지 못함(%s)", self.key, post.post_id)
-            return None
-        form, action = found
+        form = soup.select_one(_PAYLOAD_FORM_SELECTOR)
+        if form is None:
+            raise SummaryRequestError(
+                f"상세 HTML 에 {_PAYLOAD_FORM_SELECTOR} 가 없음(페이지 구조 변경)"
+            )
 
         data = _hidden_inputs(form)
-        # 폼에 이미 있는 빈 의안 ID 칸만 채운다(값이 있으면 건드리지 않는다).
-        for name in list(data):
-            if name.lower() in _BILL_ID_FIELDS and not data[name]:
-                data[name] = post.post_id
-
-        headers: dict[str, str] = {}
-        token, header, param = _csrf_from_meta(soup)
-        if token and header:
-            headers[header] = token
-        if token and param and not data.get(param):
-            data[param] = token
-
-        # HTML 표준상 form 의 method 기본값은 GET 이다. 생략된 폼에 POST 를 보내면
-        # 405 나 빈 응답을 받는다 — 브라우저가 하는 것과 같게 GET 으로 보낸다.
-        method = (form.get("method") or "").strip().lower()
-        if method not in ("get", "post"):
-            method = _DEFAULT_FORM_METHOD
-        return SummaryRequest(method=method, action=action, data=data, headers=headers)
-
-    def _request_summary(self, soup: BeautifulSoup, post: Post) -> tuple[str, str]:
-        """상세 페이지의 폼을 그대로 재전송해 제안이유를 받아온다(호환용 얇은 래퍼).
-
-        반환값은 (제안이유 텍스트, 후속 응답 HTML). 보낼 만한 폼이 없으면 ("", "").
-        상태 판정은 _fill_proposal_reason 이 _send_summary_request 로 직접 한다.
-        """
-        req = self.build_summary_request(soup, post)
-        if req is None:
-            return "", ""
-        probe, text, html = self._send_summary_request(req, post)
-        return (text if probe is SummaryProbe.FOUND else ""), html
-
-    def _send_summary_request(
-        self, req: SummaryRequest, post: Post
-    ) -> tuple[SummaryProbe, str, str]:
-        """발견한 요청을 실제로 보내고 (판정, 텍스트, 응답 HTML) 을 돌려준다.
-
-        전송 오류(네트워크·HTTP)는 호출자(enrich)가 ERROR 로 받도록 그대로 올린다.
-        """
-        if req.method == "get":
-            resp = self.fetcher.get(
-                req.action, params=req.data, referer=post.url, headers=req.headers
+        if not data:
+            raise SummaryRequestError(
+                f"{_PAYLOAD_FORM_SELECTOR} 에 name 있는 hidden input 이 없음"
             )
-        else:
-            resp = self.fetcher.post(
-                req.action, data=req.data, referer=post.url, headers=req.headers
+
+        # 폼의 billId 가 이 의안의 것인지 확인한다. 없거나 다르면 남의 의안을 조회하게
+        # 되므로 절대 보내지 않는다(A 의안 메일에 B 의안 본문이 실리는 최악의 오류).
+        form_bill_id = ""
+        for name, value in data.items():
+            if name.lower() in _BILL_ID_FIELDS:
+                form_bill_id = (value or "").strip()
+                break
+        if not form_bill_id:
+            raise SummaryRequestError(
+                f"{_PAYLOAD_FORM_SELECTOR} 에 billId 가 없음"
             )
-        html = self.fetcher.text(resp)
-        if _is_not_found_page(html):
-            # 후속 요청이 '정보 없음'을 답한 것은 등록 대기가 아니라 잘못된 요청이다.
-            return SummaryProbe.UNEXPECTED, "의안 정보 없음 응답", html
-        probe, text = _probe_summary(BeautifulSoup(html, "lxml"))
-        return probe, text, html
+        if form_bill_id != post.post_id:
+            raise SummaryRequestError(
+                "form#form 의 billId 가 목록의 BILL_ID 와 다름 "
+                f"(form={form_bill_id!r} 목록={post.post_id!r})"
+            )
 
-    def _summary_form(self, soup: BeautifulSoup, post: Post):
-        """제안이유를 돌려줄 것으로 보이는 폼과 그 action URL. 없으면 None.
+        meta = soup.select_one(_CSRF_META_SELECTOR)
+        token = (meta.get("content") or "").strip() if meta is not None else ""
+        if not token:
+            raise SummaryRequestError(
+                f'{_CSRF_META_SELECTOR} 토큰이 없음 — 세션/페이지 구조 확인 필요'
+            )
 
-        **폼 이름/id/action 에 'summary' 가 있을 때만 보낸다.**
-
-        2026-08 라이브 확인에서 이 조건이 필요하다는 것이 드러났다. 상세 페이지에는
-        id="form" 인 기본 GET 폼이 있고 그 안에 billId hidden 이 들어 있다. '의안 ID 를
-        들고 있다'만으로 연관 폼이라 판정했더니 그 기본 폼을 골랐고, 상세 URL 에 이미
-        billId 가 있는 채로 같은 파라미터를 또 붙여 billId 가 중복되면서 서버가 HTTP 400
-        을 돌려줬다.
-
-        중복 파라미터를 지우거나 GET 을 POST 로 바꿔 '통과시키는' 방향은 택하지 않는다 —
-        애초에 그 폼이 제안이유 조회용이라는 근거가 없기 때문이다. 근거 없는 요청은
-        보내지 않는 편이 낫다(요청이 없으면 본문이 비고, 메일은 제목·링크로 나간다).
-
-        실제 계약은 scripts/capture_assembly_network.py 로 브라우저 XHR 을 캡처해
-        확정한다. 그 전까지 여기에 endpoint 를 추측해 넣지 않는다.
-        """
-        best = None
-        best_score = 0
-        for form in soup.find_all("form"):
-            action = urljoin(post.url, (form.get("action") or "").strip())
-            if not _allowed_action(action):
-                continue
-            blob = " ".join(
-                (form.get("id") or "", form.get("name") or "", action)
-            ).lower()
-            if "summary" not in blob:
-                continue   # 근거 없는 폼에는 보내지 않는다
-            # 'summary' 폼이 여럿이면 이 의안과의 연관이 뚜렷한 쪽을 고른다.
-            hidden = _hidden_inputs(form)
-            score = 1
-            if post.post_id and post.post_id in hidden.values():
-                score += 2
-            if any(k.lower() in _BILL_ID_FIELDS for k in hidden):
-                score += 1
-            if score > best_score:
-                best, best_score = (form, action), score
-        return best
+        return SummaryRequest(
+            method="post",
+            action=_BILLINFO_ENDPOINT,
+            data=data,
+            headers={_CSRF_HEADER: token},
+        )

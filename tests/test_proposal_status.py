@@ -70,11 +70,11 @@ def _post(bill_id="PRC_TEST") -> Post:
     )
 
 
-def _run(get_html, post_html="", tmp_path=None, monkeypatch=None):
+def _run(get_html, post_html="", tmp_path=None, monkeypatch=None, bill_id="PRC_TEST"):
     if tmp_path is not None:
         monkeypatch.chdir(tmp_path)   # 디버그 덤프를 tmp 로
     f = _Fetcher(get_html, post_html)
-    p = _post()
+    p = _post(bill_id)
     _scraper(f).enrich(p)
     return p, f
 
@@ -108,57 +108,31 @@ def test_available_when_proposal_reason_is_present():
 # --- PENDING ---
 
 
-def test_pending_when_container_is_present_but_empty(tmp_path, monkeypatch):
-    """접수 직후 — 컨테이너는 정상인데 원문이 없다. 실패가 아니다."""
-    p, f = _run(_fx("bill_pending.html"), tmp_path=tmp_path, monkeypatch=monkeypatch)
+def test_pending_when_billinfo_responds_with_empty_selector(tmp_path, monkeypatch):
+    """확정 endpoint 가 2xx 정상 HTML + pre#prntSummary 를 줬는데 비어 있다 = 등록 대기."""
+    p, f = _run(
+        _fx("bill_detail_page.html"), _fx("billinfo_pending.html"),
+        tmp_path=tmp_path, monkeypatch=monkeypatch, bill_id="PRC_SYNTH_0001",
+    )
+    assert len(f.posts) == 1        # 확정 endpoint 에 실제로 물어봤다
     assert p.proposal_status is S.PENDING
     assert p.body == ""
-    assert f.posts == []
+    assert "pre#prntSummary" in p.proposal_note
     # 등록 대기는 진단 덤프를 남기지 않는다(장애가 아니므로 잡음만 된다)
     assert not (tmp_path / "debug").exists()
 
 
-def test_pending_when_container_holds_only_a_notice(tmp_path, monkeypatch):
-    p, _f = _run(
-        _fx("bill_pending_notice.html"), tmp_path=tmp_path, monkeypatch=monkeypatch
-    )
-    assert p.proposal_status is S.PENDING
-    assert p.body == ""
+def test_empty_initial_html_alone_is_never_pending():
+    """초기 HTML 이 비었다는 이유로 PENDING 처리하면 안 된다 — 그게 정상 상태다.
 
-
-def test_pending_when_confirmed_source_responds_empty(tmp_path, monkeypatch):
-    """확인된 후속 원천이 정상 응답했는데 내용이 비어 있으면 PENDING."""
-    page = """
-    <html><body>
-      <form name="popup" action="/bill/summaryPopup.do" method="post">
-        <input type="hidden" name="billId" value=""/>
-      </form>
-    </body></html>"""
-    empty_reply = '<html><body><pre id="prntSummary"></pre></body></html>'
-    p, f = _run(page, empty_reply, tmp_path=tmp_path, monkeypatch=monkeypatch)
-    assert len(f.posts) == 1        # 원천에 실제로 물어봤다
-    assert p.proposal_status is S.PENDING
-    assert "후속 요청" in p.proposal_note
-
-
-def test_empty_inline_container_does_not_shortcut_a_known_source():
-    """상세 HTML 의 빈 컨테이너는 자리표시자일 수 있다 — 원천을 먼저 소진해야 한다.
-
-    소진 전에 PENDING 으로 확정하면, 원천이 살아 있는데도 매번 '등록 대기'로 잘못 알린다.
+    현행 페이지는 초기 HTML 의 컨테이너가 비어 있고 내용은 billInfo.do 가 준다.
+    확정 endpoint 를 물어보기 전에는 등록 대기인지 알 수 없다.
     """
-    page = """
-    <html><body>
-      <div id="summaryContentDiv"></div>
-      <form name="popup" action="/bill/summaryPopup.do" method="post">
-        <input type="hidden" name="billId" value=""/>
-      </form>
-    </body></html>"""
-    filled = (
-        '<html><body><pre id="prntSummary">현행법은 예치금 분리보관 의무를 '
-        '규정하고 있지 아니하므로 이를 의무화하려는 것임.</pre></body></html>'
+    p, f = _run(
+        _fx("bill_detail_page.html"), _fx("billinfo_available.html"),
+        bill_id="PRC_SYNTH_0001",
     )
-    p, f = _run(page, filled)
-    assert len(f.posts) == 1
+    assert len(f.posts) == 1        # 반드시 물어본다
     assert p.proposal_status is S.AVAILABLE
     assert "예치금" in p.body
 
@@ -166,13 +140,14 @@ def test_empty_inline_container_does_not_shortcut_a_known_source():
 # --- ERROR ---
 
 
-def test_error_when_selector_changed(tmp_path, monkeypatch):
-    """알려진 컨테이너가 아예 없으면 ERROR. 등록 대기로 위장하면 고장이 묻힌다."""
+def test_error_when_response_selector_is_missing(tmp_path, monkeypatch):
+    """응답에 pre#prntSummary 가 아예 없으면 ERROR. 등록 대기로 위장하면 고장이 묻힌다."""
     p, _f = _run(
-        _fx("bill_selector_changed.html"), tmp_path=tmp_path, monkeypatch=monkeypatch
+        _fx("bill_detail_page.html"), _fx("billinfo_selector_missing.html"),
+        tmp_path=tmp_path, monkeypatch=monkeypatch, bill_id="PRC_SYNTH_0001",
     )
     assert p.proposal_status is S.ERROR
-    assert "원천을 찾지 못함" in p.proposal_note
+    assert "pre#prntSummary" in p.proposal_note
     assert (tmp_path / "debug").exists()      # 진단 덤프는 남긴다
 
 
@@ -212,33 +187,29 @@ def test_error_on_http_failure():
     assert p.proposal_status is S.ERROR
 
 
-def test_error_when_follow_up_request_fails(tmp_path, monkeypatch):
+def test_error_when_billinfo_request_fails(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    page = """
-    <html><body>
-      <form name="popup" action="/bill/summaryPopup.do" method="post">
-        <input type="hidden" name="billId" value=""/>
-      </form>
-    </body></html>"""
 
     class _PostFails(_Fetcher):
         def post(self, *a, **k):
             raise RuntimeError("HTTP 400")
 
-    f = _PostFails(page, "")
-    p = _post()
+    f = _PostFails(_fx("bill_detail_page.html"), "")
+    p = _post("PRC_SYNTH_0001")
     _scraper(f).enrich(p)
     assert p.proposal_status is S.ERROR
     assert "HTTP 400" in p.proposal_note
 
 
-def test_error_on_unexpected_container_content(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+def test_error_on_unexpected_response_content(tmp_path, monkeypatch):
     # 짧은데 안내문도 아니다 — 뭘 받은 건지 알 수 없다.
-    page = '<html><body><pre id="prntSummary">XZ9#@!</pre></body></html>'
-    p, _f = _run(page, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    reply = '<html><body><pre id="prntSummary">XZ9#@!</pre></body></html>'
+    p, _f = _run(
+        _fx("bill_detail_page.html"), reply,
+        tmp_path=tmp_path, monkeypatch=monkeypatch, bill_id="PRC_SYNTH_0001",
+    )
     assert p.proposal_status is S.ERROR
-    assert "예상하지 못한" in p.proposal_note
+    assert "예상과 다름" in p.proposal_note
 
 
 def test_error_when_follow_up_response_has_no_container(tmp_path, monkeypatch):
@@ -262,8 +233,8 @@ def test_error_when_follow_up_response_has_no_container(tmp_path, monkeypatch):
 def test_todays_date_alone_does_not_make_it_pending(tmp_path, monkeypatch):
     """제안일이 오늘이어도, 컨테이너가 없으면 ERROR 다(정황은 근거가 아니다)."""
     monkeypatch.chdir(tmp_path)
-    f = _Fetcher(_fx("bill_selector_changed.html"))
-    p = _post()
+    f = _Fetcher(_fx("bill_detail_page.html"), _fx("billinfo_selector_missing.html"))
+    p = _post("PRC_SYNTH_0001")
     p.date = "2026-08-06"          # 오늘
     _scraper(f).enrich(p)
     assert p.proposal_status is S.ERROR
