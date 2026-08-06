@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -123,6 +124,34 @@ def _csrf_from_meta(soup: BeautifulSoup) -> tuple[str, str, str]:
 # 값이 비어 있으면 의안 ID 를 채워 줄 hidden input 이름(소문자 비교).
 # '없는 필드를 만들어 보내는' 것이 아니라, 폼에 이미 있는 빈 칸만 채운다.
 _BILL_ID_FIELDS = ("billid", "bill_id")
+
+# form 에 method 가 없을 때 쓰는 기본값. HTML 표준(및 모든 브라우저)이 GET 이다.
+# 여기서 POST 를 기본으로 두면 method 를 생략한 폼에 브라우저와 다른 요청을 보내
+# 405/빈 응답을 받는다.
+_DEFAULT_FORM_METHOD = "get"
+
+
+@dataclass(frozen=True)
+class SummaryRequest:
+    """제안이유를 받아오기 위해 보낼 요청. 상세 HTML 에서 발견한 그대로다."""
+
+    method: str            # "get" | "post"
+    action: str            # 절대 URL(HTTPS + likms.assembly.go.kr 로 검증됨)
+    data: dict[str, str]   # 폼 hidden input (+ meta CSRF 파라미터)
+    headers: dict[str, str]  # meta 가 지정한 CSRF 헤더
+
+    def shape(self) -> dict:
+        """값을 뺀 요청 '형태'. 캡처 도구가 저장소에 기록하는 용도.
+
+        토큰·세션값은 담지 않는다 — 이름만으로 회귀 검증이 가능하고, 값은 저장소에
+        남겨서는 안 되는 비밀이다.
+        """
+        return {
+            "method": self.method,
+            "action": self.action,
+            "data_keys": sorted(self.data),
+            "header_keys": sorted(self.headers),
+        }
 
 
 # 응답 레코드에서 값을 찾을 때 시도할 필드명 후보(명세서 출력값 기준 + 변형 대비)
@@ -315,15 +344,19 @@ class AssemblyBillScraper(BaseScraper):
             dump = f"{html}\n\n<!-- ===== 후속 응답 ===== -->\n{follow_html}"
         self._dump_debug(f"detail_{_UNSAFE_NAME.sub('_', post.post_id)}", dump)
 
-    def _request_summary(self, soup: BeautifulSoup, post: Post) -> tuple[str, str]:
-        """상세 페이지의 폼을 그대로 재전송해 제안이유를 받아온다.
+    def build_summary_request(
+        self, soup: BeautifulSoup, post: Post
+    ) -> SummaryRequest | None:
+        """상세 HTML 에서 '제안이유 요청'을 조립한다(전송은 하지 않는다).
 
-        반환값은 (제안이유 텍스트, 후속 응답 HTML). 보낼 만한 폼이 없으면 ("", "").
+        전송과 분리해 둔 이유는 캡처 도구(scripts/capture_assembly_fixture.py)가
+        실제로 보낼 요청의 형태(method·action·필드명)를 기록할 수 있어야 하기
+        때문이다. 도구가 조립 규칙을 따로 구현하면 본 코드와 어긋난다.
         """
         found = self._summary_form(soup, post)
         if found is None:
             log.debug("[%s] 제안이유 요청에 쓸 폼을 찾지 못함(%s)", self.key, post.post_id)
-            return "", ""
+            return None
         form, action = found
 
         data = _hidden_inputs(form)
@@ -339,11 +372,30 @@ class AssemblyBillScraper(BaseScraper):
         if token and param and not data.get(param):
             data[param] = token
 
-        method = (form.get("method") or "post").strip().lower()
-        if method == "get":
-            resp = self.fetcher.get(action, params=data, referer=post.url, headers=headers)
+        # HTML 표준상 form 의 method 기본값은 GET 이다. 생략된 폼에 POST 를 보내면
+        # 405 나 빈 응답을 받는다 — 브라우저가 하는 것과 같게 GET 으로 보낸다.
+        method = (form.get("method") or "").strip().lower()
+        if method not in ("get", "post"):
+            method = _DEFAULT_FORM_METHOD
+        return SummaryRequest(method=method, action=action, data=data, headers=headers)
+
+    def _request_summary(self, soup: BeautifulSoup, post: Post) -> tuple[str, str]:
+        """상세 페이지의 폼을 그대로 재전송해 제안이유를 받아온다.
+
+        반환값은 (제안이유 텍스트, 후속 응답 HTML). 보낼 만한 폼이 없으면 ("", "").
+        """
+        req = self.build_summary_request(soup, post)
+        if req is None:
+            return "", ""
+
+        if req.method == "get":
+            resp = self.fetcher.get(
+                req.action, params=req.data, referer=post.url, headers=req.headers
+            )
         else:
-            resp = self.fetcher.post(action, data=data, referer=post.url, headers=headers)
+            resp = self.fetcher.post(
+                req.action, data=req.data, referer=post.url, headers=req.headers
+            )
         html = self.fetcher.text(resp)
         return _extract_summary(BeautifulSoup(html, "lxml")), html
 

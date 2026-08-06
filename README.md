@@ -20,8 +20,19 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 | `better_reply` | 금융규제·법령해석포털 | 법령해석·비조치의견서 회신사례 | JSON (POST) |
 | `assembly_bill` | 의안정보시스템 | 계류의안 | 열린국회 Open API (목록) + 상세페이지(제안이유 및 주요내용) |
 
-파서는 모두 실제 사이트 HTML/응답으로 검증되어 제목·URL·날짜·본문·첨부를 수집합니다.
+목록 파서는 실제 사이트 HTML/응답으로 검증되어 제목·URL·날짜·본문·첨부를 수집합니다.
 (`fss_mgmt_notice` 는 상세가 PDF 직접 다운로드, `better_reply` 는 상세가 JS 함수라 목록 링크로 안내)
+
+> ⚠️ **미검증 항목**: 계류의안의 **상세 페이지 수집('제안이유 및 주요내용')** 은 아직 실제 응답으로 검증되지 않았습니다.
+> 상세 HTML 에서 폼을 발견해 되쏘는 방식이라 실제 마크업 확인이 필요한데, 개발 환경에서 `likms.assembly.go.kr` 접속이 차단되어 캡처하지 못했습니다.
+> 아래를 한 번 실행해 `tests/fixtures/` 를 커밋하면 검증이 완료되고 `tests/test_assembly_fixture.py` 의 skip 이 사라집니다.
+>
+> ```bash
+> python scripts/capture_assembly_fixture.py --bill-id PRC_XXXXXXXXXXXX
+> ```
+>
+> GitHub Actions 에서는 **Verify sources (live)** 워크플로의 `capture_bill_id`(또는 `capture_bill_url`) 입력으로 같은 일을 할 수 있습니다.
+> 캡처가 끝날 때까지 의안 본문은 비어 있을 수 있고, 그 경우 메일에는 제목·링크만 실립니다(발송 자체는 정상).
 
 ## 동작 방식
 

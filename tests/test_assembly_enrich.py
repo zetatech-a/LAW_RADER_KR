@@ -152,34 +152,93 @@ def test_csrf_hidden_input_is_carried_without_meta():
     assert f.posts[0]["data"]["OWASP_CSRFTOKEN"] == "zzz-999"
 
 
-def test_get_method_form_is_sent_as_get_with_params():
-    page = """
+def _form_page(method_attr: str) -> str:
+    """method 속성만 다른 동일한 폼 페이지."""
+    return f"""
     <html><body>
-      <form id="summaryForm" action="/bill/summaryPopup.do" method="GET">
+      <form id="summaryForm" action="/bill/summaryPopup.do"{method_attr}>
         <input type="hidden" name="billId" value=""/>
       </form>
     </body></html>"""
-    f = _Fetcher(page, "")
-    sc = _scraper(f)
-    # GET 폼이면 후속 요청도 GET 이어야 한다 — 응답 HTML 도 get 경로로 온다
-    f._get_html = page  # 첫 GET(상세)
-    p = _post()
 
-    # 두 번째 GET 은 제안이유를 돌려주도록 텍스트를 바꿔 준다
-    original_text = f.text
+
+def _follow_get(f):
+    """두 번째 GET(후속 요청)만 제안이유를 돌려주도록 바꾼다."""
+    original = f.text
 
     def _text(resp):
         if resp[0] == "get" and resp[1] == 2:
             return _POST_RESULT
-        return original_text(resp)
+        return original(resp)
 
     f.text = _text
-    sc.enrich(p)
+
+
+def test_form_method_post_is_sent_as_post():
+    f = _Fetcher(_form_page(' method="post"'), _POST_RESULT)
+    p = _post()
+    _scraper(f).enrich(p)
+
+    assert len(f.posts) == 1
+    assert len(f.gets) == 1                     # 상세 GET 1회뿐
+    assert f.posts[0]["data"]["billId"] == _BILL_ID
+    assert "예치금 분리보관" in p.body
+
+
+def test_form_method_get_is_sent_as_get_with_params():
+    f = _Fetcher(_form_page(' method="GET"'), "")   # 대소문자 무관
+    _follow_get(f)
+    p = _post()
+    _scraper(f).enrich(p)
 
     assert f.posts == []                        # POST 하지 않는다
     assert len(f.gets) == 2
     assert f.gets[1]["params"]["billId"] == _BILL_ID
     assert "예치금 분리보관" in p.body
+
+
+def test_form_without_method_defaults_to_get():
+    # HTML 표준상 form 의 method 기본값은 GET 이다. POST 로 보내면 브라우저와 다른
+    # 요청이 되어 405/빈 응답을 받는다.
+    f = _Fetcher(_form_page(""), "")
+    _follow_get(f)
+    p = _post()
+    _scraper(f).enrich(p)
+
+    assert f.posts == []
+    assert len(f.gets) == 2
+    assert f.gets[1]["params"]["billId"] == _BILL_ID
+    assert "예치금 분리보관" in p.body
+
+
+@pytest.mark.parametrize("method_attr", ['', ' method=""', ' method="  "', ' method="PUT"'])
+def test_unknown_or_missing_method_falls_back_to_get(method_attr):
+    # 빈 값·공백·지원하지 않는 method 도 표준 기본값(GET)으로 처리한다.
+    f = _Fetcher(_form_page(method_attr), "")
+    _follow_get(f)
+    _scraper(f).enrich(_post())
+    assert f.posts == []
+    assert len(f.gets) == 2
+
+
+def test_build_summary_request_shape_excludes_values():
+    # 캡처 도구가 저장소에 남기는 '형태'에는 토큰·세션값이 들어가면 안 된다.
+    from bs4 import BeautifulSoup
+
+    f = _Fetcher(_FORM_PAGE, _POST_RESULT)
+    sc = _scraper(f)
+    p = _post()
+    req = sc.build_summary_request(BeautifulSoup(_FORM_PAGE, "lxml"), p)
+
+    assert req is not None
+    shape = req.shape()
+    assert shape["method"] == "post"
+    assert shape["action"] == "https://likms.assembly.go.kr/bill/summaryPopup.do"
+    assert shape["data_keys"] == ["_csrf", "billId", "sessionToken"]
+    assert shape["header_keys"] == ["X-CSRF-TOKEN"]
+    # 값은 어디에도 없다
+    blob = repr(shape)
+    assert "tok-abc-123" not in blob and "s-9" not in blob
 
 
 # --- 3) 폼 action 검증 ---

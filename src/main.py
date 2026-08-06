@@ -20,15 +20,33 @@ import argparse
 import logging
 import sys
 
+from dataclasses import dataclass
+
 from .config import load_config
 from .fetcher import Fetcher
-from .models import Post
+from .models import ASSEMBLY_SOURCE_KEY, Post
 from .notifier import missing_email_settings, send_digest, verify_smtp_login
 from .scrapers import build_scraper
 from .state import State
 from .summarizer import ai_target_count, summarize_posts
 
 log = logging.getLogger("law_rader")
+
+
+@dataclass
+class _DetailStats:
+    """상세(enrich) 수집 시도/성공 집계."""
+
+    attempted: int = 0
+    succeeded: int = 0
+
+    @property
+    def failed(self) -> int:
+        return self.attempted - self.succeeded
+
+    def count(self, ok: bool) -> None:
+        self.attempted += 1
+        self.succeeded += 1 if ok else 0
 
 
 def parse_args(argv=None):
@@ -70,8 +88,12 @@ def run(argv=None) -> int:
     succeeded = 0  # 목록 수집에 성공한 소스 수
     # 상세(enrich) 집계 — 실행 종료 시 한 번에 보고한다. 상세 수집이 전멸하면
     # 메일은 제목·링크만 남은 채로 계속 나가므로, 로그를 보지 않으면 알아채기 어렵다.
-    detail_attempted = 0
-    detail_succeeded = 0
+    #
+    # 의안은 따로 센다. 의안 상세(제안이유)는 폼을 발견해 되쏘는 방식이라 다른 소스와
+    # 독립적으로 깨질 수 있는데, 전체 합계만 보면 금융위·금감원이 성공하는 한 의안
+    # 전면 실패가 묻힌다.
+    detail = _DetailStats()
+    assembly_detail = _DetailStats()
 
     for src in cfg.sources:
         if not src.enabled:
@@ -150,7 +172,6 @@ def run(argv=None) -> int:
 
         log.info("[%s] 신규 %d건 발견 — 상세 수집", src.key, len(new_posts))
         for p in new_posts:
-            detail_attempted += 1
             try:
                 scraper.enrich(p)
             except Exception as e:  # noqa: BLE001
@@ -158,8 +179,12 @@ def run(argv=None) -> int:
             # 스크래퍼 대부분은 실패를 내부에서 삼키므로(한 건 실패가 나머지를 막지
             # 않도록) 예외 유무가 아니라 '무언가 채워졌는지'로 성공을 센다.
             # verify_sources.py 의 enrich_ok 와 같은 기준이다.
-            if p.body or p.details or p.attachments:
-                detail_succeeded += 1
+            ok_detail = bool(p.body or p.details or p.attachments)
+            detail.count(ok_detail)
+            # 의안 통계는 의안 게시물로만 만든다. 다른 소스(상세가 원래 비는 게시판
+            # 등)의 실패가 섞이면 있지도 않은 의안 장애를 보고하게 된다.
+            if p.source_key == ASSEMBLY_SOURCE_KEY:
+                assembly_detail.count(ok_detail)
 
         # 신규(초과분 포함)는 '메일 성공 후'에만 seen 처리하도록 보류한다.
         pending_seen.append((src.key, all_new_ids))
@@ -212,7 +237,7 @@ def run(argv=None) -> int:
         log.info("--no-llm: LLM 요약 생략")
 
     # 실행 집계. 발송 직전에 남겨 실패 여부와 무관하게 항상 기록되게 한다.
-    _log_run_summary(cfg, posts_by_source, detail_attempted, detail_succeeded)
+    _log_run_summary(cfg, posts_by_source, detail, assembly_detail)
 
     if args.dry_run:
         _print_dry_run(posts_by_source)
@@ -240,27 +265,45 @@ def run(argv=None) -> int:
 def _log_run_summary(
     cfg,
     posts_by_source: dict[str, list[Post]],
-    detail_attempted: int,
-    detail_succeeded: int,
+    detail: "_DetailStats",
+    assembly_detail: "_DetailStats",
 ) -> None:
-    """실행 종료 집계: 상세 수집과 AI 요약의 시도/성공/실패 건수.
+    """실행 종료 집계: 상세 수집(전체/의안)과 AI 요약의 시도/성공/실패 건수.
 
     상세 수집 성공률 0% 는 파서·마크업이 통째로 어긋났다는 뜻이라 ERROR 로 남긴다.
-    다만 발송은 막지 않는다 — 본문 없이라도 제목·링크가 담긴 알림이 나가는 편이
-    알림 자체가 끊기는 것보다 낫다(전체 설계 원칙).
+    전체와 의안을 따로 판정하는 이유는, 금융위·금감원이 정상이면 합계는 멀쩡해 보여
+    의안 전면 실패가 묻히기 때문이다.
+
+    어느 ERROR 도 발송을 막지 않는다 — 본문 없이라도 제목·링크가 담긴 알림이 나가는
+    편이 알림 자체가 끊기는 것보다 낫다(전체 설계 원칙).
     """
-    detail_failed = detail_attempted - detail_succeeded
     log.info(
-        "상세 수집 집계 — 시도 %d건 / 성공 %d건 / 실패 %d건",
-        detail_attempted,
-        detail_succeeded,
-        detail_failed,
+        "상세 수집 집계(전체) — 시도 %d건 / 성공 %d건 / 실패 %d건",
+        detail.attempted,
+        detail.succeeded,
+        detail.failed,
     )
-    if detail_attempted > 0 and detail_succeeded == 0:
+    log.info(
+        "상세 수집 집계(의안) — 시도 %d건 / 성공 %d건 / 실패 %d건",
+        assembly_detail.attempted,
+        assembly_detail.succeeded,
+        assembly_detail.failed,
+    )
+    if detail.attempted > 0 and detail.succeeded == 0:
         log.error(
             "상세 수집 성공률 0%% (시도 %d건 전부 실패) — 파서/마크업 확인 필요. "
             "메일은 제목·링크만으로 계속 발송합니다. debug/ 덤프를 확인하세요.",
-            detail_attempted,
+            detail.attempted,
+        )
+    # 전체 ERROR 와 별개로 판정한다. 다른 소스가 성공해 위 조건이 거짓이어도
+    # 의안만 전멸했다면 반드시 드러나야 한다.
+    if assembly_detail.attempted > 0 and assembly_detail.succeeded == 0:
+        log.error(
+            "의안 상세(제안이유) 수집 성공률 0%% (시도 %d건 전부 실패) — 상세 페이지 "
+            "구조/폼 변경 의심. 의안은 요약 없이 제목·링크만 발송됩니다. "
+            "debug/assembly_bill_detail_*.txt 를 확인하고 "
+            "scripts/capture_assembly_fixture.py 로 재캡처하세요.",
+            assembly_detail.attempted,
         )
 
     targets = ai_target_count(cfg.llm, posts_by_source)
