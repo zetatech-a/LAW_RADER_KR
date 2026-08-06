@@ -8,7 +8,7 @@ from email.message import EmailMessage
 from email.utils import formataddr
 
 from .config import EmailConfig
-from .models import Post
+from .models import ASSEMBLY_SOURCE_KEY, Post
 from .snippet import build_fallback_snippet
 
 log = logging.getLogger(__name__)
@@ -48,9 +48,26 @@ _AI_NOTICE = (
 )
 
 
+# 의안은 본문 전체가 아니라 '제안이유 및 주요내용'만 수집·요약한다. 무엇을 요약한
+# 것인지가 메일에서 드러나야 원문 확인이 쉬우므로 라벨에 출처를 함께 적는다.
+_ASSEMBLY_SUMMARY_PREFIX = "제안이유 및 주요내용 · "
+_ASSEMBLY_BODY_LABEL = "제안이유 및 주요내용 발췌"
+_BODY_LABEL = "원문 발췌"
+
+
 def _summary_label(p: Post) -> str:
     """요약 블록 제목. 실제 줄 수를 그대로 표기한다(config 의 lines 를 바꿔도 맞음)."""
-    return f"AI {len(p.summary)}줄 요약"
+    label = f"AI {len(p.summary)}줄 요약"
+    if p.source_key == ASSEMBLY_SOURCE_KEY:
+        return _ASSEMBLY_SUMMARY_PREFIX + label
+    return label
+
+
+def _body_label(p: Post) -> str:
+    """AI 요약이 없을 때 쓰는 발췌 블록 제목."""
+    if p.source_key == ASSEMBLY_SOURCE_KEY:
+        return _ASSEMBLY_BODY_LABEL
+    return _BODY_LABEL
 
 
 def _has_summary(posts_by_source: dict[str, list[Post]]) -> bool:
@@ -116,10 +133,18 @@ def _summary_block(p: Post, accent: str) -> str:
         )
 
     if p.body:
-        return (
+        snippet = (
             "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
             f"{_esc(build_fallback_snippet(p.body, p.title))}</div>"
         )
+        # 의안은 발췌의 출처(제안이유 및 주요내용)를 밝힌다. 그 외 소스는 기존과 같이
+        # 라벨 없이 발췌만 싣는다.
+        if p.source_key == ASSEMBLY_SOURCE_KEY:
+            return (
+                f"<div style='margin:10px 0 0;font-size:10px;letter-spacing:.8px;"
+                f"font-weight:700;color:{accent}'>{_esc(_body_label(p))}</div>{snippet}"
+            )
+        return snippet
     return ""
 
 
@@ -253,7 +278,7 @@ def build_text(posts_by_source: dict[str, list[Post]]) -> str:
                 for s in p.summary:
                     lines.append(f"      · {s}")
             elif p.body:
-                lines.append("    [원문 발췌]")
+                lines.append(f"    [{_body_label(p)}]")
                 lines.append(f"      {build_fallback_snippet(p.body, p.title)}")
             lines.append(f"    {p.url}")
             for a in p.attachments:

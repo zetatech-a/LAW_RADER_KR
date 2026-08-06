@@ -191,13 +191,14 @@ src/
   main.py                   # 오케스트레이션(수집→신규판별→enrich→메일→저장)
   config.py  fetcher.py     # 설정 로딩 / HTTP 세션(재시도·한글 인코딩·첨부 용량 제한)
   state.py   notifier.py    # 신규 판별 상태(원자적 저장) / 이메일 렌더·발송
-  summarizer.py             # 본문 3줄 요약(Gemini REST API, 실패 시 원문 발췌 폴백)
+  summarizer.py             # 일반 게시물 3줄 요약(1건당 1회, 실패 시 원문 발췌 폴백)
+  assembly_summary.py       # 계류의안 배치 3줄 요약(최대 25건/요청, BILL_ID 로 매핑)
   snippet.py                # 요약 실패 시 쓰는 원문 발췌 정제(제목 중복·상용구 제거)
   models.py                 # Post, Attachment
   scrapers/
     base.py                 # 스크래퍼 베이스(페이지네이션·디버그 덤프)
     fsc.py  fss.py          # 금융위 / 금감원 게시판
-    better_fsc.py assembly.py  # 회신사례(JSON) / 계류의안(Open API)
+    better_fsc.py assembly.py  # 회신사례(JSON) / 계류의안(Open API + 제안이유 수집)
 state/seen.json             # 이미 본 글 ID (자동 커밋)
 scripts/
   send_test_email.py        # SMTP 설정 확인

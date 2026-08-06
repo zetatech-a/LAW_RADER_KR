@@ -15,12 +15,20 @@
   { "<service>": [ {"head":[...]}, {"row":[ {..필드..}, ... ]} ] }
 필드명은 서비스마다 다를 수 있어 흔한 후보를 순서대로 시도하고, 파싱 실패 시
 원본 JSON 을 debug/ 에 덤프한다(→ 한 번의 verify 로 정확한 필드 확정).
+
+enrich() 는 상세 페이지에서 '제안이유 및 주요내용'을 가져와 post.body 에 담는다.
+이 본문은 의안 전용 배치 요약(src/assembly_summary.py)의 입력이 되고, 요약이 실패하면
+메일에서 발췌 폴백으로 쓰인다.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
+from urllib.parse import urljoin, urlparse
+
+from bs4 import BeautifulSoup
 
 from ..models import Post
 from .base import BaseScraper, clean_text
@@ -28,6 +36,84 @@ from .base import BaseScraper, clean_text
 log = logging.getLogger(__name__)
 
 _DETAIL = "https://likms.assembly.go.kr/bill/billDetail.do?billId={bill_id}"
+
+# --- 제안이유 및 주요내용 수집 ---
+#
+# 상세 페이지의 '제안이유 및 주요내용'은 페이지에 함께 실려 오기도 하고, 별도 요청으로
+# 채워지기도 한다. 어느 쪽인지는 사이트 개편에 따라 바뀌므로 두 경로를 모두 지원한다.
+#
+# 두 번째 경로(별도 요청)에서 POST URL·필드명(CSRF 포함)을 코드에 박아 두지 않는다.
+# 사이트가 필드명을 바꾸면 조용히 빈 본문만 남기 때문이다. 대신 받은 HTML 에서 폼을
+# 찾아 그 폼의 action·method·hidden input 을 '그대로' 되돌려 보낸다 — CSRF 토큰도
+# hidden input 이면 자동으로 포함되고, meta 태그로 오는 경우만 따로 보탠다.
+_SUMMARY_SELECTORS = ("pre#prntSummary", "#prntSummary", "#summaryContentDiv")
+
+# 상세 페이지에는 값이 채워지기 전의 빈 컨테이너가 먼저 있을 수 있다. 공백·안내문
+# 수준의 짧은 텍스트를 '수집 성공'으로 보면 요약도 발췌도 못 쓰는 본문이 실린다.
+_MIN_SUMMARY_CHARS = 20
+
+# 폼 action 으로 허용하는 호스트. 상세 페이지에는 외부 링크 폼(검색·공유 등)이 섞일 수
+# 있고, 그 action 으로 hidden input(세션 식별자·CSRF 포함)을 보내면 안 된다.
+_ALLOWED_HOST = "likms.assembly.go.kr"
+
+# 디버그 덤프 파일명에 bill_id 를 그대로 쓰면 경로 조작이 될 수 있다.
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]")
+
+def _allowed_action(url: str) -> bool:
+    """폼 action 이 의안정보시스템의 HTTPS 주소인지."""
+    parts = urlparse(url)
+    return parts.scheme == "https" and parts.hostname == _ALLOWED_HOST
+
+
+def _extract_summary(soup: BeautifulSoup) -> str:
+    """'제안이유 및 주요내용' 텍스트. 못 찾거나 사실상 비어 있으면 빈 문자열."""
+    for sel in _SUMMARY_SELECTORS:
+        el = soup.select_one(sel)
+        if el is None:
+            continue
+        text = clean_text(el.get_text("\n"))
+        if len(text) >= _MIN_SUMMARY_CHARS:
+            return text
+    return ""
+
+
+def _hidden_inputs(form) -> dict[str, str]:
+    """폼의 hidden input 전체(name → value). CSRF 토큰도 보통 여기 들어 있다."""
+    out: dict[str, str] = {}
+    for el in form.find_all("input"):
+        if (el.get("type") or "").strip().lower() != "hidden":
+            continue
+        name = (el.get("name") or "").strip()
+        if name:
+            out[name] = el.get("value") or ""
+    return out
+
+
+def _csrf_from_meta(soup: BeautifulSoup) -> tuple[str, str, str]:
+    """meta 태그로 실려 오는 CSRF 정보 (토큰, 헤더명, 파라미터명).
+
+    필드명을 추측하지 않는다 — 이름에 'csrf' 가 든 meta 만 보고, 그 이름이 header/
+    parameter 중 무엇을 뜻하는지도 meta 이름 자체로 판단한다.
+    """
+    token = header = param = ""
+    for m in soup.find_all("meta"):
+        name = (m.get("name") or "").strip().lower()
+        content = (m.get("content") or "").strip()
+        if not content or "csrf" not in name:
+            continue
+        if "header" in name:
+            header = header or content
+        elif "param" in name:
+            param = param or content
+        else:
+            token = token or content
+    return token, header, param
+
+
+# 값이 비어 있으면 의안 ID 를 채워 줄 hidden input 이름(소문자 비교).
+# '없는 필드를 만들어 보내는' 것이 아니라, 폼에 이미 있는 빈 칸만 채운다.
+_BILL_ID_FIELDS = ("billid", "bill_id")
+
 
 # 응답 레코드에서 값을 찾을 때 시도할 필드명 후보(명세서 출력값 기준 + 변형 대비)
 _ID_FIELDS = ("BILL_ID", "billId", "BILL_NO", "billNo")
@@ -168,6 +254,106 @@ class AssemblyBillScraper(BaseScraper):
                 return str(v)
         return ""
 
+    # --- 상세: 제안이유 및 주요내용 ---
     def enrich(self, post: Post) -> None:
-        # 의안은 제목·의안번호·제안자·상세링크가 핵심이라 별도 본문 수집은 생략.
-        return
+        """상세 페이지에서 '제안이유 및 주요내용'을 가져와 post.body 에 담는다.
+
+        어떤 실패도 밖으로 던지지 않는다 — 의안 한 건의 수집 실패가 다른 의안이나
+        메일 발송을 막아서는 안 된다. 본문이 비면 메일에는 제목·링크만 실린다.
+        """
+        try:
+            self._fill_proposal_reason(post)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "[%s] 제안이유 수집 실패(%s) %s: %s",
+                self.key,
+                post.post_id,
+                post.url,
+                e,
+            )
+
+    def _fill_proposal_reason(self, post: Post) -> None:
+        resp = self.fetcher.get(post.url, referer=self.list_url)
+        html = self.fetcher.text(resp)
+        soup = BeautifulSoup(html, "lxml")
+
+        # 1) 상세 HTML 에 이미 실려 있으면 그대로 쓴다(추가 요청 없음).
+        text = _extract_summary(soup)
+        if text:
+            post.body = text
+            return
+
+        # 2) 별도 요청으로 채워지는 구조: 폼을 찾아 그대로 되돌려 보낸다.
+        text, follow_html = self._request_summary(soup, post)
+        if text:
+            post.body = text
+            return
+
+        # 3) 그래도 없으면 셀렉터/폼 판정을 고칠 수 있도록 bill_id 별로 덤프한다.
+        log.info(
+            "[%s] 제안이유 및 주요내용을 찾지 못함(%s) — 디버그 덤프.", self.key, post.post_id
+        )
+        dump = html
+        if follow_html:
+            dump = f"{html}\n\n<!-- ===== 후속 응답 ===== -->\n{follow_html}"
+        self._dump_debug(f"detail_{_UNSAFE_NAME.sub('_', post.post_id)}", dump)
+
+    def _request_summary(self, soup: BeautifulSoup, post: Post) -> tuple[str, str]:
+        """상세 페이지의 폼을 그대로 재전송해 제안이유를 받아온다.
+
+        반환값은 (제안이유 텍스트, 후속 응답 HTML). 보낼 만한 폼이 없으면 ("", "").
+        """
+        found = self._summary_form(soup, post)
+        if found is None:
+            log.debug("[%s] 제안이유 요청에 쓸 폼을 찾지 못함(%s)", self.key, post.post_id)
+            return "", ""
+        form, action = found
+
+        data = _hidden_inputs(form)
+        # 폼에 이미 있는 빈 의안 ID 칸만 채운다(값이 있으면 건드리지 않는다).
+        for name in list(data):
+            if name.lower() in _BILL_ID_FIELDS and not data[name]:
+                data[name] = post.post_id
+
+        headers: dict[str, str] = {}
+        token, header, param = _csrf_from_meta(soup)
+        if token and header:
+            headers[header] = token
+        if token and param and not data.get(param):
+            data[param] = token
+
+        method = (form.get("method") or "post").strip().lower()
+        if method == "get":
+            resp = self.fetcher.get(action, params=data, referer=post.url, headers=headers)
+        else:
+            resp = self.fetcher.post(action, data=data, referer=post.url, headers=headers)
+        html = self.fetcher.text(resp)
+        return _extract_summary(BeautifulSoup(html, "lxml")), html
+
+    def _summary_form(self, soup: BeautifulSoup, post: Post):
+        """제안이유를 돌려줄 것으로 보이는 폼과 그 action URL.
+
+        점수가 0 인(= 이 의안과의 연관 근거가 하나도 없는) 폼에는 보내지 않는다.
+        상세 페이지에는 검색·통계 등 무관한 폼이 함께 있고, 그런 폼에 hidden input 을
+        되쏘면 엉뚱한 요청이 된다.
+        """
+        best = None
+        best_score = 0
+        for form in soup.find_all("form"):
+            action = urljoin(post.url, (form.get("action") or "").strip())
+            if not _allowed_action(action):
+                continue
+            hidden = _hidden_inputs(form)
+            blob = " ".join(
+                (form.get("id") or "", form.get("name") or "", action)
+            ).lower()
+            score = 0
+            if "summary" in blob:
+                score += 4
+            if post.post_id and post.post_id in hidden.values():
+                score += 2
+            if any(k.lower() in _BILL_ID_FIELDS for k in hidden):
+                score += 1
+            if score > best_score:
+                best, best_score = (form, action), score
+        return best

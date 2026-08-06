@@ -4,6 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+# 의안(계류의안) 소스의 key. 요약 경로(배치)와 메일 라벨이 이 값으로 갈리므로
+# 여러 모듈이 같은 문자열을 각자 적어 두지 않도록 한 곳에 둔다(config.yaml 의 key 와 동일).
+ASSEMBLY_SOURCE_KEY = "assembly_bill"
+
 
 @dataclass
 class Attachment:
