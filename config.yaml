@@ -178,8 +178,14 @@ sources:
     api_endpoint: "https://open.assembly.go.kr/portal/openapi"
     api_service: "nwbqublzajtcqpdae"
     page_size: 100
-    # 상세 URL 폴백(응답의 LINK_URL 이 비어 있는 레코드에만 사용).
-    # ※ 라이브 확인 필요: 의안정보시스템이 상세 경로를 /bill/bi/billDetailPage.do 로
-    #   옮겼고 구 경로(/bill/billDetail.do)가 redirect 되지 않는다면 아래 주석을 풀어
-    #   새 경로로 덮어쓰세요(코드 수정 불필요).
+    # 상세 URL 템플릿(기본값은 코드에 있으므로 평소에는 지정할 필요가 없습니다).
+    #
+    # 라이브 검증 완료(2026-08):
+    #   - 현재 상세 경로는 /bill/bi/billDetailPage.do?billId=... 이고 HTTP 200 입니다.
+    #   - Open API 의 LINK_URL 은 아직 구 경로 /bill/billDetail.do 를 돌려주는데, 최신
+    #     의안에서 그 경로는 "해당 의안 정보가 존재하지 않습니다"를 응답합니다
+    #     (redirect 없음). 그래서 스크래퍼가 BILL_ID 로 현재 경로를 다시 만듭니다
+    #     (canonicalize). 우리가 모르는 다른 상세 경로가 오면 그대로 존중합니다.
+    #
+    # 사이트가 경로를 또 옮기면 코드 수정 없이 아래 한 줄로 덮어쓸 수 있습니다.
     # detail_url: "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId={bill_id}"

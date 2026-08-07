@@ -123,13 +123,29 @@ _WS_ALL = re.compile(r"\s+")
 
 
 class SummaryProbe(str, Enum):
-    """제안이유 컨테이너를 들여다본 결과.
+    """응답에서 제안이유를 찾아본 결과. 이 네 값이 곧 상태 판정의 근거다.
 
-    이 세 값이 곧 상태 판정의 근거다:
-      FOUND      쓸 만한 본문이 있다            → AVAILABLE
-      EMPTY      컨테이너는 있는데 비어 있다     → PENDING (구조는 멀쩡함이 확인됨)
-      MISSING    컨테이너 자체가 없다            → ERROR (셀렉터/구조 변경)
-      UNEXPECTED 컨테이너에 알 수 없는 내용      → ERROR (예상하지 못한 응답)
+      FOUND      쓸 만한 본문이 있다                        → AVAILABLE
+      EMPTY      응답은 정상인데 제안이유가 아직 없다        → PENDING
+      MISSING    기대한 구조가 아니다(마크업/응답 변경)      → ERROR
+      UNEXPECTED 컨테이너에 알 수 없는 내용이 있다            → ERROR
+
+    **EMPTY 는 '컨테이너가 있는데 비어 있다'로 한정되지 않는다.** 라이브 확인
+    (Action #13) 결과, 제안이유가 등록되기 전에는 #prntsummary-sect 와
+    pre#prntSummary 가 아예 생성되지 않는다. 그 응답도 HTTP 200 정상 심사정보
+    HTML 이고 의안번호·제안일자·제안자는 정상적으로 들어 있다. 그래서 EMPTY 는
+    다음 둘 다를 뜻한다:
+
+      - pre#prntSummary 가 있는데 내용이 완전히 비어 있다
+      - pre#prntSummary 도 #prntsummary-sect 도 없지만 **정상 billInfo shell 은
+        온전하다**(= 응답 자체는 정상, 원문만 아직 등록되지 않음)
+
+    반대로 섹션은 있는데 pre 만 없거나, 제안이유 표식은 있는데 예상 selector 가
+    없거나, 정상 shell 자체가 없으면 MISSING(ERROR) 이다 — 그런 것을 EMPTY 로
+    넘기면 마크업 변경이 '등록 대기'로 위장된다.
+
+    판정 규칙 전체는 _probe_billinfo 참고. 초기 상세 GET 용 _probe_summary 는
+    구형(inline) 페이지 지원이라 폴백 selector 를 함께 본다.
     """
 
     FOUND = "found"
