@@ -329,3 +329,46 @@ def test_committed_fixture_meta_urls_are_already_clean():
         for hop in meta.get("redirects") or []:
             assert cap._sanitize_url(hop["url"]) == hop["url"], meta_path
     assert checked > 0          # fixture 가 사라지면 이 테스트가 조용해지지 않도록
+
+
+# --- fixture HTML 의 URL 속성도 정화한다 (커밋되는 파일이다) ---
+
+
+_FIX_TOKEN = "3f2a91c4-8b7d-4e16-9a02-5c6d1e8f0b34"
+
+
+def test_sanitize_redacts_secrets_in_url_attributes():
+    html = (
+        "<html><body>"
+        f'<form id="form" action="/bill/detail.do?billId=PRC_A1&csrfToken={_FIX_TOKEN}">'
+        '<input type="hidden" name="billId" value="PRC_A1"/></form>'
+        f'<a href="/x.do?sessionKey={_FIX_TOKEN}">L</a>'
+        "</body></html>"
+    )
+    out = cap._sanitize(html)
+    assert _FIX_TOKEN not in out
+    assert "csrfToken=" in out and "sessionKey=" in out   # 이름은 남는다
+    assert "billId=PRC_A1" in out
+
+
+def test_sanitize_does_not_mangle_urls_without_parameters():
+    """회귀: 파라미터가 없는 값까지 재조립하면 href="#" 이 href="" 가 된다."""
+    html = '<html><body><a href="#">공유</a><a href="/bill/plain.do">L</a></body></html>'
+    out = cap._sanitize(html)
+    assert 'href="#"' in out
+    assert 'href="/bill/plain.do"' in out
+
+
+def test_sanitize_is_idempotent_on_committed_fixtures():
+    """이미 커밋된 fixture 를 다시 정화해도 한 글자도 바뀌지 않아야 한다.
+
+    정화가 구조를 건드리면 재캡처마다 의미 없는 diff 가 생기고, 무엇이 진짜 변화인지
+    구분할 수 없게 된다.
+    """
+    root = Path(__file__).parent / "fixtures" / "assembly"
+    checked = 0
+    for html_path in root.glob("*/*.html"):
+        before = html_path.read_text(encoding="utf-8")
+        assert cap._sanitize(before) == before, html_path
+        checked += 1
+    assert checked > 0

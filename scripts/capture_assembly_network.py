@@ -80,9 +80,13 @@ _SECRET_NAME_HINTS = (
     "auth", "secret", "passwd", "password", "nonce", "sid",
 )
 # 값 자체로 알아볼 수 있는 것들
+# 세션 쿠키 값은 '?' 도 '&' 도 포함하지 않는다. 문자 클래스에서 둘 다 빼지 않으면
+# 이미 구조가 있는 문자열에서 패턴이 URL 경계를 넘어 삼킨다 — 실제로
+# `jsessionid=REDACTED?billId=PRC_A1` 이 통째로 REDACTED 가 되어 키 이름과 공개
+# 식별자까지 사라졌다(아티팩트의 진단 가치가 바로 그 billId 에 있는데도).
 _SECRET_VALUE_PATTERNS = (
-    re.compile(r"JSESSIONID=[^;\"'\s&]+", re.I),
-    re.compile(r"WMONID=[^;\"'\s&]+", re.I),
+    re.compile(r"JSESSIONID=[^;\"'\s&?]+", re.I),
+    re.compile(r"WMONID=[^;\"'\s&?]+", re.I),
     re.compile(r"\b[0-9a-f]{32,}\b", re.I),
     re.compile(r"\b\d{6}-[1-4]\d{6}\b"),                # 주민등록번호 형태
     re.compile(r"\b01[016-9]-?\d{3,4}-?\d{4}\b"),       # 휴대전화
@@ -92,6 +96,15 @@ REDACTED = "REDACTED"
 
 # 공개 식별자라 값을 남겨도 되는 키(계약 확인에 필요하다). 이름 힌트보다 우선한다.
 _PUBLIC_QUERY_KEYS = {"billid", "bill_id", "billno", "agefrom", "ageto", "age", "tabnm"}
+
+# 값이 URL 인 HTML 속성. 이 값들은 문자열이 아니라 URL 로 취급해 정화한다.
+_URL_VALUED_ATTRS = (
+    "action", "formaction", "href", "src", "poster", "cite",
+    "data-url", "data-src", "data-href", "data-action",
+)
+
+# 자유 텍스트(예외 메시지·콘솔 로그) 안에 박힌 절대 URL.
+_URL_IN_TEXT = re.compile(r"""https?://[^\s"'<>)\]}]+""")
 
 
 def _is_secret_name(name: str) -> bool:
@@ -146,7 +159,30 @@ def _scrub_html(html: str) -> str:
         if not (el.get("src") or "").strip():
             el.string = ""
 
+    # 값이 URL 인 속성(form@action, a@href, script@src …)도 URL 규칙을 태운다.
+    # 헤더의 Referer 와 같은 이유다 — 속성 이름 자체는 비밀이 아니고 _scrub_text 는
+    # 쿼리 파라미터 '이름'을 모르므로, action="...?csrfToken=<UUID>" 같은 값이 그대로
+    # 직렬화된다. 특히 외부 script@src 는 위에서 일부러 남기므로 반드시 정화해야 한다.
+    for el in soup.find_all(True):
+        for attr in _URL_VALUED_ATTRS:
+            value = el.get(attr)
+            if isinstance(value, str) and value.strip():
+                el[attr] = _scrub_attr_url(value)
+
     return _scrub_text(str(soup))
+
+
+def _scrub_attr_url(value: str) -> str:
+    """URL 속성값 정화. 정화할 파라미터가 없으면 원문 구조를 그대로 둔다.
+
+    이름 기준 정화가 필요한 것은 쿼리(?a=b)와 경로 파라미터(;a=b)뿐이다. 둘 다 없는
+    값에까지 urlparse→urlunparse 를 돌리면 정화와 무관한 곳이 바뀐다 — 실제로
+    href="#" 이 href="" 가 되어(빈 fragment 는 재조립에서 사라진다) 구조가 손상됐다.
+    '값만 지우고 구조는 남긴다'는 원칙에 어긋나고, 재캡처마다 무의미한 diff 도 생긴다.
+    """
+    if "?" in value or ";" in value:
+        return _scrub_url(value)
+    return _scrub_text(value)
 
 
 def _scrub_json_value(value):
@@ -254,6 +290,20 @@ def _scrub_path_params(params: str) -> str:
             f"{name}={REDACTED if _is_secret_name(name) else _scrub_text(value)}"
         )
     return ";".join(out)
+
+
+def _scrub_free_text(text: str) -> str:
+    """예외 메시지·콘솔 로그처럼 URL 이 박혀 오는 자유 텍스트를 정화한다.
+
+    Playwright 의 타임아웃 예외는 call log 에 `navigating to "<전체 URL>"` 을 그대로
+    담는다. 그 예외를 f-string 으로 manifest 에 넣으면, requested_url·final_url 을
+    정화해 둔 것이 무의미해진다 — 같은 URL 이 예외 문자열을 타고 그대로 실린다.
+    브라우저 콘솔도 실패한 요청을 전체 URL 로 찍는다.
+
+    문자열 안의 절대 URL 을 찾아 URL 규칙으로 갈아끼운 뒤 값 패턴 정화를 돌린다.
+    """
+    scrubbed = _URL_IN_TEXT.sub(lambda m: _scrub_url(m.group(0)), text or "")
+    return _scrub_text(scrubbed)
 
 
 def _manifest_url(url: str) -> str:
@@ -449,7 +499,8 @@ def capture(
 
     result["requests"] = requests_log
     result["responses"] = manifest
-    _write(out_dir / "browser_console.txt", _scrub_text("\n".join(console_lines)))
+    # 콘솔도 실패한 요청을 전체 URL 로 찍는다 — 같은 규칙을 적용한다.
+    _write(out_dir / "browser_console.txt", _scrub_free_text("\n".join(console_lines)))
     _write(
         out_dir / "assembly_xhr_manifest.json",
         json.dumps(result, ensure_ascii=False, indent=2),
@@ -501,7 +552,7 @@ def _capture_with_browser(
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         except PWTimeout as e:
-            result["errors"].append(f"goto timeout: {e}")
+            result["errors"].append(_scrub_free_text(f"goto timeout: {e}"))
 
         result["final_url"] = _manifest_url(page.url)
         print(f"  → 최종 URL {result['final_url']}")
@@ -519,7 +570,9 @@ def _capture_with_browser(
             else:
                 print(f"  ! 심사정보 탭({TAB_SELECTOR})을 찾지 못함")
         except Exception as e:  # noqa: BLE001
-            result["errors"].append(f"tab click: {type(e).__name__}: {e}")
+            result["errors"].append(
+                _scrub_free_text(f"tab click: {type(e).__name__}: {e}")
+            )
 
         # 패널이 채워지거나 네트워크가 잦아들 때까지 명시적 대기
         try:
@@ -557,7 +610,9 @@ def _capture_with_browser(
                 _write(out_dir / "assembly_js_report.txt", _js_report(js))
                 result["billDetail_js"] = js_url
             except Exception as e:  # noqa: BLE001
-                result["errors"].append(f"js download: {type(e).__name__}: {e}")
+                result["errors"].append(
+                    _scrub_free_text(f"js download: {type(e).__name__}: {e}")
+                )
         else:
             print(f"  ! {BILL_DETAIL_JS_HINT} 요청을 보지 못함")
 
@@ -573,7 +628,9 @@ def _capture_with_browser(
                 json.dumps(_sanitize_har(har), ensure_ascii=False),
             )
         except Exception as e:  # noqa: BLE001
-            result["errors"].append(f"har sanitize: {type(e).__name__}: {e}")
+            result["errors"].append(
+                _scrub_free_text(f"har sanitize: {type(e).__name__}: {e}")
+            )
 
     return manifest
 

@@ -124,10 +124,18 @@ _SECRET_NAME_HINTS = (
 )
 _PLACEHOLDER = "REDACTED-FOR-FIXTURE"
 
+# 값이 URL 인 HTML 속성. 문자열이 아니라 URL 로 취급해 정화한다.
+_URL_VALUED_ATTRS = (
+    "action", "formaction", "href", "src", "poster", "cite",
+    "data-url", "data-src", "data-href", "data-action",
+)
+
 # 값 자체로 알아볼 수 있는 식별자(쿠키 문자열·긴 16진 해시 등)
+# 세션 쿠키 값은 '?'·'&' 를 포함하지 않는다. 문자 클래스에서 빼지 않으면 이미 구조가
+# 있는 문자열(URL 등)에서 패턴이 경계를 넘어 삼켜 키 이름·공개 식별자까지 지운다.
 _VALUE_PATTERNS = (
-    re.compile(r"JSESSIONID=[^;\"'\s]+", re.I),
-    re.compile(r"WMONID=[^;\"'\s]+", re.I),
+    re.compile(r"JSESSIONID=[^;\"'\s&?]+", re.I),
+    re.compile(r"WMONID=[^;\"'\s&?]+", re.I),
     re.compile(r"\b[0-9a-f]{32,}\b", re.I),          # 긴 16진 토큰
     re.compile(r"\b\d{6}-[1-4]\d{6}\b"),             # 주민등록번호 형태
     re.compile(r"\b01[016-9]-?\d{3,4}-?\d{4}\b"),    # 휴대전화
@@ -206,6 +214,22 @@ def _sanitize(html: str) -> str:
     # 파서는 어차피 보지 않는다.
     for el in soup.find_all(["script", "style"]):
         el.string = ""
+
+    # 값이 URL 인 속성도 URL 규칙을 태운다. 필드 값과 같은 이유다 — 속성 이름은
+    # 비밀이 아니고 값 패턴은 쿼리 파라미터 '이름'을 모르므로,
+    # action="...?csrfToken=<UUID>" 같은 값이 그대로 fixture 에 커밋된다.
+    for el in soup.find_all(True):
+        for attr in _URL_VALUED_ATTRS:
+            value = el.get(attr)
+            if isinstance(value, str) and value.strip():
+                # 쿼리·경로 파라미터가 있을 때만 URL 로 재조립한다. 그렇지 않은 값까지
+                # urlparse→urlunparse 를 돌리면 href="#" 이 href="" 가 되는 식으로
+                # 정화와 무관한 구조가 바뀐다(빈 fragment 는 재조립에서 사라진다).
+                el[attr] = (
+                    _sanitize_url(value)
+                    if ("?" in value or ";" in value)
+                    else _scrub_value(value)
+                )
 
     out = str(soup)
     for pat in _VALUE_PATTERNS:

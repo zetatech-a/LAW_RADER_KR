@@ -23,6 +23,7 @@ from scripts.capture_assembly_network import (
     _sanitize_har,
     _scrub_headers,
     _scrub_body,
+    _scrub_free_text,
     _scrub_html,
     _scrub_json_text,
     _scrub_post_data,
@@ -690,3 +691,140 @@ def test_sanitize_har_redacts_credentials_inside_referer_and_location():
     assert "3f2a91c4-8b7d-4e16" not in out
     assert "Referer" in out and "Location" in out       # 이름은 남는다
     assert "billId=PRC_A1" in out
+
+
+# --- HTML 의 URL 속성(action·href·src)도 URL 규칙으로 정화한다 ---
+#
+# 필드 값·헤더와 같은 이유다. 속성 이름은 비밀이 아니라 마스킹 대상이 아니고,
+# _scrub_text 는 쿼리 파라미터 '이름'을 모른다. 외부 script@src 는 위에서 일부러
+# 남기므로 특히 위험하다.
+
+_ATTR_HTML = (
+    "<html><body>"
+    f'<form id="form" action="/bill/bi/detail.do?billId=PRC_A1&csrfToken={_UUID_TOKEN}">'
+    '<input type="hidden" name="billId" value="PRC_A1"/></form>'
+    f'<a href="https://likms.assembly.go.kr/x.do?sessionKey={_UUID_TOKEN}">링크</a>'
+    f'<script src="/static/billDetail.js?authToken={_UUID_TOKEN}"></script>'
+    '<a class="sns" href="#">공유</a>'
+    '<a href="/bill/plain.do">보통 링크</a>'
+    "</body></html>"
+)
+
+
+def test_scrub_html_redacts_secrets_in_url_attributes():
+    out = _scrub_html(_ATTR_HTML)
+    assert _UUID_TOKEN not in out
+
+
+def test_scrub_html_keeps_url_attribute_names_and_public_params():
+    out = _scrub_html(_ATTR_HTML)
+    assert "csrfToken=" in out and "sessionKey=" in out and "authToken=" in out
+    assert "billId=PRC_A1" in out
+    assert "/static/billDetail.js" in out       # 어떤 스크립트였는지는 남아야 한다
+
+
+def test_external_script_src_is_kept_but_sanitized():
+    """외부 script@src 는 계약 분석에 필요해 남기므로, 반드시 정화되어야 한다."""
+    out = _scrub_html(_ATTR_HTML)
+    assert "<script" in out and "billDetail.js" in out
+    assert _UUID_TOKEN not in out
+
+
+def test_scrub_html_does_not_mangle_urls_without_parameters():
+    """회귀: 파라미터가 없는 값까지 재조립하면 href="#" 이 href="" 가 된다.
+
+    빈 fragment 는 urlunparse 에서 사라진다. 정화와 무관한 구조가 바뀌면 '값만 지우고
+    구조는 남긴다'는 원칙에 어긋나고, 재캡처마다 무의미한 diff 도 생긴다.
+    """
+    out = _scrub_html(_ATTR_HTML)
+    assert 'href="#"' in out
+    assert 'href="/bill/plain.do"' in out
+
+
+def test_scrub_html_redacts_session_id_in_path_parameter_attribute():
+    html = '<html><body><a href="/bill/x.do;jsessionid=ABC999?billId=PRC_A1">L</a></body></html>'
+    out = _scrub_html(html)
+    assert "ABC999" not in out
+    # 마무리 값 패턴 pass 가 `jsessionid=<값>` 을 통째로 치환하므로 그 키 이름은
+    # 남지 않는다(쿠키 문자열용 패턴이라 그게 맞다). 중요한 것은 값이 사라지고
+    # 아티팩트의 진단 가치인 공개 식별자가 살아남는 것이다.
+    assert "billId=PRC_A1" in out
+
+
+def test_session_pattern_stops_at_the_query_delimiter():
+    """회귀: JSESSIONID 패턴이 '?' 를 삼켜 뒤따르는 billId 까지 지웠다.
+
+    세션 쿠키 값에는 '?' 도 '&' 도 들어가지 않으므로 문자 클래스에서 뺀다.
+    """
+    out = _scrub_text("/bill/x.do;jsessionid=ABC999?billId=PRC_A1&ageFrom=22")
+    assert "ABC999" not in out
+    assert "billId=PRC_A1" in out
+    assert "ageFrom=22" in out
+
+
+def test_session_pattern_still_clears_cookie_strings():
+    out = _scrub_text("Cookie: JSESSIONID=ABC999; WMONID=xyz9")
+    assert "ABC999" not in out and "xyz9" not in out
+
+
+# --- 예외 메시지·콘솔 로그에 박힌 URL ---
+#
+# Playwright 타임아웃 예외는 call log 에 `navigating to "<전체 URL>"` 을 담는다.
+# requested_url·final_url 을 정화해 둬도 예외 문자열을 타고 그대로 실린다.
+
+_PW_TIMEOUT = (
+    "Timeout 30000ms exceeded.\n"
+    "=========================== logs ===========================\n"
+    'navigating to "https://likms.assembly.go.kr/bill/bi/billDetailPage.do'
+    f'?billId=PRC_A1&authToken={_UUID_TOKEN}", waiting until "domcontentloaded"\n'
+    "============================================================"
+)
+
+
+def test_scrub_free_text_redacts_urls_inside_exception_text():
+    out = _scrub_free_text(f"goto timeout: {_PW_TIMEOUT}")
+    assert _UUID_TOKEN not in out
+    assert "authToken=" in out                 # 이름은 남는다
+    assert "billId=PRC_A1" in out              # 진단에 필요한 식별자도
+    assert "Timeout 30000ms exceeded" in out   # 진단 문구는 그대로
+
+
+def test_scrub_free_text_handles_multiple_urls():
+    text = (
+        f"a https://likms.assembly.go.kr/1.do?sessionKey={_UUID_TOKEN} b "
+        f"https://likms.assembly.go.kr/2.do?csrf={_UUID_TOKEN} c"
+    )
+    out = _scrub_free_text(text)
+    assert _UUID_TOKEN not in out
+    assert out.count("REDACTED") >= 2
+    assert out.startswith("a ") and out.endswith(" c")
+
+
+def test_scrub_free_text_still_applies_value_patterns():
+    out = _scrub_free_text("cookie was JSESSIONID=ABCD1234 and mail hong@example.com")
+    assert "ABCD1234" not in out
+    assert "hong@example.com" not in out
+
+
+def test_scrub_free_text_leaves_plain_messages_intact():
+    assert _scrub_free_text("networkidle timeout") == "networkidle timeout"
+    assert _scrub_free_text("") == ""
+
+
+def test_capture_manifest_does_not_leak_urls_through_errors(
+    tmp_path, monkeypatch, fake_playwright
+):
+    """manifest 의 errors 배열을 타고 자격증명이 나가면 안 된다."""
+    import scripts.capture_assembly_network as cap
+
+    def _with_error(*a, **k):
+        result = a[7] if len(a) > 7 else k["result"]
+        result["errors"].append(cap._scrub_free_text(f"goto timeout: {_PW_TIMEOUT}"))
+        return []
+
+    monkeypatch.setattr(cap, "_capture_with_browser", _with_error)
+    cap.capture("https://likms.assembly.go.kr/x", tmp_path, 1000)
+
+    manifest = (tmp_path / "assembly_xhr_manifest.json").read_text(encoding="utf-8")
+    assert _UUID_TOKEN not in manifest
+    assert "Timeout 30000ms exceeded" in manifest      # 진단은 남는다
