@@ -96,6 +96,10 @@ class BetterReplyScraper(BaseScraper):
         digest = hashlib.md5(f"{t}|{d}".encode("utf-8")).hexdigest()[:16]
         return f"h:{digest}"
 
+    # 상세가 JS 팝업 함수라 수집할 대상이 없다. 본문·첨부가 비는 것이 이 소스의
+    # 정상 동작이므로 상세 수집 통계에서 제외한다(실패로 세면 거짓 장애 경보가 된다).
+    SUPPORTS_ENRICH = False
+
     def enrich(self, post: Post) -> None:
         # 상세가 JS 함수라 단순 수집 불가 — 제목/구분/일자/링크만 통지
         return

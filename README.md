@@ -18,10 +18,67 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 | `fss_sanction` | 금융감독원 | 검사결과 제재 | HTML |
 | `fss_mgmt_notice` | 금융감독원 | 경영유의사항 등 공시 | HTML |
 | `better_reply` | 금융규제·법령해석포털 | 법령해석·비조치의견서 회신사례 | JSON (POST) |
-| `assembly_bill` | 의안정보시스템 | 계류의안 | 열린국회 Open API |
+| `assembly_bill` | 의안정보시스템 | 계류의안 | 열린국회 Open API (목록) + 상세페이지(제안이유 및 주요내용) |
 
-파서는 모두 실제 사이트 HTML/응답으로 검증되어 제목·URL·날짜·본문·첨부를 수집합니다.
+목록 파서는 실제 사이트 HTML/응답으로 검증되어 제목·URL·날짜·본문·첨부를 수집합니다.
 (`fss_mgmt_notice` 는 상세가 PDF 직접 다운로드, `better_reply` 는 상세가 JS 함수라 목록 링크로 안내)
+
+> **확정된 수집 계약** (2026-08 Playwright 라이브 캡처):
+>
+> ```
+> 1) GET  https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId={BILL_ID}
+>          → 초기 HTML 에는 제안이유가 없다. form#form 과 meta[name="_csrf"] 만 있다.
+> 2) POST https://likms.assembly.go.kr/bill/bi/bill/detail/billInfo.do
+>          payload : form#form 의 named hidden input 전체 (URL-encoded)
+>          header  : X-CSRF-TOKEN = meta[name="_csrf"] 의 content
+>                    Referer     = 위 상세 URL
+>          쿠키    : 상세 GET 과 같은 requests.Session
+>          응답    : HTML — 제안이유가 등록돼 있으면 #prntsummary-sect 안의
+>                    pre#prntSummary 에 본문이 있다. **등록 전이면 그 섹션이 아예
+>                    생성되지 않는다**(응답 자체는 HTTP 200 정상 심사정보 HTML 이고
+>                    의안번호·제안일자·제안자는 정상).
+> ```
+>
+> `form#form` 은 **payload 원천일 뿐**입니다. 그 폼의 빈 `action` 과 기본 GET 을 그대로 replay 하면 안 됩니다 — JavaScript 가 폼을 serialize 한 뒤 별도 endpoint 로 POST 하기 때문입니다(replay 했다가 `billId` 중복으로 HTTP 400 을 받았습니다).
+>
+> Open API 의 `LINK_URL` 은 아직 구 경로 `/bill/billDetail.do` 를 주는데 최신 의안에서 그 경로는 "해당 의안 정보가 존재하지 않습니다"를 응답합니다(redirect 없음). 그래서 `BILL_ID` 로 현재 경로를 다시 만듭니다.
+>
+> 요청을 만들 수 없으면(`form#form` 없음 / CSRF 없음 / 폼의 `billId` 가 목록의 `BILL_ID` 와 다름) **요청을 보내지 않고** `ERROR` 로 둡니다 — 근거가 어긋난 요청은 남의 의안 본문을 받거나 400 을 반복할 뿐입니다.
+
+### 제안이유 상태 (`ProposalContentStatus`)
+
+**본문이 없는 것과 수집이 실패한 것은 다른 사건입니다.** 갓 접수된 의안은 원문이 아직 공개되지 않아 본문이 비는 것이 정상인데, 이를 실패로 세면 매 실행마다 거짓 ERROR 가 쌓여 진짜 고장을 가립니다. 그래서 의안마다 네 가지 상태를 남깁니다.
+
+| 상태 | 뜻 | 메일 표시 | 집계 |
+|---|---|---|---|
+| `AVAILABLE` | 제안이유를 확보함 | AI 3줄 요약 (실패 시 발췌) | available |
+| `PENDING` | **정상 billInfo 응답인데 제안이유 섹션이 아직 없거나 비어 있음** = 등록 대기 | `제안이유 및 주요내용 · 등록 대기` + "의안정보시스템에 제안이유 및 주요내용이 아직 공개되지 않았습니다." | pending (**실패 아님**) |
+| `ERROR` | 네트워크·HTTP 오류, 마크업 변경, 정상 응답 구조 자체가 아님 | 제목·링크만 | failed |
+| `UNKNOWN` | 아직 판정 전(기본값) | — | failed |
+
+`PENDING` 은 **정상 심사정보 뼈대(`#tab_billInfo_sect`·`form#billInfoForm`·`#stage_list`·`#rcp_list`·`#insc-rcp-row`)가 온전한데 제안이유 섹션만 없거나 비어 있을 때** 확정합니다. 라이브 확인 결과 등록 전에는 `#prntsummary-sect` 와 `pre#prntSummary` 가 아예 생성되지 않기 때문입니다.
+
+다음은 모두 `ERROR` 입니다 — 등록 대기로 넘기면 고장이 '정상'으로 위장됩니다.
+
+- `#prntsummary-sect` 는 있는데 `pre#prntSummary` 만 없음 (마크업 변경)
+- 응답에 `제안이유 및 주요내용` 표식은 있는데 예상 selector 가 없음 (마크업 변경)
+- 정상 심사정보 뼈대 자체가 없음 (기대한 응답이 아님)
+- `pre#prntSummary` 에 20자 미만의 잔여 텍스트만 있음
+- `pre#prntSummary` 가 비어 있는데 **정상 심사정보 뼈대가 없음** — 빈 `pre` 하나만 남은 오류·중간 페이지를 등록 대기로 인정하면 덤프도 남지 않고 실패 집계에도 잡히지 않은 채 그 의안이 `seen` 으로 확정되어, 제안이유를 영영 받지 못합니다
+
+반대로 `AVAILABLE`(본문 20자 이상 확보)은 뼈대를 요구하지 않습니다. 본문이 이미 손에 있는데 주변 마크업이 바뀌었다는 이유로 정상 수집을 실패로 뒤집을 이유가 없습니다.
+
+'소관위 미확정', '문서 없음', '제안일이 오늘' 같은 정황은 등록 여부와 직접 관계가 없으므로 근거로 쓰지 않습니다.
+
+**받아온 페이지가 그 의안의 것인지 먼저 확인합니다.** Open API 의 `LINK_URL` 이 다른 의안을 가리키거나 redirect 가 걸리면 A 의안 알림에 B 의안의 제안이유가 실릴 수 있기 때문입니다. 근거는 `form#form` 의 `billId`, 요청 URL 의 `billId`, 최종 응답 URL 의 `billId` 셋이며, 하나라도 어긋나면 `ERROR` 입니다. 구형 페이지의 inline 제안이유는 이 확인을 **통과했을 때만** 채택합니다(근거가 하나도 없으면 채택하지 않습니다 — `billInfo.do` 경로는 요청을 만들 때 `billId` 를 대조하지만 inline 경로는 그 검사를 거치지 않고 바로 발행되기 때문입니다).
+
+진단 덤프(`debug/`)는 verify 워크플로가 아티팩트로 업로드하므로, 저장 전에 이름이 비밀인 `meta`/`input`(`_csrf`, `*token*`, `*session*` 등) 값과 인라인 스크립트를 지웁니다. 태그·필드 이름과 공개 값은 진단에 필요하므로 남깁니다.
+
+`PENDING` 의안은 Gemini 배치 요약 대상에서 제외되고(요약할 원문이 없음), 의안 판정에서는 `available=0` 이어도 `pending>0` 이면 전면 실패 ERROR 를 남기지 않습니다(대신 실패가 섞여 있으면 경고).
+
+전체 상세 수집의 `성공률 0%` 판정은 **등록 대기를 분모에서 뺀 뒤** 봅니다. '등록 대기가 하나라도 있으면 판정하지 않는다'로 두면, 갓 접수된 의안 한 건 때문에 등록 대기와 아무 관계 없는 다른 소스의 파서 전멸이 통째로 묻힙니다.
+
+> pending 의안의 **재조회와 후속 메일 발송은 아직 구현되지 않았습니다.** 원문이 나중에 등록돼도 그 의안은 이미 `seen` 처리되어 다시 발송되지 않습니다.
 
 ## 동작 방식
 
@@ -32,8 +89,11 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
    - 주말·공휴일에 올라온 글은 **다음 실행(월요일 첫 회차)에 모아서** 발송됩니다. "이미 본 글 ID" 기준이라 시간과 무관합니다.
 3. 새 글의 **상세 본문과 첨부파일**을 내려받습니다.
 4. 본문이 있는 글은 **Gemini API로 3줄 요약**해 메일에 싣습니다. 원문을 앞에서 자른 발췌 대신 핵심만 보이게 하기 위함입니다.
-   - API 키(`GEMINI_API_KEY`)가 없거나 호출이 실패하면 **원문 발췌로 자동 대체**되고 메일은 정상 발송됩니다. 이때는 제목 중복과 담당부서·등록일·첨부파일 안내 같은 반복 안내문을 제외한 본문 첫 부분을 규칙 기반으로 발췌합니다(외부 호출 없음).
-   - 상세 본문이 없는 소스(금융규제포털 회신사례·계류의안)는 요약 대상이 아닙니다.
+   - **일반 게시물**(금융위·금감원)은 1건당 1회 호출합니다.
+   - **계류의안**은 상세페이지에서 '제안이유 및 주요내용'을 수집한 뒤, 최대 **25건씩 한 번의 요청으로 묶어** 요약합니다(`llm.assembly_batch`). 의안은 하루 신규가 수십 건이라 1건당 1회로는 무료 티어 한도를 곧바로 소진하기 때문입니다. 결과는 배열 순서가 아니라 **BILL_ID로 매핑**하고, 검증(요청한 ID·중복·`llm.lines`줄·문장 길이)을 통과하지 못한 의안은 요약 없이 발췌로 나갑니다. 프롬프트의 출력 예시는 `llm.lines` 로부터 만듭니다 — 예시를 3줄로 못박아 두면 `lines` 를 바꿨을 때 규칙과 예시가 어긋나고, 모델이 예시를 따르면 검증이 **모든 의안을 버려** 배치 요약이 조용히 꺼집니다.
+   - API 키(`GEMINI_API_KEY`)가 없거나 호출이 실패하면 **원문 발췌로 자동 대체**되고 메일은 정상 발송됩니다. 이때는 제목 중복과 담당부서·등록일·첨부파일 안내 같은 반복 안내문을 제외한 본문 첫 부분을 규칙 기반으로 발췌합니다(외부 호출 없음). 의안은 '제안이유 및 주요내용 발췌'로 표시됩니다.
+   - 의안 배치 호출이 **호출 계층에서 실패**하면(401·403·5xx·네트워크) 남은 배치는 호출하지 않습니다. 같은 자격증명으로 같은 서비스를 다시 부를 뿐이라 실패만 쌓이며 시간예산을 태우고 메일이 그만큼 늦어집니다. 반대로 호출은 성공했고 **응답 '내용'이 문제인 경우**(깨진 JSON·스키마 위반·안전필터 차단 등)는 그 배치에 담긴 의안 내용에 달린 판정이라 다음 배치는 통과할 수 있으므로 멈추지 않습니다.
+   - 상세 본문이 없는 소스(금융규제포털 회신사례)는 요약 대상이 아닙니다. 상세가 JS 팝업이라 수집할 대상 자체가 없으므로(`SUPPORTS_ENRICH = False`) **상세 수집 통계에서도 제외**합니다 — 실패로 세면 그 소스만 신규인 실행이 '성공률 0%' 로 잡혀 거짓 장애 경보가 울립니다.
    - 모델이 수명 종료돼 404가 나면 `llm.fallback_models` 순서로 자동 전환하고, 성공한 모델을 그 실행 동안 재사용합니다. 전부 실패해도 원문 발췌로 발송됩니다.
 5. 신규가 있으면 **다이제스트 메일 1통**으로 묶어 발송합니다(첨부 포함).
 6. "이미 본 글" 목록(`state/seen.json`)을 저장소에 커밋해 다음 실행에 이어씁니다.
@@ -179,6 +239,22 @@ python -m pytest -q
 
 리포트는 소스별로 **① 목록 건수 ② 제목 샘플 ③ 페이지네이션 동작 ④ 본문/첨부 추출 여부** 를 보여줍니다. 0건인 소스는 `debug/<key>_list.txt` 원본을 열어 실제 셀렉터를 확인한 뒤 해당 스크래퍼의 `_parse_list` 를 수정하면 됩니다.
 
+판정은 세 가지입니다 — ✅ 정상 / 🟠 **부분 실패(목록 성공·상세 실패)** / ❌ 실패. 상세가 PDF 직접 다운로드(`fss_mgmt_notice`)거나 JS 팝업(`better_reply`)인 소스는 본문이 비어도 정상으로 봅니다.
+
+계류의안은 **available 검증과 pending 검증을 따로** 합니다. 목록 맨 위는 갓 접수된 의안이라 원문이 아직 없을 수 있어(등록 대기), 첫 건만 보면 '등록 대기'와 '수집 고장'을 구분할 수 없기 때문입니다. 표본 `--assembly-sample`(기본 3)건을 훑어 상태별로 세고 다음과 같이 판정합니다.
+
+| 표본 결과 | 판정 | 뜻 |
+|---|---|---|
+| `failed > 0` | ❌ | 구조·endpoint 가 깨졌다 |
+| `failed = 0`, `available > 0` | ✅ | 추출이 실제로 동작한다(등록 대기가 섞여도 무방) |
+| `failed = 0`, `available = 0` | 🟠 | 전부 등록 대기 — 고장은 아니지만 추출을 **확인하지 못했다**. 표본을 늘려 재확인 |
+
+GitHub Actions 에서는 `pending_bill_id` 입력에 **방금 접수돼 제안이유가 아직 없는 의안**을 넣으면, 그 의안이 `ERROR` 가 아니라 `PENDING` 으로 판정되는지 별도 게이트로 확인합니다.
+
+의안 상세 endpoint 를 조사할 때는 `capture_bill_id`(또는 `capture_bill_url`) 입력을 함께 넣으세요. Playwright 로 브라우저를 띄워 심사정보 탭이 실제로 보내는 XHR 을 캡처하고, HAR·XHR 본문·`billDetail.js` 분석 보고서를 아티팩트로 올립니다(세션·토큰 값은 제거되고 헤더·필드 **이름은 유지**됩니다).
+
+정화는 HTML 은 `meta`/`input`, JSON 은 객체 키를 **이름 기준으로 재귀 탐색해** 값을 지웁니다 — 값 패턴만으로는 UUID·Base64 형 토큰을 잡지 못하고, 비밀은 `{"payload": {"csrfToken": …}}` 처럼 중첩되어 오기 때문입니다. 아티팩트에 기록되는 URL — 요청 URL·최종 URL·redirect 경로, **`Referer`·`Location` 처럼 값이 URL 인 헤더**, **`form@action`·`a@href`·`script@src` 같은 URL 속성**, 그리고 **예외 메시지·콘솔 로그에 박힌 URL**(Playwright 타임아웃 예외는 call log 에 전체 URL 을 담습니다) — 도 모두 정화합니다 — 쿼리뿐 아니라 `;jsessionid=…` 경로 파라미터까지 봅니다(쿠키가 막힌 클라이언트에 서블릿 컨테이너가 붙이는 자리입니다). `Referer` 는 보통 그 페이지의 전체 URL 을 담는데, 헤더 이름 자체는 비밀이 아니라 마스킹 대상이 아니고 값 패턴은 쿼리 파라미터 이름을 모르므로 URL 규칙을 따로 태워야 합니다. 값 패턴은 조립이 끝난 URL 이 아니라 **조각마다** 적용합니다. 통째로 돌리면 `JSESSIONID=[^;"'\s]+` 가 `?`·`&` 까지 삼켜 뒤따르는 쿼리가 사라집니다. 원본 HAR 은 `record_har_content="embed"` 라 쿠키·인증 헤더가 응답 본문째 들어 있으므로 **업로드 경로 밖(임시 디렉터리)** 에 만들고, 캡처가 중간에 죽어도 `finally` 로 디렉터리째 지웁니다. 아티팩트에는 정화본만 들어갑니다.
+
 ## 프로젝트 구조
 
 ```
@@ -191,17 +267,22 @@ src/
   main.py                   # 오케스트레이션(수집→신규판별→enrich→메일→저장)
   config.py  fetcher.py     # 설정 로딩 / HTTP 세션(재시도·한글 인코딩·첨부 용량 제한)
   state.py   notifier.py    # 신규 판별 상태(원자적 저장) / 이메일 렌더·발송
-  summarizer.py             # 본문 3줄 요약(Gemini REST API, 실패 시 원문 발췌 폴백)
+  summarizer.py             # 일반 게시물 3줄 요약(1건당 1회, 실패 시 원문 발췌 폴백)
+  assembly_summary.py       # 계류의안 배치 3줄 요약(최대 25건/요청, BILL_ID 로 매핑)
   snippet.py                # 요약 실패 시 쓰는 원문 발췌 정제(제목 중복·상용구 제거)
   models.py                 # Post, Attachment
   scrapers/
     base.py                 # 스크래퍼 베이스(페이지네이션·디버그 덤프)
     fsc.py  fss.py          # 금융위 / 금감원 게시판
-    better_fsc.py assembly.py  # 회신사례(JSON) / 계류의안(Open API)
+    better_fsc.py assembly.py  # 회신사례(JSON) / 계류의안(Open API + 제안이유 수집)
 state/seen.json             # 이미 본 글 ID (자동 커밋)
 scripts/
   send_test_email.py        # SMTP 설정 확인
-  verify_sources.py         # 소스 점검
+  verify_sources.py         # 소스 점검(목록/상세를 구분해 판정)
+  capture_assembly_network.py  # [진단] 의안 상세 XHR 캡처(Playwright, HAR·JS 분석)
+  capture_assembly_fixture.py  # [진단] 의안 상세 HTML fixture 캡처(requests)
+tests/fixtures/             # 캡처한 실제 응답(회귀 테스트용, README 참고)
+  synthetic/                # 손으로 만든 구조 fixture(상태 판정기 검증용 — 캡처 아님)
 ```
 
 새 게시판을 추가하려면 `config.yaml` 의 `sources` 에 항목을 추가하고, 알맞은 `type`(파서)을 지정하면 됩니다.

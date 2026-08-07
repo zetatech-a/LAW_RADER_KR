@@ -1,0 +1,22 @@
+<!-- 손으로 만든 구조 fixture (실제 캡처 아님).
+     라이브 확인(Action #13)된 등록 대기 응답 구조:
+     HTTP 200 정상 심사정보 HTML 이고 의안번호·제안일자·제안자는 정상이지만,
+     제안이유가 아직 등록되지 않아 #prntsummary-sect 와 pre#prntSummary 가
+     **아예 생성되지 않는다**. -->
+<html><body>
+<div id="tab_billInfo_sect">
+    <form id="billInfoForm" method="post" action="">
+      <input type="hidden" name="billId" value="PRC_SYNTH_0001"/>
+    </form>
+    <div class="tbl">
+      <dl><dt>의안번호</dt><dd>2200123</dd></dl>
+      <dl><dt>제안일자</dt><dd>2026-08-06</dd></dl>
+      <dl><dt>제안자</dt><dd>홍길동의원 등 10인</dd></dl>
+      <dl><dt>제안회기</dt><dd>제22대(2024~2028) 제420회</dd></dl>
+    </div>
+    <div id="stage_list"><ul><li>접수</li></ul></div>
+    <div id="rcp_list">
+      <table><tbody><tr id="insc-rcp-row"><td>2026-08-06</td><td>접수</td></tr></tbody></table>
+    </div>
+  </div>
+</body></html>

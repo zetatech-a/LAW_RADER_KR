@@ -20,15 +20,42 @@ import argparse
 import logging
 import sys
 
+from dataclasses import dataclass
+
 from .config import load_config
 from .fetcher import Fetcher
-from .models import Post
+from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
 from .notifier import missing_email_settings, send_digest, verify_smtp_login
 from .scrapers import build_scraper
 from .state import State
-from .summarizer import summarize_posts
+from .summarizer import ai_target_count, summarize_posts
 
 log = logging.getLogger("law_rader")
+
+
+@dataclass
+class _DetailStats:
+    """상세(enrich) 수집 집계.
+
+    '등록 대기(pending)'는 실패가 아니다. 갓 접수된 의안은 원문이 아직 공개되지
+    않아 본문이 비는 것이 정상이고, 그것을 실패로 세면 매 실행마다 거짓 실패가
+    쌓여 진짜 고장을 가린다. 그래서 succeeded/pending/failed 를 따로 센다.
+    """
+
+    attempted: int = 0
+    succeeded: int = 0
+    pending: int = 0
+
+    @property
+    def failed(self) -> int:
+        return self.attempted - self.succeeded - self.pending
+
+    def count(self, ok: bool, pending: bool = False) -> None:
+        self.attempted += 1
+        if pending:
+            self.pending += 1
+        elif ok:
+            self.succeeded += 1
 
 
 def parse_args(argv=None):
@@ -68,6 +95,14 @@ def run(argv=None) -> int:
     errors: list[str] = []
     selected = 0   # 실행 대상(활성+선택) 소스 수
     succeeded = 0  # 목록 수집에 성공한 소스 수
+    # 상세(enrich) 집계 — 실행 종료 시 한 번에 보고한다. 상세 수집이 전멸하면
+    # 메일은 제목·링크만 남은 채로 계속 나가므로, 로그를 보지 않으면 알아채기 어렵다.
+    #
+    # 의안은 따로 센다. 의안 상세(제안이유)는 폼을 발견해 되쏘는 방식이라 다른 소스와
+    # 독립적으로 깨질 수 있는데, 전체 합계만 보면 금융위·금감원이 성공하는 한 의안
+    # 전면 실패가 묻힌다.
+    detail = _DetailStats()
+    assembly_detail = _DetailStats()
 
     for src in cfg.sources:
         if not src.enabled:
@@ -144,12 +179,40 @@ def run(argv=None) -> int:
             )
             new_posts = new_posts[:cap]
 
+        # 상세를 수집할 수 없는 소스(회신사례처럼 상세가 JS 팝업인 곳)는 본문이 비는
+        # 것이 정상이다. 이런 소스를 '시도했으나 실패'로 세면, 그 소스만 신규가 들어온
+        # 실행이 성공률 0% 로 잡혀 파서 장애 경보가 거짓으로 울린다.
+        supports_enrich = getattr(scraper, "SUPPORTS_ENRICH", True)
+        if not supports_enrich:
+            log.info(
+                "[%s] 신규 %d건 발견 — 상세 수집 대상 아님(제목·링크만 통지)",
+                src.key,
+                len(new_posts),
+            )
+            pending_seen.append((src.key, all_new_ids))
+            posts_by_source[src.name] = new_posts
+            continue
+
         log.info("[%s] 신규 %d건 발견 — 상세 수집", src.key, len(new_posts))
         for p in new_posts:
             try:
                 scraper.enrich(p)
             except Exception as e:  # noqa: BLE001
                 log.warning("[%s] enrich 실패 %s: %s", src.key, p.url, e)
+            # 스크래퍼 대부분은 실패를 내부에서 삼키므로(한 건 실패가 나머지를 막지
+            # 않도록) 예외 유무가 아니라 '무언가 채워졌는지'로 성공을 센다.
+            # verify_sources.py 의 enrich_ok 와 같은 기준이다.
+            ok_detail = bool(p.body or p.details or p.attachments)
+            # 등록 대기는 실패가 아니다(원문이 아직 공개되지 않았을 뿐).
+            is_pending = (
+                p.source_key == ASSEMBLY_SOURCE_KEY
+                and p.proposal_status is ProposalContentStatus.PENDING
+            )
+            detail.count(ok_detail, pending=is_pending)
+            # 의안 통계는 의안 게시물로만 만든다. 다른 소스(상세가 원래 비는 게시판
+            # 등)의 실패가 섞이면 있지도 않은 의안 장애를 보고하게 된다.
+            if p.source_key == ASSEMBLY_SOURCE_KEY:
+                assembly_detail.count(ok_detail, pending=is_pending)
 
         # 신규(초과분 포함)는 '메일 성공 후'에만 seen 처리하도록 보류한다.
         pending_seen.append((src.key, all_new_ids))
@@ -157,6 +220,10 @@ def run(argv=None) -> int:
 
     total = sum(len(v) for v in posts_by_source.values())
     log.info("총 신규 %d건", total)
+
+    # 수집 집계는 여기서 남긴다. 아래에는 조기 종료가 여럿(전 소스 실패, 메일 설정
+    # 누락, SMTP 인증 실패) 있고, 그 상황일수록 수집 진단이 필요하기 때문이다.
+    _log_detail_summary(detail, assembly_detail)
 
     # 선택된 소스가 있는데 하나도 수집에 성공하지 못하면 실패로 종료한다.
     # (전면 장애를 초록불로 숨기지 않기 위함. 부분 실패는 그대로 격리·진행)
@@ -201,6 +268,9 @@ def run(argv=None) -> int:
     elif args.no_llm:
         log.info("--no-llm: LLM 요약 생략")
 
+    # AI 집계는 요약 단계를 지난 뒤, 발송 직전에 남긴다(발송 성패와 무관하게 기록).
+    _log_ai_summary(cfg, posts_by_source)
+
     if args.dry_run:
         _print_dry_run(posts_by_source)
         log.info("--dry-run: 메일 미발송, state 미저장")
@@ -222,6 +292,88 @@ def run(argv=None) -> int:
     if errors:
         log.warning("일부 소스 오류: %s", "; ".join(errors))
     return 0
+
+
+def _log_detail_summary(
+    detail: "_DetailStats", assembly_detail: "_DetailStats"
+) -> None:
+    """상세 수집(전체/의안) 집계. **수집 루프가 끝나면 무조건** 남긴다.
+
+    AI 집계와 분리한 이유: 메일 설정 누락·SMTP 인증 실패로 run() 이 조기 종료하면
+    집계가 통째로 사라졌다. 상세 요청은 이미 다 돌아 통계가 손에 있는데, 하필 장애
+    상황에서 진단 로그가 없어지는 셈이었다. 수집 결과는 발송 성패와 무관하므로
+    발송 판단보다 먼저 기록한다.
+
+    상세 수집 성공률 0% 는 파서·마크업이 통째로 어긋났다는 뜻이라 ERROR 로 남긴다.
+    전체와 의안을 따로 판정하는 이유는, 금융위·금감원이 정상이면 합계는 멀쩡해 보여
+    의안 전면 실패가 묻히기 때문이다.
+
+    어느 ERROR 도 발송을 막지 않는다 — 본문 없이라도 제목·링크가 담긴 알림이 나가는
+    편이 알림 자체가 끊기는 것보다 낫다(전체 설계 원칙).
+    """
+    log.info(
+        "상세 수집 집계(전체) — 시도 %d건 / 성공 %d건 / 등록대기 %d건 / 실패 %d건",
+        detail.attempted,
+        detail.succeeded,
+        detail.pending,
+        detail.failed,
+    )
+    # 의안은 요구된 이름 그대로 attempted / available / pending / failed 를 남긴다.
+    log.info(
+        "의안 제안이유 집계 — attempted %d / available %d / pending %d / failed %d",
+        assembly_detail.attempted,
+        assembly_detail.succeeded,
+        assembly_detail.pending,
+        assembly_detail.failed,
+    )
+    # 등록 대기는 애초에 성공할 수 없는 시도이므로 분모에서 뺀 뒤 성공률을 본다.
+    # 'pending 이 하나라도 있으면 판정하지 않는다'로 두면, 갓 접수된 의안 한 건 때문에
+    # 나머지 소스의 전면 파서 장애가 통째로 묻힌다(등록 대기와 무관한 실패인데도).
+    expected = detail.attempted - detail.pending
+    if expected > 0 and detail.succeeded == 0:
+        log.error(
+            "상세 수집 성공률 0%% (등록 대기를 뺀 시도 %d건 전부 실패) — 파서/마크업 "
+            "확인 필요. 메일은 제목·링크만으로 계속 발송합니다. debug/ 덤프를 확인하세요.",
+            expected,
+        )
+    # 전체 ERROR 와 별개로 판정한다. 다른 소스가 성공해 위 조건이 거짓이어도
+    # 의안만 전멸했다면 반드시 드러나야 한다.
+    if (
+        assembly_detail.attempted > 0
+        and assembly_detail.succeeded == 0
+        and assembly_detail.pending == 0
+    ):
+        log.error(
+            "의안 제안이유 수집 available 0건 (시도 %d건 전부 실패, 등록대기 0건) — "
+            "상세 페이지 구조/endpoint 변경 의심. 의안은 요약 없이 제목·링크만 "
+            "발송됩니다. debug/assembly_bill_detail_*.txt 를 확인하고 "
+            "scripts/capture_assembly_network.py 로 실제 XHR 계약을 확인하세요.",
+            assembly_detail.attempted,
+        )
+    elif assembly_detail.failed > 0:
+        # available=0 이어도 pending>0 이면 전면 실패로 보지 않는다(요구사항).
+        # 다만 실패가 섞여 있다면 조용히 넘기지 않고 경고로 남긴다.
+        log.warning(
+            "의안 제안이유 수집 실패 %d건 (available %d / pending %d) — "
+            "debug/assembly_bill_detail_*.txt 확인.",
+            assembly_detail.failed,
+            assembly_detail.succeeded,
+            assembly_detail.pending,
+        )
+
+
+def _log_ai_summary(cfg, posts_by_source: dict[str, list[Post]]) -> None:
+    """AI 요약 집계. 요약 단계를 실제로 지난 뒤에만 의미가 있어 따로 남긴다."""
+    targets = ai_target_count(cfg.llm, posts_by_source)
+    summarized = sum(
+        1 for posts in posts_by_source.values() for p in posts if p.summary
+    )
+    log.info(
+        "AI 요약 집계 — 대상 %d건 / 요약 %d건 / 발췌 폴백 %d건",
+        targets,
+        summarized,
+        max(targets - summarized, 0),
+    )
 
 
 def _print_dry_run(posts_by_source: dict[str, list[Post]]) -> None:

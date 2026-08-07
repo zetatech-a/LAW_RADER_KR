@@ -59,6 +59,12 @@ class BaseScraper:
     # 라이브 검증기(verify_sources)가 2페이지까지 실제로 검사한다.
     SUPPORTS_PAGINATION: bool | None = None
 
+    # 상세 수집(enrich)이 원래 가능한 소스인지. False 면 enrich 가 아무것도 못 채우는
+    # 것이 **정상**이므로 상세 수집 통계에서 아예 빼야 한다. 그러지 않으면 그 소스만
+    # 신규가 들어온 실행이 '상세 수집 성공률 0%' 로 잡혀 파서 장애 경보가 거짓으로
+    # 울리고, 진짜 고장이 그 잡음에 묻힌다.
+    SUPPORTS_ENRICH: bool = True
+
     @property
     def paginates(self) -> bool:
         if self.SUPPORTS_PAGINATION is not None:

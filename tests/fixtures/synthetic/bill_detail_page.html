@@ -1,0 +1,19 @@
+<!-- 손으로 만든 구조 fixture (실제 캡처 아님).
+     확정된 계약의 상세페이지 구조: 초기 HTML 에는 제안이유가 없고,
+     form#form(payload 원천)과 meta[name="_csrf"] 가 있다. -->
+<html><head><meta charset="utf-8">
+  <meta name="_csrf" content="SYNTHETIC-TOKEN-NOT-REAL"/>
+  <title>의안상세</title>
+</head>
+<body>
+  <form id="form" action="" method="get">
+    <input type="hidden" name="billId" value="PRC_SYNTH_0001"/>
+    <input type="hidden" name="ageFrom" value="22"/>
+    <input type="hidden" name="ageTo" value="22"/>
+  </form>
+  <ul class="tabType01">
+    <li><a href="#" data-tabnm="billInfo" onclick="app.Tab.tabClick(this)">심사정보</a></li>
+  </ul>
+  <div id="tab_billInfo_sect"></div>
+  <script src="/bill/static/js/bi/bill/billDetail.js?ver=1.0.0"></script>
+</body></html>

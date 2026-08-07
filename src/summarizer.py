@@ -8,7 +8,13 @@
   - 실패해도 메일은 나간다. 요약이 비면 notifier 가 기존 원문 발췌로 되돌아간다.
     (LLM 장애로 규제 알림 자체가 끊기는 것이 가장 나쁜 결과)
   - 무료 티어(분당 요청수 제한)를 전제로 호출 간격을 두고, 429/5xx 는 백오프 재시도.
-  - 본문이 없는 소스(금융규제포털 회신사례, 의안정보시스템)는 애초에 호출하지 않는다.
+  - 본문이 없는 소스(금융규제포털 회신사례 등)는 애초에 호출하지 않는다.
+
+경로가 둘이다:
+  - 일반 게시물(금융위·금감원 등): 여기서 1건당 1회 호출한다(기존 동작 그대로).
+  - 의안(assembly_bill): src/assembly_summary.py 가 최대 25건씩 배치로 호출한다.
+    의안은 하루 신규가 수십 건이라 1건당 1회로는 무료 티어 한도를 곧바로 태운다.
+    두 경로는 상한(max_posts / assembly_batch.max_bills)과 시간예산을 따로 쓴다.
 
 필요 환경변수: GEMINI_API_KEY  (https://aistudio.google.com/apikey 에서 무료 발급)
 """
@@ -24,7 +30,7 @@ from itertools import zip_longest
 import requests
 
 from .config import LLMConfig
-from .models import Post
+from .models import ASSEMBLY_SOURCE_KEY, Post
 
 log = logging.getLogger(__name__)
 
@@ -159,6 +165,18 @@ def _model_unavailable_reason(resp) -> str:
     return ""
 
 
+def _prepare_body(cfg: LLMConfig, post: Post) -> str:
+    """일반 게시물의 요약 입력(공백 정규화 + 길이 절단). 대상이 아니면 빈 문자열.
+
+    Summarizer 인스턴스 없이도 '이 글이 요약 대상인가'를 물을 수 있도록 모듈 함수로
+    둔다(집계 로그가 같은 규칙을 쓰게 하기 위함).
+    """
+    body = " ".join((post.body or "").split())
+    if len(body) < cfg.min_body_chars:
+        return ""
+    return body[: cfg.max_input_chars]
+
+
 class SummaryUnavailable(RuntimeError):
     """호출은 됐지만 쓸 수 있는 요약을 얻지 못함(차단·잘림·스키마 위반).
 
@@ -247,19 +265,40 @@ class Summarizer:
     def summarize_all(self, posts_by_source: dict[str, list[Post]]) -> int:
         """소스별 게시글 묶음을 순회하며 본문이 있는 글의 summary 를 채운다.
 
-        반환값은 요약에 성공한 글 수. 실패는 로그만 남기고 넘어간다(빈 summary →
-        메일에서 기존 원문 발췌로 표시).
+        일반 게시물(금융위·금감원 등)은 예전 그대로 1건당 1회 호출하고, 의안만
+        따로 모아 배치로 요약한다. 반환값은 두 경로에서 요약에 성공한 글 수의 합.
+        실패는 로그만 남기고 넘어간다(빈 summary → 메일에서 기존 발췌로 표시).
+        """
+        ok = self._summarize_general(posts_by_source)
+        try:
+            # 지연 임포트: assembly_summary 는 이 모듈을 임포트한다(순환 방지).
+            from .assembly_summary import summarize_assembly_bills
+
+            ok += summarize_assembly_bills(self, posts_by_source)
+        except Exception as e:  # noqa: BLE001 — 의안 요약 실패가 메일을 막지 않는다
+            log.warning("의안 배치 요약 단계 실패 — 발췌로 발송합니다: %s", e)
+        return ok
+
+    def _summarize_general(self, posts_by_source: dict[str, list[Post]]) -> int:
+        """일반 게시물 전용 경로 — 기존 동작 그대로 1건당 1회 요약한다.
+
+        의안(assembly_bill)은 여기서 반드시 제외한다. 배치 경로가 따로 처리하므로
+        여기 남겨 두면 같은 글을 두 번 호출하고 max_posts 상한까지 잠식한다.
         """
         # 상한을 적용하기 '전에' 실제 호출 대상만 남긴다. 공백뿐이거나 너무 짧아
         # 어차피 호출하지 않을 글이 앞자리를 차지하면, 정작 요약이 필요한 뒤쪽 글이
         # 할당량을 남겨두고도 요약되지 않는다.
         groups = [
-            [p for p in posts if self._prepared_body(p)]
+            [
+                p
+                for p in posts
+                if p.source_key != ASSEMBLY_SOURCE_KEY and self._prepared_body(p)
+            ]
             for posts in posts_by_source.values()
         ]
         groups = [g for g in groups if g]
         if not groups:
-            log.info("요약 대상 없음(요약할 만한 본문이 있는 신규 글 없음)")
+            log.info("일반 요약 대상 없음(요약할 만한 본문이 있는 신규 글 없음)")
             return 0
 
         # 소스별로 번갈아 뽑는다. 그냥 이어붙이면 config 앞쪽 소스가 상한을 다 먹어,
@@ -323,7 +362,7 @@ class Summarizer:
                 log.info("[%s] 요약 결과 비어 있음 — 원문 발췌 사용: %s", post.source_key, post.url)
 
         log.info(
-            "LLM 요약 완료 %d/%d건 (시도 %d건, 사용 모델=%s)",
+            "일반 게시물 요약 완료 %d/%d건 (시도 %d건, 사용 모델=%s)",
             ok,
             len(targets),
             attempted,
@@ -335,10 +374,7 @@ class Summarizer:
 
     def _prepared_body(self, post: Post) -> str:
         """호출에 쓸 본문(공백 정규화 + 길이 절단). 요약 대상이 아니면 빈 문자열."""
-        body = " ".join((post.body or "").split())
-        if len(body) < self.cfg.min_body_chars:
-            return ""
-        return body[: self.cfg.max_input_chars]
+        return _prepare_body(self.cfg, post)
 
     def summarize(self, post: Post, deadline: float | None = None) -> list[str]:
         """게시글 1건을 요약해 문장 리스트를 돌려준다(실패 시 예외).
@@ -375,8 +411,19 @@ class Summarizer:
                 out.append(name)
         return out
 
-    def _generate(self, prompt: str, deadline: float | None = None) -> dict:
-        """모델 목록을 순서대로 시도한다. 404 계열에서만 다음 모델로 넘어간다."""
+    def _generate(
+        self,
+        prompt: str,
+        deadline: float | None = None,
+        *,
+        schema: dict | None = None,
+        max_output_tokens: int | None = None,
+    ) -> dict:
+        """모델 목록을 순서대로 시도한다. 404 계열에서만 다음 모델로 넘어간다.
+
+        schema·max_output_tokens 는 호출별 구조화 출력 설정이다. 생략하면 기존 단건
+        요약과 완전히 같은 payload 를 보낸다(의안 배치 요약만 값을 넘긴다).
+        """
         candidates = self._model_candidates()
         if not candidates:
             raise SummaryUnavailable(
@@ -387,7 +434,13 @@ class Summarizer:
         last_reason = ""
         for i, model in enumerate(candidates):
             try:
-                data = self._generate_with(model, prompt, deadline)
+                data = self._generate_with(
+                    model,
+                    prompt,
+                    deadline,
+                    schema=schema,
+                    max_output_tokens=max_output_tokens,
+                )
             except _ModelUnavailable as e:
                 last_reason = str(e)
                 self._unavailable.add(model)
@@ -415,20 +468,27 @@ class Summarizer:
         )
         raise SummaryUnavailable(f"사용 가능한 모델 없음: {last_reason}")
 
-    def _generation_config(self, model: str, send_thinking: bool) -> dict:
+    def _generation_config(
+        self,
+        model: str,
+        send_thinking: bool,
+        schema: dict | None = None,
+        max_output_tokens: int | None = None,
+    ) -> dict:
         """모델이 받아들이는 옵션만 담은 generationConfig.
 
         구조화 출력(responseMimeType·responseSchema)은 모든 대상 모델에서 지원되므로
         항상 보낸다. 세대에 따라 뜻이 달라지거나 아예 없는 옵션(thinkingConfig,
         temperature)은 그 세대의 모델에만 붙인다.
+
+        schema·max_output_tokens 를 생략하면 기존 단건 요약의 기본값을 그대로 쓴다.
         """
         gc: dict = {
             "responseMimeType": "application/json",
-            "responseSchema": _SCHEMA,
+            "responseSchema": schema or _SCHEMA,
             # 생각을 못 끄는 모델에서는 이 값이 생각 토큰까지 함께 덮는다.
-            "maxOutputTokens": (
-                _MAX_OUTPUT_TOKENS if send_thinking else _MAX_OUTPUT_TOKENS_THINKING
-            ),
+            "maxOutputTokens": max_output_tokens
+            or (_MAX_OUTPUT_TOKENS if send_thinking else _MAX_OUTPUT_TOKENS_THINKING),
         }
         if send_thinking:
             # 단순 요약이라 생각은 필요 없다. 생각을 켠 채 출력 상한이 낮으면 본문이
@@ -439,7 +499,13 @@ class Summarizer:
         return gc
 
     def _generate_with(
-        self, model: str, prompt: str, deadline: float | None = None
+        self,
+        model: str,
+        prompt: str,
+        deadline: float | None = None,
+        *,
+        schema: dict | None = None,
+        max_output_tokens: int | None = None,
     ) -> dict:
         """모델 하나로 호출한다. 그 모델을 쓸 수 없으면 _ModelUnavailable."""
         send_thinking = (
@@ -447,7 +513,9 @@ class Summarizer:
         )
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": self._generation_config(model, send_thinking),
+            "generationConfig": self._generation_config(
+                model, send_thinking, schema, max_output_tokens
+            ),
         }
 
         log.debug("Gemini 호출 (model=%s)", model)
@@ -498,7 +566,9 @@ class Summarizer:
                 log.info("모델 %s 는 thinkingConfig 미지원 — 제외하고 재시도", model)
                 self._thinking_unsupported.add(model)
                 send_thinking = False
-                payload["generationConfig"] = self._generation_config(model, False)
+                payload["generationConfig"] = self._generation_config(
+                    model, False, schema, max_output_tokens
+                )
                 continue
 
             # 한도 초과/일시 장애만 재시도. 400·401·403 은 설정 문제라 즉시 실패.
@@ -639,6 +709,27 @@ class Summarizer:
             if joined.strip():
                 return joined.strip()
         return ""
+
+
+def ai_target_count(cfg: LLMConfig, posts_by_source: dict[str, list[Post]]) -> int:
+    """요약 호출 대상이 될 수 있었던 글 수(집계 로그용).
+
+    상한(max_posts / max_bills)을 적용하기 전의 '대상' 수다 — 상한에 걸려 요약되지
+    못한 글도 발췌로 나가므로 폴백 건수에 포함되어야 한다. 판정 기준은 실제 요약
+    경로와 같은 것을 쓴다(여기서 따로 정의하면 로그와 동작이 어긋난다).
+    """
+    n = 0
+    for posts in posts_by_source.values():
+        for p in posts:
+            if p.details:
+                # 구조화 항목이 있는 글은 애초에 요약 경로를 타지 않는다.
+                continue
+            if p.source_key == ASSEMBLY_SOURCE_KEY:
+                # 의안 배치는 min_body_chars 를 쓰지 않는다(본문 유무만 본다).
+                n += 1 if (p.body or "").strip() else 0
+            elif _prepare_body(cfg, p):
+                n += 1
+    return n
 
 
 def summarize_posts(cfg: LLMConfig, posts_by_source: dict[str, list[Post]]) -> int:
