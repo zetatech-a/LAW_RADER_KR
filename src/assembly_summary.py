@@ -326,7 +326,7 @@ def _parse(
     lines_n = summarizer.cfg.lines
     max_chars = summarizer.cfg.max_line_chars
     out: dict[str, list[str]] = {}
-    rejected: set[str] = set()   # 중복으로 확인돼 통째로 버린 ID
+    seen: set[str] = set()       # 응답에 한 번이라도 등장한 요청 ID(요약 유효성과 무관)
     for row in rows:
         if not isinstance(row, dict):
             log.info("의안 요약 항목이 객체가 아님 — 버림: %r", row)
@@ -340,13 +340,16 @@ def _parse(
             # 요청에 없던 ID. 모델이 지어냈거나 다른 배치의 것이다 — 절대 싣지 않는다.
             log.info("요청에 없던 bill_id 응답 — 버림: %s", bill_id)
             continue
-        if bill_id in out or bill_id in rejected:
+        if bill_id in seen:
             # 같은 의안에 서로 다른 요약이 둘 이상. 어느 쪽이 맞는지 알 수 없으므로
             # 이미 담은 것까지 버리고 '누락'으로 돌린다(재요청 대상이 된다).
             log.info("중복 bill_id 응답 — 해당 의안을 통째로 버림: %s", bill_id)
             out.pop(bill_id, None)
-            rejected.add(bill_id)
             continue
+        # 중복 판정은 요약 검증보다 **먼저** 확정한다. 첫 행이 형식 위반이라 버려졌다는
+        # 이유로 등장 사실까지 잊으면, 뒤따르는 같은 ID 의 '멀쩡해 보이는' 행이 그대로
+        # 실린다. 그 행의 내용이 실은 다른 의안의 것일 수 있어 잘못된 요약이 붙는다.
+        seen.add(bill_id)
         lines = _valid_lines(row.get("summary"), lines_n, max_chars)
         if lines is None:
             log.info(

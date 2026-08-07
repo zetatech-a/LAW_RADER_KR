@@ -8,9 +8,19 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import AssemblyBatchConfig, LLMConfig, SourceConfig
-from src.main import _DetailStats, _log_run_summary
+from src.main import _DetailStats, _log_ai_summary, _log_detail_summary
 from src.models import Post
 from src.summarizer import ai_target_count
+
+
+def _log_run_summary(cfg, posts, detail, assembly) -> None:
+    """두 집계를 이어서 부르는 테스트 편의 함수.
+
+    run() 은 시점을 나눠 부른다(수집 집계는 발송 판단 전, AI 집계는 요약 후). 로그
+    '내용' 검증은 순서와 무관하므로 여기서는 한 번에 부른다.
+    """
+    _log_detail_summary(detail, assembly)
+    _log_ai_summary(cfg, posts)
 
 
 def _stats(attempted: int, succeeded: int) -> _DetailStats:
@@ -388,6 +398,104 @@ def test_mixed_run_all_failure_emits_both_errors(tmp_path, monkeypatch, caplog):
     assert rc == 0 and sent == 1          # 전면 실패여도 메일은 나간다
     assert len(errors) == 2
     assert any("의안 제안이유 수집 available 0건" in m for m in errors)
+
+
+# --- 조기 종료해도 수집 집계는 남는다 ---
+
+
+def _run_with_early_exit(tmp_path, monkeypatch, caplog, *, break_smtp):
+    """의안 2건을 수집한 뒤 메일 단계에서 막히는 실행.
+
+    break_smtp=False 면 메일 설정 자체가 없어 preflight 에서 멈춘다.
+    """
+    from src import main as main_mod
+    from src.models import ProposalContentStatus
+    from src.scrapers.base import CollectResult
+    from src.state import State
+
+    state_path = tmp_path / "seen.json"
+    st = State(state_path)
+    st.mark_seen("assembly_bill", ["old"], baselined=True)
+    st.save()
+
+    made = [
+        Post(source_key="assembly_bill", source_name="의안정보시스템 · 계류의안",
+             post_id=f"PRC_{i}", title="법률안", url=f"https://likms/{i}")
+        for i in range(2)
+    ]
+
+    class _FakeScraper:
+        def collect(self, limit, seen_ids, max_pages):
+            return CollectResult(posts=made, reached_boundary=True, scanned=2)
+
+        def enrich(self, post):
+            # 한 건은 등록 대기, 한 건은 수집 실패 — 진단이 필요한 상황
+            if post.post_id == "PRC_0":
+                post.proposal_status = ProposalContentStatus.PENDING
+
+    if break_smtp:
+        monkeypatch.setenv("SMTP_USER", "s@example.com")
+        monkeypatch.setenv("SMTP_PASSWORD", "pw")
+        monkeypatch.setenv("MAIL_TO", "to@example.com")
+
+        def _boom(cfg):
+            raise RuntimeError("535 authentication failed")
+
+        monkeypatch.setattr(main_mod, "verify_smtp_login", _boom)
+    else:
+        for var in ("SMTP_USER", "SMTP_PASSWORD", "MAIL_TO"):
+            monkeypatch.delenv(var, raising=False)
+
+    called = {"llm": 0, "sent": 0}
+    monkeypatch.setattr(
+        main_mod, "summarize_posts", lambda c, p: called.__setitem__("llm", 1)
+    )
+    monkeypatch.setattr(
+        main_mod, "send_digest", lambda c, p: called.__setitem__("sent", 1)
+    )
+    monkeypatch.setattr(main_mod, "build_scraper", lambda src, fetcher: _FakeScraper())
+
+    with caplog.at_level(logging.INFO, logger="law_rader"):
+        rc = main_mod.run(["--state", str(state_path), "--only", "assembly_bill"])
+    return rc, called, caplog.text
+
+
+@pytest.mark.parametrize("break_smtp", [False, True])
+def test_detail_summary_survives_mail_preflight_exit(
+    tmp_path, monkeypatch, caplog, break_smtp
+):
+    """회귀: 메일 장애로 조기 종료해도 상세 수집 집계는 남아야 한다.
+
+    상세 요청은 이미 다 돌아 통계가 손에 있는데, 하필 장애 상황에서 진단 로그가
+    통째로 사라지면 무엇이 고장인지 알 방법이 없어진다.
+    """
+    rc, called, text = _run_with_early_exit(
+        tmp_path, monkeypatch, caplog, break_smtp=break_smtp
+    )
+    assert rc == 1                       # 발송은 못 했다
+    assert called == {"llm": 0, "sent": 0}   # 요약·발송에는 손대지 않았다
+    assert "상세 수집 집계(전체) — 시도 2건 / 성공 0건 / 등록대기 1건 / 실패 1건" in text
+    assert "의안 제안이유 집계 — attempted 2 / available 0 / pending 1 / failed 1" in text
+
+
+def test_detail_summary_survives_total_collection_failure(tmp_path, monkeypatch, caplog):
+    """전 소스 수집 실패로 rc=1 종료할 때도 집계는 남는다."""
+    from src import main as main_mod
+    from src.state import State
+
+    state_path = tmp_path / "seen.json"
+    State(state_path).save()
+
+    class _Broken:
+        def collect(self, limit, seen_ids, max_pages):
+            raise RuntimeError("목록 500")
+
+    monkeypatch.setattr(main_mod, "build_scraper", lambda src, fetcher: _Broken())
+    with caplog.at_level(logging.INFO, logger="law_rader"):
+        rc = main_mod.run(["--state", str(state_path), "--only", "assembly_bill"])
+
+    assert rc == 1
+    assert "상세 수집 집계(전체) — 시도 0건 / 성공 0건 / 등록대기 0건 / 실패 0건" in caplog.text
 
 
 # --- 상세 URL 폴백 설정(요구 5의 교정 경로) ---

@@ -207,6 +207,10 @@ def run(argv=None) -> int:
     total = sum(len(v) for v in posts_by_source.values())
     log.info("총 신규 %d건", total)
 
+    # 수집 집계는 여기서 남긴다. 아래에는 조기 종료가 여럿(전 소스 실패, 메일 설정
+    # 누락, SMTP 인증 실패) 있고, 그 상황일수록 수집 진단이 필요하기 때문이다.
+    _log_detail_summary(detail, assembly_detail)
+
     # 선택된 소스가 있는데 하나도 수집에 성공하지 못하면 실패로 종료한다.
     # (전면 장애를 초록불로 숨기지 않기 위함. 부분 실패는 그대로 격리·진행)
     if selected > 0 and succeeded == 0:
@@ -250,8 +254,8 @@ def run(argv=None) -> int:
     elif args.no_llm:
         log.info("--no-llm: LLM 요약 생략")
 
-    # 실행 집계. 발송 직전에 남겨 실패 여부와 무관하게 항상 기록되게 한다.
-    _log_run_summary(cfg, posts_by_source, detail, assembly_detail)
+    # AI 집계는 요약 단계를 지난 뒤, 발송 직전에 남긴다(발송 성패와 무관하게 기록).
+    _log_ai_summary(cfg, posts_by_source)
 
     if args.dry_run:
         _print_dry_run(posts_by_source)
@@ -276,13 +280,15 @@ def run(argv=None) -> int:
     return 0
 
 
-def _log_run_summary(
-    cfg,
-    posts_by_source: dict[str, list[Post]],
-    detail: "_DetailStats",
-    assembly_detail: "_DetailStats",
+def _log_detail_summary(
+    detail: "_DetailStats", assembly_detail: "_DetailStats"
 ) -> None:
-    """실행 종료 집계: 상세 수집(전체/의안)과 AI 요약의 시도/성공/실패 건수.
+    """상세 수집(전체/의안) 집계. **수집 루프가 끝나면 무조건** 남긴다.
+
+    AI 집계와 분리한 이유: 메일 설정 누락·SMTP 인증 실패로 run() 이 조기 종료하면
+    집계가 통째로 사라졌다. 상세 요청은 이미 다 돌아 통계가 손에 있는데, 하필 장애
+    상황에서 진단 로그가 없어지는 셈이었다. 수집 결과는 발송 성패와 무관하므로
+    발송 판단보다 먼저 기록한다.
 
     상세 수집 성공률 0% 는 파서·마크업이 통째로 어긋났다는 뜻이라 ERROR 로 남긴다.
     전체와 의안을 따로 판정하는 이유는, 금융위·금감원이 정상이면 합계는 멀쩡해 보여
@@ -338,6 +344,9 @@ def _log_run_summary(
             assembly_detail.pending,
         )
 
+
+def _log_ai_summary(cfg, posts_by_source: dict[str, list[Post]]) -> None:
+    """AI 요약 집계. 요약 단계를 실제로 지난 뒤에만 의미가 있어 따로 남긴다."""
     targets = ai_target_count(cfg.llm, posts_by_source)
     summarized = sum(
         1 for posts in posts_by_source.values() for p in posts if p.summary

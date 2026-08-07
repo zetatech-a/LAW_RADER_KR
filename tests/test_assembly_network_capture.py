@@ -21,6 +21,7 @@ from scripts.capture_assembly_network import (
     _markers_in,
     _sanitize_har,
     _scrub_headers,
+    _scrub_html,
     _scrub_post_data,
     _scrub_text,
     _scrub_url,
@@ -146,6 +147,75 @@ def test_scrub_text_removes_personal_and_session_values():
                    "ABCD1234", "xyz9", "deadbeef"):
         assert secret not in out, secret
     assert "담당자" in out
+
+
+# --- HTML 본문: 이름이 비밀인 필드의 값까지 지운다 ---
+
+# 실제 형태의 CSRF 토큰(UUID). 하이픈이 섞여 있어 값 패턴(\b[0-9a-f]{32,}\b)에
+# 걸리지 않는다 — 이름 기준 마스킹이 없으면 아티팩트에 그대로 실린다.
+_UUID_TOKEN = "3f2a91c4-8b7d-4e16-9a02-5c6d1e8f0b34"
+_HTML = (
+    "<html><head>"
+    f'<meta name="_csrf" content="{_UUID_TOKEN}"/>'
+    '<meta name="_csrf_header" content="X-CSRF-TOKEN"/>'
+    '<meta name="_csrf_parameter" content="_csrf"/>'
+    "</head><body>"
+    '<form id="form" action="">'
+    '<input type="hidden" name="billId" value="PRC_A1"/>'
+    f'<input type="hidden" name="_csrf" value="{_UUID_TOKEN}"/>'
+    '<input type="hidden" name="ageFrom" value="22"/>'
+    "</form>"
+    f'<script>var token = "{_UUID_TOKEN}";</script>'
+    '<pre id="prntSummary">제안이유 및 주요내용 본문</pre>'
+    "</body></html>"
+)
+
+
+def test_scrub_html_redacts_secret_named_field_values():
+    out = _scrub_html(_HTML)
+    assert _UUID_TOKEN not in out                 # meta·input·인라인 JS 어디에도 없다
+    assert out.count(REDACTED) >= 2
+
+
+def test_scrub_html_keeps_field_names_and_public_values():
+    out = _scrub_html(_HTML)
+    # 이름은 우리가 확정하려는 계약이다 — 반드시 남는다.
+    for keep in ('name="_csrf"', 'name="billId"', 'id="form"', 'id="prntSummary"'):
+        assert keep in out, keep
+    # 공개 식별자와 본문은 그대로 둔다(fixture 재현·계약 검증에 필요).
+    assert 'value="PRC_A1"' in out
+    assert 'value="22"' in out
+    assert "제안이유 및 주요내용 본문" in out
+
+
+def test_scrub_html_keeps_csrf_header_and_parameter_names():
+    # _csrf_header / _csrf_parameter 의 content 는 토큰이 아니라 '이름'이다.
+    out = _scrub_html(_HTML)
+    assert "X-CSRF-TOKEN" in out
+    assert 'content="_csrf"' in out
+
+
+def test_scrub_html_still_applies_value_patterns():
+    out = _scrub_html(
+        '<html><body><p>hong@example.com JSESSIONID=ABCD1234</p></body></html>'
+    )
+    assert "hong@example.com" not in out
+    assert "ABCD1234" not in out
+
+
+def test_scrub_html_handles_empty_and_non_html():
+    assert _scrub_html("") == ""
+    assert "ABCD1234" not in _scrub_html("JSESSIONID=ABCD1234")
+
+
+def test_sanitize_har_redacts_tokens_in_html_response_bodies():
+    """HAR 에 박제된 HTML 응답 본문에도 이름 기준 마스킹이 적용돼야 한다."""
+    har = _har()
+    entry = har["log"]["entries"][0]
+    entry["response"]["content"] = {"mimeType": "text/html", "text": _HTML}
+    out = json.dumps(_sanitize_har(har), ensure_ascii=False)
+    assert _UUID_TOKEN not in out
+    assert 'name=\\"_csrf\\"' in out          # 이름은 남는다
 
 
 # --- HAR ---

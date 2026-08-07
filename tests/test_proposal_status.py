@@ -361,8 +361,8 @@ def test_assembly_error_only_when_no_available_and_no_pending(
 ):
     import logging
 
-    from src.main import _DetailStats, _log_run_summary
-    from tests.test_run_summary import _Cfg, _llm
+    from src.main import _DetailStats
+    from tests.test_run_summary import _Cfg, _llm, _log_run_summary
 
     stats = _DetailStats(
         attempted=available + pending + failed, succeeded=available, pending=pending
@@ -395,8 +395,8 @@ def test_pending_is_not_counted_as_failure():
 def test_pending_does_not_trigger_overall_zero_success_error(caplog):
     import logging
 
-    from src.main import _DetailStats, _log_run_summary
-    from tests.test_run_summary import _Cfg, _llm
+    from src.main import _DetailStats
+    from tests.test_run_summary import _Cfg, _llm, _log_run_summary
 
     # 전체 상세가 0건 성공이지만 전부 등록 대기 → 전면 실패 ERROR 를 내면 안 된다.
     overall = _DetailStats(attempted=4, succeeded=0, pending=4)

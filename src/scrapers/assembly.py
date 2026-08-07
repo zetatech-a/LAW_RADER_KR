@@ -214,6 +214,11 @@ def _probe_summary(soup: BeautifulSoup) -> tuple[SummaryProbe, str]:
     return best, best_text
 
 
+def _missing_shell(soup: BeautifulSoup) -> list[str]:
+    """정상 심사정보 응답이라면 반드시 있어야 할 구조 중 빠진 것들."""
+    return [s for s in _BILLINFO_SHELL_SELECTORS if soup.select_one(s) is None]
+
+
 def _probe_billinfo(soup: BeautifulSoup) -> tuple[SummaryProbe, str, str]:
     """billInfo.do 응답 판정 — (판정, 본문, 사유) 를 돌려준다. fail-closed.
 
@@ -225,12 +230,20 @@ def _probe_billinfo(soup: BeautifulSoup) -> tuple[SummaryProbe, str, str]:
 
     판정:
       pre#prntSummary 있음 + 20자 이상            → FOUND    (AVAILABLE)
-      pre#prntSummary 있음 + 완전히 비어 있음      → EMPTY    (PENDING)
+      pre#prntSummary 있음 + 비어 있음 + 정상 shell → EMPTY  (PENDING)
+      pre#prntSummary 있음 + 비어 있음 + shell 없음 → MISSING (ERROR)
       pre#prntSummary 있음 + 짧은 잔여 텍스트      → UNEXPECTED (ERROR)
       pre 없음 + #prntsummary-sect 있음            → MISSING  (ERROR, 구조 변경)
       pre 없음 + 제안이유 marker 있음              → MISSING  (ERROR, 마크업 변경)
       pre 없음 + 정상 shell 전부 있음 + 위 둘 다 없음 → EMPTY (PENDING, 등록 전)
       정상 shell 자체가 없음                        → MISSING  (ERROR)
+
+    PENDING 은 어느 경로로 오든 '정상 심사정보 응답'을 확인한 뒤에만 준다. 그렇지
+    않으면 빈 pre 만 남은 오류·중간 페이지가 등록 대기로 위장되어 덤프도 남지 않고,
+    그 의안은 제안이유를 못 받은 채 seen 으로 확정되어 영영 재조회되지 않는다.
+
+    FOUND 는 shell 을 요구하지 않는다 — 본문을 이미 확보한 상태이므로, 주변 마크업이
+    바뀌었다는 이유로 정상 수집을 실패로 뒤집을 이유가 없다.
 
     제안일자·문서 유무·소관위원회 상태 같은 정황은 보지 않는다 — 등록 여부와 직접
     관계가 없고, 그런 정황으로 PENDING 을 추정하면 고장을 '등록 대기'로 위장하게 된다.
@@ -241,6 +254,14 @@ def _probe_billinfo(soup: BeautifulSoup) -> tuple[SummaryProbe, str, str]:
         if len(text) >= _MIN_SUMMARY_CHARS:
             return SummaryProbe.FOUND, text, ""
         if not text:
+            missing_shell = _missing_shell(soup)
+            if missing_shell:
+                return (
+                    SummaryProbe.MISSING,
+                    "",
+                    f"{_BILLINFO_SUMMARY_SELECTOR} 가 비어 있는데 정상 심사정보 "
+                    f"응답도 아님(없는 구조: {', '.join(missing_shell)})",
+                )
             return SummaryProbe.EMPTY, "", ""
         return SummaryProbe.UNEXPECTED, text, "본문이 너무 짧음"
 
@@ -260,7 +281,7 @@ def _probe_billinfo(soup: BeautifulSoup) -> tuple[SummaryProbe, str, str]:
             f"{_BILLINFO_SUMMARY_SELECTOR} 가 없음(마크업 변경)",
         )
 
-    missing_shell = [s for s in _BILLINFO_SHELL_SELECTORS if soup.select_one(s) is None]
+    missing_shell = _missing_shell(soup)
     if missing_shell:
         return (
             SummaryProbe.MISSING,

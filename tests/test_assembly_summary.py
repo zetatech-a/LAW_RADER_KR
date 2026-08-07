@@ -276,6 +276,38 @@ def test_duplicate_bill_id_drops_that_bill_entirely():
     assert posts[1].summary == _lines("PRC_0001")
 
 
+def test_duplicate_is_rejected_even_when_the_first_row_was_malformed():
+    """첫 행이 형식 위반이어도 '등장했다'는 사실은 남아야 한다.
+
+    회귀: 예전에는 형식 위반 행을 등장 기록 없이 버려서, 뒤따르는 같은 ID 의 멀쩡해
+    보이는 행이 그대로 실렸다. 그 행의 내용이 실은 다른(누락된) 의안의 것일 수 있어
+    잘못된 요약이 알림에 붙는다. 중복은 어느 쪽이 맞는지 알 수 없으므로 통째로 버린다.
+    """
+    posts = [_bill(0), _bill(1)]
+
+    def _bad_then_good(requested, n):
+        return _envelope(
+            json.dumps(
+                {
+                    "summaries": [
+                        # 첫 행: 같은 ID 인데 3줄이 아니라 형식 위반
+                        {"bill_id": "PRC_0000", "summary": ["한 줄뿐임"]},
+                        {"bill_id": "PRC_0001", "summary": _lines("PRC_0001")},
+                        # 둘째 행: 형식은 멀쩡하지만 중복이므로 믿을 수 없다
+                        {"bill_id": "PRC_0000", "summary": _lines("B")},
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    cfg = _cfg(batch=AssemblyBatchConfig(retry_missing_once=False))
+    ok, _ = _run(posts, cfg, reply=_bad_then_good)
+    assert ok == 1
+    assert posts[0].summary == []                     # 뒤 행을 주워 담지 않는다
+    assert posts[1].summary == _lines("PRC_0001")
+
+
 @pytest.mark.parametrize(
     "bad",
     [

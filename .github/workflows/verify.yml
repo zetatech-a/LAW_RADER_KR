@@ -325,6 +325,11 @@ jobs:
       # available 검증(명시적 의안)이 성공했고 표본에 failed 가 없으면, 표본이 전부
       # 등록 대기여도 통과시킨다 — '최신 의안이 마침 전부 신규'라는 우연으로 job 결과가
       # 흔들리면 검증이 결정적이지 않다.
+      #
+      # 단, 이 예외는 **의안 하나에만** 적용해야 한다. verify_sources 는 모든 소스의
+      # 리포트를 한 파일에 찍으므로, 리포트 전체를 grep 하면 무관한 소스(금융위·금감원
+      # 등)의 실패가 의안의 '모두 등록 대기' 문구에 가려 초록불로 넘어간다. 그래서
+      # 문구 두 개를 추측하는 대신 요약부의 결정적 집계를 판다.
       - name: Gate on source verification
         if: ${{ !cancelled() }}
         shell: bash
@@ -336,16 +341,26 @@ jobs:
             echo "소스 검증 통과."
             exit 0
           fi
-          # verify_sources 는 '표본이 전부 등록 대기'일 때도 non-zero 로 끝난다.
-          # 그 경우는 failed=0 이고, 명시적 available 검증이 통과했다면 고장이 아니다.
+          # 요약부: "실패(수정 필요) 소스: N/M" 과 "  🟠 <key>: ..." 목록.
+          # FAIL 소스가 하나라도 있으면 예외 없이 실패다.
+          if ! grep -q "^실패(수정 필요) 소스: 0/" verify_report.txt 2>/dev/null; then
+            echo "::error::FAIL 로 판정된 소스가 있습니다. verify_report.txt 요약부를 확인하세요."
+            echo "::error::available 검증 결과: $AVAILABLE"
+            exit 1
+          fi
+          # 부분 실패가 '의안 1건, 사유는 모두 등록 대기' 인 경우에만 예외를 적용한다.
+          # 패턴의 콜론이 중요하다 — 요약부에는 소스별 한 줄 요약("  🟠 assembly_bill
+          # 목록 10건 ...")도 같은 들여쓰기·기호로 찍힌다. 부분 실패 목록만 "키:" 형태다.
+          partial_total=$(grep -cE "^  🟠 [A-Za-z0-9_]+: " verify_report.txt 2>/dev/null || true)
+          partial_pending=$(grep -cE "^  🟠 assembly_bill: .*모두 등록 대기" verify_report.txt 2>/dev/null || true)
           if [ "$AVAILABLE" = "success" ] && \
-             grep -q "모두 등록 대기" verify_report.txt 2>/dev/null && \
-             ! grep -q "제안이유 수집 실패" verify_report.txt 2>/dev/null; then
-            echo "::notice::표본이 전부 등록 대기였지만 명시적 available 검증이 통과했고 failed=0 이므로 통과 처리합니다."
+             [ "$partial_total" = "1" ] && [ "$partial_pending" = "1" ]; then
+            echo "::notice::의안 표본이 전부 등록 대기였지만 명시적 available 검증이 통과했고 FAIL 소스 0건이므로 통과 처리합니다."
             exit 0
           fi
           echo "::error::소스 검증 실패. verify_report.txt 의 '제안이유 available/pending/failed' 를 확인하세요."
-          echo "::error::failed>0 이면 구조·endpoint 문제입니다. available 검증 결과: $AVAILABLE"
+          echo "::error::부분 실패 소스 ${partial_total}건(의안 등록 대기 ${partial_pending}건). available 검증 결과: $AVAILABLE"
+          echo "::error::failed>0 이면 구조·endpoint 문제입니다."
           exit 1
 
 

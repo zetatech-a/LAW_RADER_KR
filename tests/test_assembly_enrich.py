@@ -383,6 +383,37 @@ def test_empty_pre_prnt_summary_is_pending(tmp_path, monkeypatch):
         assert p.body == ""
 
 
+def test_empty_pre_without_normal_shell_is_error_not_pending(tmp_path, monkeypatch):
+    """빈 pre 만 남고 정상 심사정보 shell 이 없으면 등록 대기가 아니라 ERROR 다.
+
+    회귀: 오류·중간 페이지가 빈 pre 하나만 남긴 채 오면 이전 코드는 PENDING 으로
+    판정했다. 그러면 덤프도 남지 않고 실패 집계에도 안 잡힌 채 그 의안이 seen 으로
+    확정되어, 제안이유를 영영 받지 못한다.
+    """
+    for text in ("", "   ", "\n\n"):
+        p, _f = _run(
+            _detail_page(), _billinfo_response(text, shell=False),
+            tmp_path=tmp_path, monkeypatch=monkeypatch,
+        )
+        assert p.proposal_status is S.ERROR, (repr(text), p.proposal_note)
+        assert "정상 심사정보" in (p.proposal_note or "")
+        assert (tmp_path / "debug").exists()   # ERROR 는 덤프를 남긴다
+
+
+def test_found_body_does_not_require_normal_shell(tmp_path, monkeypatch):
+    """본문을 이미 확보했다면 주변 마크업이 바뀌어도 AVAILABLE 이다.
+
+    shell 검사는 '비어 있음'을 PENDING 으로 인정할 때만 필요하다. 본문이 손에 있는데
+    주변 구조가 달라졌다는 이유로 정상 수집을 실패로 뒤집으면 손해만 본다.
+    """
+    p, _f = _run(
+        _detail_page(), _billinfo_response(shell=False),
+        tmp_path=tmp_path, monkeypatch=monkeypatch,
+    )
+    assert p.proposal_status is S.AVAILABLE, p.proposal_note
+    assert "예치금 분리보관" in p.body
+
+
 def test_short_leftover_text_in_pre_is_error_not_pending(tmp_path, monkeypatch):
     """pre 에 짧은 잔여 텍스트가 있으면 뭘 받은 건지 알 수 없다 → ERROR."""
     for notice in ("등록 예정입니다.", "준비 중입니다", "자료가 없습니다"):

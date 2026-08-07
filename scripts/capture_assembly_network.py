@@ -38,6 +38,8 @@ import sys
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from bs4 import BeautifulSoup
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
@@ -105,6 +107,44 @@ def _scrub_text(text: str) -> str:
     for pat in _SECRET_VALUE_PATTERNS:
         out = pat.sub(REDACTED, out)
     return out
+
+
+def _scrub_html(html: str) -> str:
+    """HTML 본문을 파싱해 **이름이 비밀인 필드의 값**부터 지우고 _scrub_text 를 돌린다.
+
+    값 패턴만으로는 부족하다. _SECRET_VALUE_PATTERNS 는 32자 이상 연속 16진수만 잡는데,
+    Spring 기본 CSRF 토큰은 하이픈이 섞인 UUID 라 그 패턴에 걸리지 않는다. 즉
+    meta[name="_csrf"] 의 content 나 hidden input 의 토큰 값이 그대로 아티팩트에 실려
+    업로드된다. 그래서 fixture 캡처(capture_assembly_fixture._sanitize)와 같은 기준으로
+    이름을 보고 값을 지운다.
+
+    구조와 이름은 반드시 남긴다 — 우리가 확정하려는 계약이 바로 그 이름들이다.
+    파싱에 실패하면 원문을 흘리지 않고 값 패턴 정화라도 반드시 적용한다(fail-safe).
+    """
+    text = html or ""
+    try:
+        soup = BeautifulSoup(text, "lxml")
+    except Exception:  # noqa: BLE001 — 진단 도구가 파서 문제로 죽지 않게 한다
+        return _scrub_text(text)
+
+    for el in soup.find_all(["input", "meta"]):
+        name = (el.get("name") or el.get("id") or "").lower()
+        attr = "value" if el.name == "input" else "content"
+        if not el.get(attr) or not _is_secret_name(name):
+            continue
+        # _csrf_header / _csrf_parameter 의 content 는 토큰이 아니라 '이름'이다
+        # (예: X-CSRF-TOKEN). 계약 확인에 필요하고 비밀이 아니므로 남긴다.
+        if el.name == "meta" and ("header" in name or "param" in name):
+            continue
+        el[attr] = REDACTED
+
+    # 인라인 JS 에 토큰이 박혀 오는 경우가 흔하다. 계약 분석은 별도로 내려받는
+    # billDetail.js 로 하므로, 문서에 인라인된 스크립트 본문은 비워도 잃을 게 없다.
+    for el in soup.find_all("script"):
+        if not (el.get("src") or "").strip():
+            el.string = ""
+
+    return _scrub_text(str(soup))
 
 
 def _scrub_headers(headers: dict) -> dict:
@@ -213,7 +253,14 @@ def _sanitize_har(har: dict) -> dict:
                 p["value"] = REDACTED
         content = res.get("content") or {}
         if content.get("text"):
-            content["text"] = _scrub_text(content["text"])
+            # HAR 에 박제된 응답 본문도 같은 위험을 갖는다(HTML 이면 토큰이 필드 값에
+            # 들어 있다). mimeType 을 못 믿을 때를 대비해 본문 모양으로도 한 번 더 본다.
+            mime = (content.get("mimeType") or "").lower()
+            body = content["text"]
+            looks_html = "html" in mime or body.lstrip()[:200].lower().startswith(
+                ("<!doctype html", "<html")
+            )
+            content["text"] = _scrub_html(body) if looks_html else _scrub_text(body)
     return har
 
 
@@ -360,7 +407,7 @@ def capture(
 
         # 렌더링 완료 HTML
         rendered = page.content()
-        _write(out_dir / "assembly_rendered.html", _scrub_text(rendered))
+        _write(out_dir / "assembly_rendered.html", _scrub_html(rendered))
         result["summary_in_rendered_html"] = _has_summary(rendered)
 
         # 응답 본문 저장 (likms 호스트의 document/xhr/fetch, html/json 만)
@@ -444,7 +491,9 @@ def _dump_responses(responses: list[dict], out_dir: Path, result: dict) -> list[
         n += 1
         ext = "json" if is_json else "html"
         name = f"xhr_response_{n:03d}.{ext}"
-        _write(out_dir / name, _scrub_text(body))
+        # HTML 응답에는 CSRF meta·hidden 토큰이 그대로 실려 온다. 값 패턴만으로는
+        # UUID 형 토큰을 못 잡으므로 이름 기준 마스킹을 먼저 돌린다.
+        _write(out_dir / name, _scrub_html(body) if is_html else _scrub_text(body))
 
         markers = _markers_in(body)
         if markers:
