@@ -1,0 +1,176 @@
+{
+  "requested_url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_O2O6N0J7J3I0I1G5F0G5N0O0N1N3L2",
+  "final_url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_O2O6N0J7J3I0I1G5F0G5N0O0N1N3L2",
+  "http_status": 200,
+  "redirects": [],
+  "summary_in_get_html": false,
+  "follow_up_request_made": true,
+  "summary_in_follow_up": true,
+  "follow_up_request": {
+    "method": "post",
+    "action": "https://likms.assembly.go.kr/bill/bi/bill/detail/billInfo.do",
+    "data_keys": [
+      "billGbnCd",
+      "billId",
+      "billKindCd",
+      "billNo",
+      "currCmtName",
+      "headMemo",
+      "headMemoInfo",
+      "intrsBillCnt",
+      "reexamYn",
+      "stageMemo",
+      "tmprAnYn",
+      "withdrawCnt"
+    ],
+    "header_keys": [
+      "X-CSRF-TOKEN"
+    ]
+  },
+  "forms": [
+    {
+      "id": "glnbSearchForm",
+      "name": "glnbSearchForm",
+      "action": "/portal/signl/search/search.do",
+      "method": "post",
+      "hidden_input_names": [
+        "collection"
+      ]
+    },
+    {
+      "id": "form_layerOpen",
+      "name": "",
+      "action": "",
+      "method": "get(기본값)",
+      "hidden_input_names": [
+        "siteId"
+      ]
+    },
+    {
+      "id": "form_layer",
+      "name": "",
+      "action": "",
+      "method": "get(기본값)",
+      "hidden_input_names": [
+        "siteId"
+      ]
+    },
+    {
+      "id": "form",
+      "name": "form",
+      "action": "",
+      "method": "get(기본값)",
+      "hidden_input_names": [
+        "billGbnCd",
+        "billId",
+        "billKindCd",
+        "billNo",
+        "currCmtName",
+        "headMemo",
+        "headMemoInfo",
+        "intrsBillCnt",
+        "reexamYn",
+        "stageMemo",
+        "tmprAnYn",
+        "withdrawCnt"
+      ]
+    },
+    {
+      "id": "historyForm",
+      "name": "historyForm",
+      "action": "",
+      "method": "get(기본값)",
+      "hidden_input_names": [
+        "ageCmtId",
+        "ageFrom",
+        "ageSch",
+        "ageTo",
+        "allNm",
+        "allOpenId",
+        "anbillDivCd",
+        "billKeyword",
+        "billKind",
+        "billName",
+        "billNm",
+        "billNo",
+        "billSentence",
+        "budgetSubbillCd",
+        "cmtResultCd",
+        "committeeCd",
+        "currMenuNo",
+        "expAddiYn",
+        "fromDispSe",
+        "fromPropDt",
+        "fromPropSess",
+        "fromPropSessAge",
+        "fromSubmitDt",
+        "fromdispSeAge",
+        "intdMemId",
+        "intdMemInfo",
+        "isHistoryBack",
+        "isPopSelect",
+        "jntPrpslYn",
+        "jointNm",
+        "jointOpenId",
+        "listOrd",
+        "mainProcYn",
+        "mainResultCd",
+        "mainUpdateYn",
+        "nmReSchChk",
+        "nmReSchText",
+        "oneNm",
+        "oneOpenId",
+        "ordCd",
+        "page",
+        "petitKindCd",
+        "petitSmry",
+        "petitTitle",
+        "petrInfo",
+        "procFrom",
+        "procGbnCd",
+        "procTo",
+        "proposer",
+        "proposerKind",
+        "reasonPropose",
+        "reexamYn",
+        "repreNm",
+        "repreOpenId",
+        "represent",
+        "representId",
+        "representKindCd",
+        "rows",
+        "stateDtlDivCd",
+        "toDispSe",
+        "toPropDt",
+        "toPropSess",
+        "toPropSessAge",
+        "toSubmitDt",
+        "todispSeAge"
+      ]
+    },
+    {
+      "id": "global-hidden-form",
+      "name": "",
+      "action": "",
+      "method": "post",
+      "hidden_input_names": [
+        "_csrf"
+      ]
+    }
+  ],
+  "csrf_meta": {
+    "selector": "meta[name=\"_csrf\"]",
+    "has_token": true
+  },
+  "prnt_summary_selector_hits": {
+    "pre#prntSummary": false,
+    "#prntSummary": false,
+    "#summaryContentDiv": false
+  },
+  "chosen_form_action": "https://likms.assembly.go.kr/bill/bi/bill/detail/billInfo.do",
+  "follow_up_status": 200,
+  "expect": "available",
+  "status": "available",
+  "status_note": "billInfo.do 응답",
+  "body_length": 474
+}
