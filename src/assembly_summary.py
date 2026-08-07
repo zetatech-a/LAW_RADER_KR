@@ -136,7 +136,23 @@ def summarize_assembly_bills(
                 len(batches) - i,
             )
             break
-        ok += _run(summarizer, batch, deadline, cfg, allow_split=True, allow_retry=True)
+        result = _run(
+            summarizer, batch, deadline, cfg, allow_split=True, allow_retry=True
+        )
+        ok += result.ok
+        # 호출 자체가 실패했다면(인증·한도·5xx·네트워크) 다음 배치도 같은 자격증명으로
+        # 같은 서비스를 부른다. 401/403 이면 확실히, 5xx·타임아웃이어도 _generate 가
+        # 이미 재시도를 소진한 뒤라 반복할 이유가 없다. 남은 배치를 계속 부르면 실패만
+        # 쌓이며 시간예산을 태우고 메일이 그만큼 늦어진다(일반 요약 경로의 연속 실패
+        # 서킷 브레이커와 같은 취지). 응답 내용이 문제인 경우(_Splittable 등)는
+        # 배치마다 다를 수 있으므로 여기서 멈추지 않는다.
+        if result.call_failed:
+            log.warning(
+                "의안 배치 호출이 실패했습니다 — 남은 %d개 배치는 호출하지 않고 "
+                "발췌로 발송합니다.",
+                len(batches) - i - 1,
+            )
+            break
 
     log.info("의안 배치 요약 완료 %d/%d건", ok, len(items))
     if ok < len(items):
@@ -209,6 +225,25 @@ def _batches(items: list[_Item], batch_size: int, max_chars: int) -> list[list[_
 
 
 # --- 한 배치 실행 ---
+@dataclass
+class _Result:
+    """배치 실행 결과.
+
+    ok 만으로는 '요약을 못 받았다'와 '호출 자체가 죽었다'를 구분할 수 없다. 앞은 이
+    배치의 문제라 다음 배치는 멀쩡할 수 있고, 뒤는 서비스·자격증명 문제라 다음 배치도
+    똑같이 실패한다. 호출자가 남은 배치를 계속할지 정하려면 그 구분이 필요하다.
+    """
+
+    ok: int = 0
+    call_failed: bool = False   # 인증·한도·5xx·네트워크 등 호출 계층의 실패
+
+    def __add__(self, other: "_Result") -> "_Result":
+        return _Result(
+            ok=self.ok + other.ok,
+            call_failed=self.call_failed or other.call_failed,
+        )
+
+
 def _run(
     summarizer: "Summarizer",
     items: list[_Item],
@@ -217,13 +252,13 @@ def _run(
     *,
     allow_split: bool,
     allow_retry: bool,
-) -> int:
-    """배치 하나를 요약해 적용한 건수를 돌려준다. 예외를 밖으로 내보내지 않는다."""
+) -> _Result:
+    """배치 하나를 요약해 결과를 돌려준다. 예외를 밖으로 내보내지 않는다."""
     if not items:
-        return 0
+        return _Result()
     if deadline is not None and deadline - time.monotonic() < _MIN_CALL_SEC:
         log.warning("의안 요약 시간예산 소진 — 의안 %d건은 발췌로 발송됩니다.", len(items))
-        return 0
+        return _Result()
 
     try:
         mapping = _call(summarizer, items, deadline, cfg)
@@ -238,15 +273,20 @@ def _run(
                 len(items) - mid,
             )
             # 분할한 조각은 다시 분할하지 않는다(한 번만 분할).
-            return _run(
+            first = _run(
                 summarizer, items[:mid], deadline, cfg,
                 allow_split=False, allow_retry=allow_retry,
-            ) + _run(
+            )
+            # 앞 조각에서 호출이 죽었으면 뒤 조각도 같은 실패를 반복한다.
+            if first.call_failed:
+                log.warning("분할 앞 조각에서 호출이 실패 — 뒤 조각은 호출하지 않습니다.")
+                return first
+            return first + _run(
                 summarizer, items[mid:], deadline, cfg,
                 allow_split=False, allow_retry=allow_retry,
             )
         log.warning("의안 배치(%d건) 요약 실패 — 발췌로 발송합니다: %s", len(items), e)
-        return 0
+        return _Result()
     except Exception as e:  # noqa: BLE001 — 인증·한도·5xx·네트워크: 분할하지 않는다
         log.warning(
             "의안 배치(%d건) 호출 실패(%s) — 분할하지 않고 발췌로 발송합니다: %s",
@@ -254,18 +294,18 @@ def _run(
             type(e).__name__,
             e,
         )
-        return 0
+        return _Result(call_failed=True)
 
-    ok = _apply(items, mapping)
+    result = _Result(ok=_apply(items, mapping))
     missing = [it for it in items if it.bill_id not in mapping]
     if missing and cfg.retry_missing_once and allow_retry:
         log.info("의안 %d건이 응답에서 빠짐 — 해당 ID 만 한 번 다시 요청합니다.", len(missing))
-        ok += _run(
+        result = result + _run(
             summarizer, missing, deadline, cfg, allow_split=False, allow_retry=False
         )
     elif missing:
         log.info("의안 %d건은 요약을 받지 못함 — 발췌로 발송됩니다.", len(missing))
-    return ok
+    return result
 
 
 def _call(

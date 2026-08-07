@@ -609,3 +609,113 @@ def test_detail_url_override_applies_to_canonicalized_links(monkeypatch):
         extra={"detail_url": tmpl},
     )
     assert urls == ["https://likms.assembly.go.kr/bill/bi/other.do?billId=PRC_A1"]
+
+
+# --- 상세 수집이 원래 불가능한 소스는 실패로 세지 않는다 ---
+
+
+def _run_with_scraper(tmp_path, monkeypatch, caplog, scraper_cls, keys):
+    from src import main as main_mod
+    from src.scrapers.base import CollectResult
+    from src.state import State
+
+    state_path = tmp_path / "seen.json"
+    st = State(state_path)
+    for key in keys:
+        st.mark_seen(key, ["old"], baselined=True)
+    st.save()
+
+    made = {
+        key: [
+            Post(source_key=key, source_name=f"{key} 소스",
+                 post_id=f"{key}-{i}", title="제목", url=f"https://x/{key}/{i}")
+            for i in range(2)
+        ]
+        for key in keys
+    }
+
+    monkeypatch.setenv("SMTP_USER", "s@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "pw")
+    monkeypatch.setenv("MAIL_TO", "to@example.com")
+    monkeypatch.setattr(main_mod, "verify_smtp_login", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "summarize_posts", lambda c, p: 0)
+    sent = {"n": 0}
+    monkeypatch.setattr(
+        main_mod, "send_digest", lambda c, p: sent.__setitem__("n", sent["n"] + 1)
+    )
+    monkeypatch.setattr(
+        main_mod, "build_scraper", lambda src, fetcher: scraper_cls(src.key, made)
+    )
+
+    with caplog.at_level(logging.INFO, logger="law_rader"):
+        rc = main_mod.run(["--state", str(state_path), "--only", ",".join(keys)])
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    return rc, sent["n"], errors, caplog.text
+
+
+class _NoEnrichScraper:
+    """회신사례처럼 상세가 JS 팝업이라 enrich 가 아무것도 못 채우는 소스."""
+
+    SUPPORTS_ENRICH = False
+
+    def __init__(self, key, made):
+        self.key = key
+        self._made = made
+
+    def collect(self, limit, seen_ids, max_pages):
+        from src.scrapers.base import CollectResult
+
+        posts = self._made[self.key]
+        return CollectResult(posts=posts, reached_boundary=True, scanned=len(posts))
+
+    def enrich(self, post):        # pragma: no cover — 호출되지 않아야 한다
+        raise AssertionError("상세 수집 대상이 아닌 소스에 enrich 를 부르면 안 된다")
+
+
+def test_unenrichable_source_does_not_trigger_zero_success_error(
+    tmp_path, monkeypatch, caplog
+):
+    """회귀: better_reply 만 신규인 실행이 '성공률 0%' 장애 경보를 내면 안 된다.
+
+    이 소스는 상세가 JS 팝업이라 본문이 비는 것이 **정상**이다. 실패로 세면 정상
+    실행마다 거짓 ERROR 가 찍혀 진짜 파서 장애가 그 잡음에 묻힌다.
+    """
+    rc, sent, errors, text = _run_with_scraper(
+        tmp_path, monkeypatch, caplog, _NoEnrichScraper, ["better_reply"]
+    )
+    assert rc == 0 and sent == 1                  # 메일은 정상 발송
+    assert errors == []                           # 거짓 장애 경보 없음
+    assert "상세 수집 집계(전체) — 시도 0건" in text   # 시도 자체를 세지 않는다
+    assert "상세 수집 대상 아님" in text
+
+
+def test_real_better_reply_scraper_declares_no_enrich():
+    """플래그가 실제 스크래퍼에 붙어 있어야 위 회귀 방어가 의미를 갖는다."""
+    from src.scrapers import build_scraper
+    from src.scrapers.base import BaseScraper
+    from src.scrapers.better_fsc import BetterReplyScraper
+
+    assert BetterReplyScraper.SUPPORTS_ENRICH is False
+    assert BaseScraper.SUPPORTS_ENRICH is True     # 기본은 '수집한다'
+    src = SourceConfig(
+        key="better_reply", name="회신사례", type="better_reply",
+        list_url="https://better.fsc.go.kr/", extra={},
+    )
+    assert build_scraper(src, fetcher=None).SUPPORTS_ENRICH is False
+
+
+def test_enrichable_sources_still_counted(tmp_path, monkeypatch, caplog):
+    """플래그가 없는(=수집 가능한) 소스는 종전대로 실패를 센다."""
+
+    class _Broken(_NoEnrichScraper):
+        SUPPORTS_ENRICH = True
+
+        def enrich(self, post):
+            return          # 아무것도 못 채움 = 실패
+
+    rc, sent, errors, text = _run_with_scraper(
+        tmp_path, monkeypatch, caplog, _Broken, ["fss_press"]
+    )
+    assert rc == 0 and sent == 1
+    assert "상세 수집 집계(전체) — 시도 2건 / 성공 0건 / 등록대기 0건 / 실패 2건" in text
+    assert any("성공률 0%" in m for m in errors)

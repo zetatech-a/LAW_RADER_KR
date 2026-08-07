@@ -98,7 +98,8 @@ def test_non_assembly_posts_stay_unknown():
 
 
 def test_available_when_proposal_reason_is_present():
-    p, f = _run(_fx("bill_available.html"))
+    # fixture 의 form#form billId 와 같은 의안이어야 한다 — 다르면 남의 페이지다.
+    p, f = _run(_fx("bill_available.html"), bill_id="PRC_SYNTH_AVAILABLE")
     assert p.proposal_status is S.AVAILABLE
     assert "예치금" in p.body
     assert len(p.body) > 50

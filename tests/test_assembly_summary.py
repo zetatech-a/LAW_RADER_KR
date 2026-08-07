@@ -763,3 +763,108 @@ def test_proposal_reason_is_not_stored_in_details():
     _run(posts)
     assert posts[0].details == []
     assert posts[0].body        # 본문에만 담긴다
+
+
+# --- 호출 계층 실패는 남은 배치까지 태우지 않는다 ---
+
+
+def _multi_batch_posts(n=6, batch_size=2):
+    return [_bill(i) for i in range(n)], AssemblyBatchConfig(batch_size=batch_size)
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+def test_non_recoverable_failure_stops_remaining_batches(status):
+    """401/403/5xx 는 다음 배치도 똑같이 실패한다 — 남은 배치를 부르지 않는다.
+
+    회귀: 예전에는 배치마다 실패를 삼키고 계속 호출해서, 자격증명이 죽은 실행이
+    (배치 수 × 타임아웃)만큼 시간예산을 태우고 메일을 그만큼 늦췄다. 일반 요약
+    경로의 연속 실패 서킷 브레이커와 같은 취지다.
+    """
+    posts, batch = _multi_batch_posts()
+    s = Summarizer(_cfg(batch=batch))
+    sess = _CountingSession(
+        _FakeResponse(status, {"error": {"status": "X", "message": "boom"}}, "boom")
+    )
+    s.session = sess
+
+    assert s.summarize_all({_SOURCE: posts}) == 0
+    # 6건 / batch_size 2 → 배치 3개. 첫 호출이 실패하면 거기서 멈춘다.
+    assert len(sess.sent) == 1
+    assert all(p.summary == [] for p in posts)
+
+
+def test_network_failure_stops_remaining_batches():
+    posts, batch = _multi_batch_posts()
+    s = Summarizer(_cfg(batch=batch))
+    calls = {"n": 0}
+
+    class _Boom:
+        def post(self, *a, **k):
+            calls["n"] += 1
+            raise ConnectionError("연결 실패")
+
+    s.session = _Boom()
+    assert s.summarize_all({_SOURCE: posts}) == 0
+    assert calls["n"] == 1
+
+
+def test_content_level_failure_does_not_stop_remaining_batches():
+    """응답 내용이 문제인 경우는 배치마다 다를 수 있다 — 멈추면 안 된다."""
+    posts = [_bill(i) for i in range(4)]
+    first_batch = {"PRC_0000", "PRC_0001"}
+
+    def _only_first_batch_broken(requested, n):
+        # 첫 배치는 분할한 조각까지 계속 깨진 응답을 준다(내용 문제).
+        if set(requested) & first_batch:
+            return _envelope("{쓰레기")
+        return _reply(requested)
+
+    cfg = _cfg(batch=AssemblyBatchConfig(batch_size=2, retry_missing_once=False))
+    ok, rec = _run(posts, cfg, reply=_only_first_batch_broken)
+
+    # 첫 배치가 끝까지 실패해도 둘째 배치는 호출되어 요약을 받는다.
+    assert ok == 2
+    assert posts[0].summary == [] and posts[1].summary == []
+    assert posts[2].summary == _lines("PRC_0002")
+    assert posts[3].summary == _lines("PRC_0003")
+    assert any(set(c) == {"PRC_0002", "PRC_0003"} for c in rec.calls)
+
+
+def test_split_stops_second_half_after_call_failure():
+    """분할 앞 조각에서 호출이 죽으면 뒤 조각도 같은 실패를 반복한다 — 부르지 않는다."""
+    posts = [_bill(i) for i in range(4)]
+    seq = {"n": 0}
+
+    def _broken_then_dead(requested, n):
+        seq["n"] = n
+        if n == 1:
+            return _envelope("{쓰레기")          # 분할 유발
+        raise RuntimeError("HTTP 401: invalid api key")
+
+    cfg = _cfg(batch=AssemblyBatchConfig(batch_size=4, retry_missing_once=False))
+    ok, rec = _run(posts, cfg, reply=_broken_then_dead)
+    assert ok == 0
+    # 최초 1회 + 분할 앞 조각 1회 = 2회. 뒤 조각까지 불렀다면 3회가 된다.
+    assert len(rec.calls) == 2
+    assert all(p.summary == [] for p in posts)
+
+
+def test_general_posts_still_summarized_after_assembly_call_failure():
+    """의안 배치가 죽어도 일반 게시물 단건 요약 경로는 그대로 돈다."""
+    bills = [_bill(i) for i in range(4)]
+    generals = [_general(0)]
+    s = Summarizer(_cfg(batch=AssemblyBatchConfig(batch_size=2)))
+    calls = {"n": 0}
+
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+        calls["n"] += 1
+        if "bill_id:" in prompt:
+            raise RuntimeError("HTTP 403: forbidden")
+        return _envelope("첫째 문장임\n둘째 문장임\n셋째 문장임")
+
+    s._generate = _generate
+    ok = s.summarize_all({_SOURCE: bills, "금융위 · 보도자료": generals})
+
+    assert ok == 1                                  # 일반 1건은 요약됐다
+    assert generals[0].summary                      # 일반 경로 무영향
+    assert all(p.summary == [] for p in bills)

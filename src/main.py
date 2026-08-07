@@ -179,6 +179,20 @@ def run(argv=None) -> int:
             )
             new_posts = new_posts[:cap]
 
+        # 상세를 수집할 수 없는 소스(회신사례처럼 상세가 JS 팝업인 곳)는 본문이 비는
+        # 것이 정상이다. 이런 소스를 '시도했으나 실패'로 세면, 그 소스만 신규가 들어온
+        # 실행이 성공률 0% 로 잡혀 파서 장애 경보가 거짓으로 울린다.
+        supports_enrich = getattr(scraper, "SUPPORTS_ENRICH", True)
+        if not supports_enrich:
+            log.info(
+                "[%s] 신규 %d건 발견 — 상세 수집 대상 아님(제목·링크만 통지)",
+                src.key,
+                len(new_posts),
+            )
+            pending_seen.append((src.key, all_new_ids))
+            posts_by_source[src.name] = new_posts
+            continue
+
         log.info("[%s] 신규 %d건 발견 — 상세 수집", src.key, len(new_posts))
         for p in new_posts:
             try:

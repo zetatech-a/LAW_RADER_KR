@@ -28,7 +28,7 @@ import os
 import re
 from dataclasses import dataclass
 from enum import Enum
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -212,6 +212,119 @@ def _probe_summary(soup: BeautifulSoup) -> tuple[SummaryProbe, str]:
         if rank[probe] > rank[best]:
             best, best_text = probe, value
     return best, best_text
+
+
+# --- 진단 덤프 정화 ---
+#
+# debug/ 는 verify 워크플로가 아티팩트로 업로드한다(보존 7일). 그런데 덤프가 남는 때는
+# 정확히 '요청을 만들지 못했거나 응답이 이상한' 때이고, 그 원본 HTML 에는 살아 있는
+# 세션의 CSRF 토큰이 meta[name="_csrf"] 와 hidden input 값으로 들어 있다. 진단에
+# 필요한 것은 구조와 필드 '이름'이므로, 값만 지우고 이름은 남긴다.
+_SECRET_FIELD_HINTS = (
+    "csrf", "xsrf", "token", "session", "jsessionid", "wmonid",
+    "auth", "secret", "passwd", "password", "nonce", "sid",
+)
+_SECRET_VALUE_PATTERNS = (
+    re.compile(r"JSESSIONID=[^;\"'\s&]+", re.I),
+    re.compile(r"WMONID=[^;\"'\s&]+", re.I),
+    re.compile(r"\b[0-9a-f]{32,}\b", re.I),
+)
+_REDACTED = "REDACTED"
+
+
+def _redact_html(html: str) -> str:
+    """덤프용 정화: 이름이 비밀인 meta/input 값을 지우고 값 패턴도 지운다.
+
+    _csrf_header / _csrf_parameter 의 content 는 토큰이 아니라 헤더 '이름'(예:
+    X-CSRF-TOKEN)이라 남긴다 — 계약이 바뀌었는지 보려면 그 값이 필요하다.
+    파싱이 실패해도 원문을 그대로 흘리지 않고 값 패턴 정화는 반드시 적용한다.
+    """
+    text = html or ""
+    try:
+        soup = BeautifulSoup(text, "lxml")
+    except Exception:  # noqa: BLE001 — 진단 덤프가 파서 문제로 실패하면 안 된다
+        return _redact_values(text)
+
+    for el in soup.find_all(["input", "meta"]):
+        name = (el.get("name") or el.get("id") or "").lower()
+        attr = "value" if el.name == "input" else "content"
+        if not el.get(attr) or not any(h in name for h in _SECRET_FIELD_HINTS):
+            continue
+        if el.name == "meta" and ("header" in name or "param" in name):
+            continue
+        el[attr] = _REDACTED
+
+    # 인라인 스크립트에 토큰이 박혀 오는 경우가 흔하다. 셀렉터 진단에는 쓰이지 않는다.
+    for el in soup.find_all("script"):
+        if not (el.get("src") or "").strip():
+            el.string = ""
+
+    return _redact_values(str(soup))
+
+
+def _redact_values(text: str) -> str:
+    out = text or ""
+    for pat in _SECRET_VALUE_PATTERNS:
+        out = pat.sub(_REDACTED, out)
+    return out
+
+
+def _bill_id_in_url(url: str) -> str:
+    """URL 쿼리의 billId(대소문자·표기 변형 포함). 없으면 빈 문자열."""
+    try:
+        query = urlparse(url or "").query
+    except ValueError:
+        return ""
+    for k, v in parse_qsl(query, keep_blank_values=True):
+        if k.strip().lower() in _BILL_ID_FIELDS:
+            return (v or "").strip()
+    return ""
+
+
+def _form_bill_id(soup: BeautifulSoup) -> str:
+    """상세 HTML form#form 의 billId hidden input 값. 없으면 빈 문자열."""
+    form = soup.select_one(_PAYLOAD_FORM_SELECTOR)
+    if form is None:
+        return ""
+    for name, value in _hidden_inputs(form).items():
+        if name.lower() in _BILL_ID_FIELDS:
+            return (value or "").strip()
+    return ""
+
+
+def _check_bill_identity(
+    soup: BeautifulSoup, post_id: str, *, requested_url: str, final_url: str
+) -> tuple[bool, str]:
+    """이 상세 응답이 정말 post_id 의 의안인지 확인한다 → (확인됨, 어긋난 사유).
+
+    왜 필요한가: Open API 의 LINK_URL 은 우리가 모르는 경로면 그대로 존중하는데, 그
+    값이 다른 의안을 가리키거나 redirect 가 걸리면 **A 의안 메일에 B 의안의 제안이유가
+    실린다.** billInfo.do 경로는 build_summary_request 가 form 의 billId 를 대조해
+    막지만, 상세 HTML 에 제안이유가 이미 들어 있는 inline 경로는 그 검사 전에 값을
+    채우고 끝나 버려 무방비였다.
+
+    근거는 셋이고 서로 보완한다:
+      form#form 의 billId  — 페이지가 스스로 밝히는 의안(가장 강한 근거)
+      요청한 URL 의 billId  — LINK_URL 이 다른 의안을 가리키는 경우를 잡는다
+      최종 응답 URL 의 billId — redirect 로 끌려간 경우를 잡는다
+
+    하나라도 어긋나면 확인 실패다(mismatch). 어긋난 것은 없지만 **근거가 하나도 없으면**
+    확인된 것이 아니다 — 그때도 inline 을 채택하지 않는다(fail-closed). 잘못된 요약을
+    자신 있게 싣는 것보다 제목·링크만 보내는 편이 낫다.
+    """
+    checks = (
+        ("form#form 의 billId", _form_bill_id(soup)),
+        ("요청 URL 의 billId", _bill_id_in_url(requested_url)),
+        ("최종 응답 URL 의 billId", _bill_id_in_url(final_url)),
+    )
+    confirmed = False
+    for label, found in checks:
+        if not found:
+            continue
+        if found != post_id:
+            return False, f"{label}({found!r}) 가 목록의 BILL_ID({post_id!r}) 와 다름"
+        confirmed = True
+    return confirmed, ""
 
 
 def _missing_shell(soup: BeautifulSoup) -> list[str]:
@@ -528,11 +641,33 @@ class AssemblyBillScraper(BaseScraper):
 
         soup = BeautifulSoup(html, "lxml")
 
+        # 0-1) 받아온 페이지가 정말 이 의안의 것인가. LINK_URL 이 다른 의안을 가리키거나
+        #      redirect 로 끌려가면 남의 제안이유를 이 의안 것으로 싣게 된다.
+        same_bill, mismatch = _check_bill_identity(
+            soup,
+            post.post_id,
+            requested_url=post.url,
+            final_url=getattr(resp, "url", "") or "",
+        )
+        if mismatch:
+            self._fail(post, f"상세 페이지가 다른 의안의 것: {mismatch}", html)
+            return
+
         # 1) 구형 페이지 지원: 상세 HTML 에 제안이유가 **실제로 실려 있으면** 쓴다.
         #    비어 있다는 이유로 PENDING 으로 넘기지 않는다 — 현행 페이지는 초기 HTML 의
         #    컨테이너가 비어 있는 것이 정상이고, 내용은 billInfo.do 가 준다.
+        #    단, 이 의안의 페이지임이 **확인됐을 때만** 채택한다. 여기서 채택하면
+        #    build_summary_request 의 billId 대조를 거치지 않고 그대로 발행된다.
         inline_probe, inline_text = _probe_summary(soup)
         if inline_probe is SummaryProbe.FOUND:
+            if not same_bill:
+                self._fail(
+                    post,
+                    "상세 HTML 에 제안이유가 있으나 이 의안의 페이지인지 확인할 수 없음"
+                    "(form#form·요청 URL·최종 URL 어디에도 billId 가 없음)",
+                    html,
+                )
+                return
             post.body = inline_text
             self._set_status(post, ProposalContentStatus.AVAILABLE, "상세 HTML 에 포함")
             return
@@ -583,7 +718,9 @@ class AssemblyBillScraper(BaseScraper):
         self._dump(post, dump)
 
     def _dump(self, post: Post, content: str) -> None:
-        self._dump_debug(f"detail_{_UNSAFE_NAME.sub('_', post.post_id)}", content)
+        self._dump_debug(
+            f"detail_{_UNSAFE_NAME.sub('_', post.post_id)}", _redact_html(content)
+        )
 
     def build_summary_request(
         self, soup: BeautifulSoup, post: Post

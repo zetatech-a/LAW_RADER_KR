@@ -105,6 +105,15 @@ def _post(bill_id=_BILL_ID) -> Post:
     )
 
 
+class _Resp:
+    """requests.Response 흉내 — 실제 코드가 최종 URL(resp.url)을 보기 때문에 필요하다."""
+
+    def __init__(self, kind, n, url):
+        self.kind = kind
+        self.n = n
+        self.url = url
+
+
 class _Fetcher:
     """GET/POST 를 기록하고 미리 정한 HTML 을 돌려주는 가짜 fetcher."""
 
@@ -114,20 +123,23 @@ class _Fetcher:
         self.gets = []
         self.posts = []
 
+    # redirect 를 흉내내려면 응답의 '최종 URL' 이 요청 URL 과 달라야 한다.
+    final_url = None
+
     def get(self, url, referer=None, params=None, headers=None):
         self.gets.append(
             {"url": url, "params": params, "referer": referer, "headers": headers or {}}
         )
-        return ("get", len(self.gets))
+        return _Resp("get", len(self.gets), self.final_url or url)
 
     def post(self, url, referer=None, data=None, headers=None):
         self.posts.append(
             {"url": url, "data": data or {}, "referer": referer, "headers": headers or {}}
         )
-        return ("post", len(self.posts))
+        return _Resp("post", len(self.posts), url)
 
     def text(self, resp):
-        return self._get_html if resp[0] == "get" else self._post_html
+        return self._get_html if resp.kind == "get" else self._post_html
 
 
 def _run(get_html, post_html="", tmp_path=None, monkeypatch=None, bill_id=_BILL_ID):
@@ -555,3 +567,184 @@ def test_token_is_never_logged(caplog):
     with caplog.at_level(logging.DEBUG):
         _run(_detail_page(), _billinfo_response(""))
     assert _TOKEN not in caplog.text
+
+
+# --- 받아온 페이지가 정말 이 의안의 것인가 (inline 채택 전 확인) ---
+
+
+_INLINE = f'<pre id="prntSummary">{_REASON}</pre>'
+
+
+def _inline_page(bill_id=_BILL_ID, *, with_form=True) -> str:
+    """제안이유가 상세 HTML 에 이미 들어 있는 구형 페이지."""
+    return _detail_page(bill_id, with_form=with_form).replace(
+        '<div id="tab_billInfo_sect"></div>', _INLINE
+    )
+
+
+def test_inline_rejected_when_link_url_points_to_another_bill(tmp_path, monkeypatch):
+    """LINK_URL 이 다른 의안을 가리키면 그 페이지의 제안이유를 쓰면 안 된다.
+
+    회귀: inline 경로는 build_summary_request 의 billId 대조 **전에** 값을 채우고
+    끝나 버려서, A 의안 알림에 B 의안의 제안이유가 실릴 수 있었다.
+    """
+    monkeypatch.chdir(tmp_path)
+    f = _Fetcher(_inline_page("PRC_OTHER_BILL"))
+    p = _post()                                    # 목록의 BILL_ID 는 _BILL_ID
+    p.url = "https://likms.assembly.go.kr/bill/bi/other.do?billId=PRC_OTHER_BILL"
+    _scraper(f).enrich(p)
+
+    assert p.proposal_status is S.ERROR, p.proposal_note
+    assert "다른 의안" in p.proposal_note
+    assert p.body == ""                            # 남의 본문을 싣지 않는다
+    assert f.posts == []                           # 요청도 보내지 않는다
+
+
+def test_inline_rejected_when_redirected_to_another_bill(tmp_path, monkeypatch):
+    """redirect 로 다른 의안 페이지에 끌려간 경우도 막는다(요청 URL 만 봐서는 못 잡는다)."""
+    monkeypatch.chdir(tmp_path)
+    f = _Fetcher(_inline_page(with_form=False))
+    f.final_url = (
+        "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_REDIRECTED"
+    )
+    p = _post()
+    _scraper(f).enrich(p)
+
+    assert p.proposal_status is S.ERROR, p.proposal_note
+    assert "다른 의안" in p.proposal_note
+    assert p.body == ""
+
+
+def test_inline_rejected_when_bill_id_cannot_be_confirmed(tmp_path, monkeypatch):
+    """근거가 하나도 없으면 확인된 것이 아니다 — 채택하지 않는다(fail-closed)."""
+    monkeypatch.chdir(tmp_path)
+    f = _Fetcher(f"<html><body>{_INLINE}</body></html>")   # form 없음
+    p = _post()
+    p.url = "https://likms.assembly.go.kr/bill/bi/unknownDetail.do"   # billId 없음
+    _scraper(f).enrich(p)
+
+    assert p.proposal_status is S.ERROR, p.proposal_note
+    assert "확인할 수 없음" in p.proposal_note
+    assert p.body == ""
+
+
+def test_inline_accepted_when_form_confirms_the_bill():
+    """form#form 의 billId 가 일치하면 채택한다(구형 페이지 지원은 유지)."""
+    p, f = _run(_inline_page())
+    assert p.proposal_status is S.AVAILABLE, p.proposal_note
+    assert "예치금 분리보관" in p.body
+    assert f.posts == []
+
+
+def test_inline_accepted_when_only_the_url_confirms_the_bill():
+    """form 이 없어도 요청·최종 URL 의 billId 가 일치하면 확인된 것이다."""
+    p, f = _run(_inline_page(with_form=False))
+    assert p.proposal_status is S.AVAILABLE, p.proposal_note
+    assert "예치금 분리보관" in p.body
+    assert f.posts == []
+
+
+def test_mismatch_blocks_the_billinfo_path_too(tmp_path, monkeypatch):
+    """inline 이 없더라도 남의 페이지면 billInfo.do 를 물어볼 이유가 없다."""
+    monkeypatch.chdir(tmp_path)
+    f = _Fetcher(_detail_page())
+    f.final_url = (
+        "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_REDIRECTED"
+    )
+    p = _post()
+    _scraper(f).enrich(p)
+
+    assert p.proposal_status is S.ERROR, p.proposal_note
+    assert f.posts == []
+
+
+# --- 진단 덤프에 살아 있는 토큰이 남으면 안 된다 ---
+#
+# debug/ 는 verify 워크플로가 아티팩트로 업로드한다. 덤프가 남는 때가 곧 '상세 HTML 을
+# 통째로 저장하는' 때이므로, 그 안의 CSRF 토큰·세션값이 그대로 실려 나갈 수 있다.
+
+
+def _dump_text(tmp_path, bill_id=_BILL_ID) -> str:
+    return (tmp_path / "debug" / f"assembly_bill_detail_{bill_id}.txt").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_detail_html_dump_redacts_csrf_token(tmp_path, monkeypatch):
+    """상세 HTML 을 덤프하는 실패 경로에서 meta[name=_csrf] 값이 지워져야 한다."""
+    # billId hidden 만 없는 폼 → 요청을 만들 수 없어 상세 HTML 을 덤프한다.
+    page = (
+        f"<html><head><meta name='_csrf' content='{_TOKEN}'/></head><body>"
+        '<form id="form"><input type="hidden" name="ageFrom" value="22"/></form>'
+        '<div id="tab_billInfo_sect"></div></body></html>'
+    )
+    p, f = _run(page, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    assert p.proposal_status is S.ERROR
+    assert f.posts == []
+
+    dump = _dump_text(tmp_path)
+    assert _TOKEN not in dump
+    assert 'name="_csrf"' in dump          # 이름·구조는 진단에 필요하므로 남는다
+    assert 'name="ageFrom"' in dump
+    assert 'value="22"' in dump            # 공개 값은 지우지 않는다
+
+
+def test_detail_html_dump_redacts_hidden_token_fields(tmp_path, monkeypatch):
+    """hidden input 에 담긴 토큰 값도 이름 기준으로 지운다."""
+    secret = "9f1c-SESSION-TOKEN-VALUE"
+    page = (
+        f"<html><head><meta name='_csrf' content='{_TOKEN}'/></head><body>"
+        '<form id="form">'
+        '<input type="hidden" name="ageFrom" value="22"/>'
+        f'<input type="hidden" name="sessionToken" value="{secret}"/>'
+        "</form>"
+        '<div id="tab_billInfo_sect"></div></body></html>'
+    )
+    _p, _f = _run(page, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    dump = _dump_text(tmp_path)
+    assert secret not in dump
+    assert _TOKEN not in dump
+    assert 'name="sessionToken"' in dump
+
+
+def test_detail_html_dump_redacts_inline_script_and_session_values(
+    tmp_path, monkeypatch
+):
+    """인라인 JS 에 박힌 토큰과 쿠키 문자열도 남지 않는다."""
+    page = (
+        f"<html><head><meta name='_csrf' content='{_TOKEN}'/></head><body>"
+        '<form id="form"><input type="hidden" name="ageFrom" value="22"/></form>'
+        f'<script>var csrf = "{_TOKEN}"; var s = "JSESSIONID=ABC123DEF456";</script>'
+        '<div id="tab_billInfo_sect"></div></body></html>'
+    )
+    _p, _f = _run(page, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    dump = _dump_text(tmp_path)
+    assert _TOKEN not in dump
+    assert "ABC123DEF456" not in dump
+
+
+def test_dump_keeps_csrf_header_and_parameter_names(tmp_path, monkeypatch):
+    """_csrf_header / _csrf_parameter 의 content 는 토큰이 아니라 '이름'이라 남긴다."""
+    page = (
+        "<html><head>"
+        f"<meta name='_csrf' content='{_TOKEN}'/>"
+        "<meta name='_csrf_header' content='X-CSRF-TOKEN'/>"
+        "<meta name='_csrf_parameter' content='_csrf'/>"
+        "</head><body>"
+        '<form id="form"><input type="hidden" name="ageFrom" value="22"/></form>'
+        '<div id="tab_billInfo_sect"></div></body></html>'
+    )
+    _p, _f = _run(page, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    dump = _dump_text(tmp_path)
+    assert "X-CSRF-TOKEN" in dump
+    assert _TOKEN not in dump
+
+
+def test_billinfo_response_dump_still_readable(tmp_path, monkeypatch):
+    """정화가 진단을 망치면 안 된다 — 응답 본문·구조는 그대로 남는다."""
+    _p, _f = _run(
+        _detail_page(), "<html><body><div>알 수 없는 응답 구조</div></body></html>",
+        tmp_path=tmp_path, monkeypatch=monkeypatch,
+    )
+    dump = _dump_text(tmp_path)
+    assert "알 수 없는 응답 구조" in dump
