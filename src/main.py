@@ -326,12 +326,15 @@ def _log_detail_summary(
         assembly_detail.pending,
         assembly_detail.failed,
     )
-    # 등록 대기가 하나라도 있으면 '전멸'이 아니다 — 원문이 아직 공개되지 않은 것뿐이다.
-    if detail.attempted > 0 and detail.succeeded == 0 and detail.pending == 0:
+    # 등록 대기는 애초에 성공할 수 없는 시도이므로 분모에서 뺀 뒤 성공률을 본다.
+    # 'pending 이 하나라도 있으면 판정하지 않는다'로 두면, 갓 접수된 의안 한 건 때문에
+    # 나머지 소스의 전면 파서 장애가 통째로 묻힌다(등록 대기와 무관한 실패인데도).
+    expected = detail.attempted - detail.pending
+    if expected > 0 and detail.succeeded == 0:
         log.error(
-            "상세 수집 성공률 0%% (시도 %d건 전부 실패) — 파서/마크업 확인 필요. "
-            "메일은 제목·링크만으로 계속 발송합니다. debug/ 덤프를 확인하세요.",
-            detail.attempted,
+            "상세 수집 성공률 0%% (등록 대기를 뺀 시도 %d건 전부 실패) — 파서/마크업 "
+            "확인 필요. 메일은 제목·링크만으로 계속 발송합니다. debug/ 덤프를 확인하세요.",
+            expected,
         )
     # 전체 ERROR 와 별개로 판정한다. 다른 소스가 성공해 위 조건이 거짓이어도
     # 의안만 전멸했다면 반드시 드러나야 한다.

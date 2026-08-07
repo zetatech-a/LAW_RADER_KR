@@ -868,3 +868,42 @@ def test_general_posts_still_summarized_after_assembly_call_failure():
     assert ok == 1                                  # 일반 1건은 요약됐다
     assert generals[0].summary                      # 일반 경로 무영향
     assert all(p.summary == [] for p in bills)
+
+
+def test_safety_block_does_not_stop_remaining_batches():
+    """비정상 종료(안전필터 차단 등)는 이 배치 내용의 문제다 — 브레이커를 올리지 않는다.
+
+    회귀: finishReason != STOP 은 _BatchFailed 인데 이것이 generic except 로 흘러
+    call_failed=True 가 되어, 이후 배치가 통째로 취소됐다. 호출은 성공했고 응답
+    내용이 문제인 상황이라 다른 의안이 담긴 다음 배치는 통과할 수 있다.
+    """
+    posts = [_bill(i) for i in range(4)]
+    first_batch = {"PRC_0000", "PRC_0001"}
+
+    def _first_batch_blocked(requested, n):
+        if set(requested) & first_batch:
+            return _envelope("", finish="SAFETY")
+        return _reply(requested)
+
+    cfg = _cfg(batch=AssemblyBatchConfig(batch_size=2, retry_missing_once=False))
+    ok, rec = _run(posts, cfg, reply=_first_batch_blocked)
+
+    assert ok == 2
+    assert posts[0].summary == [] and posts[1].summary == []
+    assert posts[2].summary == _lines("PRC_0002")
+    assert posts[3].summary == _lines("PRC_0003")
+    # 둘째 배치가 실제로 호출됐다(브레이커가 올라갔다면 호출 자체가 없다)
+    assert any(set(c) == {"PRC_0002", "PRC_0003"} for c in rec.calls)
+
+
+def test_safety_block_does_not_split_the_batch():
+    """분할 정책은 그대로 — 배치 크기와 무관한 실패라 나눠도 같은 결과다."""
+    posts = [_bill(i) for i in range(4)]
+
+    def _blocked(requested, n):
+        return _envelope("", finish="SAFETY")
+
+    cfg = _cfg(batch=AssemblyBatchConfig(batch_size=4, retry_missing_once=False))
+    ok, rec = _run(posts, cfg, reply=_blocked)
+    assert ok == 0
+    assert len(rec.calls) == 1          # 분할했다면 3회가 된다

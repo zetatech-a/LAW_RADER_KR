@@ -719,3 +719,64 @@ def test_enrichable_sources_still_counted(tmp_path, monkeypatch, caplog):
     assert rc == 0 and sent == 1
     assert "상세 수집 집계(전체) — 시도 2건 / 성공 0건 / 등록대기 0건 / 실패 2건" in text
     assert any("성공률 0%" in m for m in errors)
+
+
+# --- 등록 대기 한 건이 다른 소스의 전면 장애를 가리면 안 된다 ---
+
+
+def test_pending_bill_does_not_mask_other_sources_total_failure(caplog):
+    """회귀: 갓 접수된 의안 한 건 때문에 나머지 소스의 파서 전멸이 묻혔다.
+
+    'pending 이 하나라도 있으면 판정하지 않는다' 로 두면, 등록 대기와 아무 관계 없는
+    실패가 통째로 조용해진다. 등록 대기는 애초에 성공할 수 없는 시도이므로 분모에서
+    빼고 성공률을 본다.
+    """
+    cfg = _Cfg(_llm())
+    # 의안 1건 등록 대기(정상) + 다른 소스 9건 전부 실패
+    overall = _DetailStats(attempted=10, succeeded=0, pending=1)
+    assembly = _DetailStats(attempted=1, succeeded=0, pending=1)
+    with caplog.at_level(logging.INFO, logger="law_rader"):
+        _log_run_summary(cfg, {}, overall, assembly)
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert errors[0].startswith("상세 수집 성공률 0%")
+    assert "9건" in errors[0]                 # 등록 대기를 뺀 시도 건수로 보고한다
+    # 의안 자체는 실패가 없으므로 의안 ERROR 는 나오지 않는다
+    assert not any("의안 제안이유 수집 available 0건" in m for m in errors)
+
+
+def test_all_attempts_pending_still_emits_no_error(caplog):
+    """요구사항 유지: 시도가 전부 등록 대기면 장애가 아니다."""
+    cfg = _Cfg(_llm())
+    with caplog.at_level(logging.INFO, logger="law_rader"):
+        _log_run_summary(
+            cfg, {}, _DetailStats(4, 0, 4), _DetailStats(4, 0, 4)
+        )
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_pending_plus_one_success_is_not_an_outage(caplog):
+    """등록 대기를 뺀 시도 중 하나라도 성공하면 장애가 아니다."""
+    cfg = _Cfg(_llm())
+    with caplog.at_level(logging.INFO, logger="law_rader"):
+        _log_run_summary(
+            cfg, {}, _DetailStats(10, 1, 3), _DetailStats(4, 1, 3)
+        )
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_assembly_pending_rule_is_unchanged(caplog):
+    """의안 전용 판정은 문서화된 규칙 그대로 — available=0 이어도 pending>0 이면
+    '전면 실패' ERROR 를 내지 않고 경고로 남긴다."""
+    cfg = _Cfg(_llm())
+    assembly = _DetailStats(attempted=5, succeeded=0, pending=1)   # failed 4
+    with caplog.at_level(logging.INFO, logger="law_rader"):
+        _log_run_summary(cfg, {}, _DetailStats(5, 0, 1), assembly)
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert not any("의안 제안이유 수집 available 0건" in m for m in messages)
+    warnings = [
+        r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert any("의안 제안이유 수집 실패 4건" in m for m in warnings)

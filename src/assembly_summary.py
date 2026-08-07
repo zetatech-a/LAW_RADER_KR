@@ -287,6 +287,16 @@ def _run(
             )
         log.warning("의안 배치(%d건) 요약 실패 — 발췌로 발송합니다: %s", len(items), e)
         return _Result()
+    except _BatchFailed as e:
+        # 호출은 성공했고 응답 '내용'이 문제인 경우다(안전필터 차단 등 비정상 종료).
+        # 분할해도 같은 결과지만, 그 판정은 이 배치에 담긴 의안 내용에 달린 것이므로
+        # 다른 의안이 담긴 다음 배치는 통과할 수 있다. 브레이커를 올리면 안 된다.
+        log.warning(
+            "의안 배치(%d건) 응답이 쓸 수 없음 — 이 배치만 발췌로 발송합니다: %s",
+            len(items),
+            e,
+        )
+        return _Result()
     except Exception as e:  # noqa: BLE001 — 인증·한도·5xx·네트워크: 분할하지 않는다
         log.warning(
             "의안 배치(%d건) 호출 실패(%s) — 분할하지 않고 발췌로 발송합니다: %s",

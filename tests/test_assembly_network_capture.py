@@ -21,7 +21,9 @@ from scripts.capture_assembly_network import (
     _markers_in,
     _sanitize_har,
     _scrub_headers,
+    _scrub_body,
     _scrub_html,
+    _scrub_json_text,
     _scrub_post_data,
     _scrub_text,
     _scrub_url,
@@ -316,3 +318,180 @@ def test_js_report_extracts_endpoints_and_context():
 def test_js_report_survives_empty_input():
     report = _js_report("")
     assert "[.do URL 문자열] 0개" in report
+
+
+# --- JSON 응답: 이름이 비밀인 키의 값도 지운다 ---
+#
+# HTML 과 같은 이유다. _SECRET_VALUE_PATTERNS 는 32자 이상 연속 16진수만 잡으므로
+# UUID·Base64 형 토큰이 JSON 필드 값으로 오면 그대로 아티팩트에 실린다.
+
+_JSON_BODY = json.dumps(
+    {
+        "csrfToken": "3f2a91c4-8b7d-4e16-9a02-5c6d1e8f0b34",
+        "sessionId": "SVNTRVNTSU9OLUlELVZBTFVF",
+        "billId": "PRC_A1",
+        "result": {
+            "authToken": "bearer-abc.def.ghi",
+            "billNo": "2200123",
+            "rows": [
+                {"billId": "PRC_A2", "csrf": "aaaa-bbbb-cccc", "title": "법률안"},
+            ],
+        },
+        "count": 3,
+        "ok": True,
+        "empty": None,
+    },
+    ensure_ascii=False,
+)
+
+
+def test_scrub_json_redacts_secret_named_values():
+    out = _scrub_json_text(_JSON_BODY)
+    for secret in ("3f2a91c4-8b7d-4e16", "SVNTRVNTSU9OLUlELVZBTFVF",
+                   "bearer-abc.def.ghi", "aaaa-bbbb-cccc"):
+        assert secret not in out, secret
+
+
+def test_scrub_json_keeps_key_names_and_public_values():
+    out = _scrub_json_text(_JSON_BODY)
+    parsed = json.loads(out)
+    # 키 이름은 계약의 일부다 — 반드시 남는다.
+    for key in ("csrfToken", "sessionId", "billId", "result", "count"):
+        assert key in out, key
+    assert parsed["billId"] == "PRC_A1"           # 공개 식별자는 그대로
+    assert parsed["result"]["billNo"] == "2200123"
+    assert parsed["csrfToken"] == REDACTED
+
+
+def test_scrub_json_recurses_into_nested_objects_and_arrays():
+    parsed = json.loads(_scrub_json_text(_JSON_BODY))
+    row = parsed["result"]["rows"][0]
+    assert row["csrf"] == REDACTED
+    assert row["billId"] == "PRC_A2"              # 중첩 안에서도 공개 값은 남는다
+    assert row["title"] == "법률안"
+
+
+def test_scrub_json_preserves_non_string_scalars():
+    parsed = json.loads(_scrub_json_text(_JSON_BODY))
+    assert parsed["count"] == 3
+    assert parsed["ok"] is True
+    assert parsed["empty"] is None
+
+
+def test_scrub_json_falls_back_to_value_patterns_on_broken_json():
+    out = _scrub_json_text('{"a": 1, ')     # 깨진 JSON
+    assert "쓰레기" not in out
+    broken = _scrub_json_text('not json at all JSESSIONID=ABCD1234')
+    assert "ABCD1234" not in broken
+
+
+def test_scrub_body_picks_the_right_sanitizer():
+    assert json.loads(_scrub_body(_JSON_BODY, is_json=True))["csrfToken"] == REDACTED
+    html = '<html><body><meta name="_csrf" content="abc-def-ghi"/></body></html>'
+    assert "abc-def-ghi" not in _scrub_body(html, is_json=False)
+
+
+def test_sanitize_har_redacts_tokens_in_json_response_bodies():
+    """HAR 에 박제된 JSON 응답 본문에도 이름 기준 마스킹이 적용돼야 한다."""
+    har = _har()
+    har["log"]["entries"][0]["response"]["content"] = {
+        "mimeType": "application/json", "text": _JSON_BODY,
+    }
+    out = json.dumps(_sanitize_har(har), ensure_ascii=False)
+    assert "3f2a91c4-8b7d-4e16" not in out
+    assert "SVNTRVNTSU9OLUlELVZBTFVF" not in out
+    assert "csrfToken" in out                      # 키 이름은 남는다
+
+
+def test_sanitize_har_detects_json_without_mimetype():
+    """mimeType 이 빠지거나 틀려도 본문 모양으로 JSON 을 알아본다."""
+    har = _har()
+    har["log"]["entries"][0]["response"]["content"] = {"text": _JSON_BODY}
+    out = json.dumps(_sanitize_har(har), ensure_ascii=False)
+    assert "3f2a91c4-8b7d-4e16" not in out
+
+
+# --- 원본 HAR 은 업로드 경로 밖에 두고 반드시 지운다 ---
+#
+# record_har_content="embed" 라 원본에는 쿠키·Authorization·CSRF 가 응답 본문째 들어
+# 있다. 워크플로는 tests/fixtures/ 를 통째로 업로드하고, 캡처 단계는 continue-on-error
+# 라 실패해도 업로드까지 간다.
+
+
+@pytest.fixture
+def fake_playwright(monkeypatch):
+    """capture() 안의 playwright import 만 통과시키는 최소 스텁."""
+    import types
+
+    mod = types.ModuleType("playwright")
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.TimeoutError = type("TimeoutError", (Exception,), {})
+    sync_api.sync_playwright = lambda: None
+    mod.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", mod)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+    return sync_api
+
+
+def _har_files(root):
+    return sorted(p.name for p in root.rglob("*.har"))
+
+
+def test_raw_har_is_removed_when_capture_aborts(tmp_path, monkeypatch, fake_playwright):
+    """캡처 도중 예외가 나도 원본 HAR 이 출력 디렉터리에 남으면 안 된다."""
+    import scripts.capture_assembly_network as cap
+
+    seen = {}
+
+    def _boom(*a, **k):
+        # 실제 브라우저가 하듯 HAR 을 흘려 두고 죽는다.
+        har_raw = a[6] if len(a) > 6 else k["har_raw"]
+        seen["har_raw"] = har_raw
+        har_raw.parent.mkdir(parents=True, exist_ok=True)
+        har_raw.write_text('{"log": {"entries": []}}', encoding="utf-8")
+        raise RuntimeError("page.content() 실패")
+
+    monkeypatch.setattr(cap, "_capture_with_browser", _boom)
+    with pytest.raises(RuntimeError):
+        cap.capture("https://likms.assembly.go.kr/x", tmp_path, 1000)
+
+    assert not seen["har_raw"].exists()            # 지워졌다
+    assert not seen["har_raw"].parent.exists()     # 임시 디렉터리째 사라졌다
+    assert _har_files(tmp_path) == []              # 업로드 경로에는 아무것도 없다
+
+
+def test_raw_har_is_never_written_inside_the_output_dir(
+    tmp_path, monkeypatch, fake_playwright
+):
+    """설령 지우기에 실패해도 안전하도록, 원본은 애초에 out_dir 밖에 만든다."""
+    import scripts.capture_assembly_network as cap
+
+    seen = {}
+
+    def _record(*a, **k):
+        seen["har_raw"] = a[6] if len(a) > 6 else k["har_raw"]
+        return []
+
+    monkeypatch.setattr(cap, "_capture_with_browser", _record)
+    cap.capture("https://likms.assembly.go.kr/x", tmp_path, 1000)
+
+    har_raw = seen["har_raw"]
+    assert tmp_path.resolve() not in har_raw.resolve().parents
+    assert _har_files(tmp_path) == []
+
+
+def test_raw_har_is_removed_on_success(tmp_path, monkeypatch, fake_playwright):
+    import scripts.capture_assembly_network as cap
+
+    seen = {}
+
+    def _ok(*a, **k):
+        har_raw = a[6] if len(a) > 6 else k["har_raw"]
+        seen["har_raw"] = har_raw
+        har_raw.parent.mkdir(parents=True, exist_ok=True)
+        har_raw.write_text('{"log": {"entries": []}}', encoding="utf-8")
+        return []
+
+    monkeypatch.setattr(cap, "_capture_with_browser", _ok)
+    cap.capture("https://likms.assembly.go.kr/x", tmp_path, 1000)
+    assert not seen["har_raw"].parent.exists()

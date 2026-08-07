@@ -34,7 +34,9 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -147,6 +149,40 @@ def _scrub_html(html: str) -> str:
     return _scrub_text(str(soup))
 
 
+def _scrub_json_value(value):
+    """JSON 을 재귀로 훑어 **이름이 비밀인 키의 값**을 지운다.
+
+    HTML 과 같은 이유다 — 값 패턴은 UUID·Base64 토큰을 잡지 못하므로, 응답 JSON 에
+    csrfToken·sessionId·authToken 같은 필드가 있으면 값이 그대로 아티팩트에 실린다.
+    키 이름은 계약의 일부이므로 남기고 값만 지운다. 중첩된 객체·배열도 훑는다.
+    """
+    if isinstance(value, dict):
+        return {
+            k: (REDACTED if _is_secret_name(str(k)) else _scrub_json_value(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_json_value(v) for v in value]
+    if isinstance(value, str):
+        return _scrub_text(value)
+    return value                      # 숫자·불리언·null 은 그대로
+
+
+def _scrub_json_text(raw: str) -> str:
+    """JSON 문자열을 정화해 돌려준다. 파싱 실패 시 값 패턴 정화라도 적용한다."""
+    text = raw or ""
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return _scrub_text(text)
+    return json.dumps(_scrub_json_value(parsed), ensure_ascii=False, indent=2)
+
+
+def _scrub_body(text: str, *, is_json: bool) -> str:
+    """응답 본문 정화 — 종류에 맞는 이름 기준 마스킹을 먼저 돌린다."""
+    return _scrub_json_text(text) if is_json else _scrub_html(text)
+
+
 def _scrub_headers(headers: dict) -> dict:
     """헤더는 이름을 모두 남기고, 비밀인 것만 값을 REDACTED 로."""
     return {
@@ -253,15 +289,27 @@ def _sanitize_har(har: dict) -> dict:
                 p["value"] = REDACTED
         content = res.get("content") or {}
         if content.get("text"):
-            # HAR 에 박제된 응답 본문도 같은 위험을 갖는다(HTML 이면 토큰이 필드 값에
-            # 들어 있다). mimeType 을 못 믿을 때를 대비해 본문 모양으로도 한 번 더 본다.
-            mime = (content.get("mimeType") or "").lower()
-            body = content["text"]
-            looks_html = "html" in mime or body.lstrip()[:200].lower().startswith(
-                ("<!doctype html", "<html")
+            # HAR 에 박제된 응답 본문도 같은 위험을 갖는다(HTML 이면 필드 값에, JSON
+            # 이면 키 값에 토큰이 들어 있다). mimeType 을 못 믿을 때를 대비해 본문
+            # 모양으로도 한 번 더 본다.
+            content["text"] = _scrub_response_body(
+                content["text"], content.get("mimeType") or ""
             )
-            content["text"] = _scrub_html(body) if looks_html else _scrub_text(body)
     return har
+
+
+def _scrub_response_body(body: str, mime: str) -> str:
+    """mimeType 과 본문 모양으로 종류를 정하고 그에 맞는 정화를 적용한다.
+
+    어느 쪽으로도 단정할 수 없으면 HTML 로 본다 — HTML 정화는 파싱에 실패해도 값
+    패턴 정화로 물러나므로, 판단이 틀렸을 때 잃는 것이 없다(fail-safe).
+    """
+    text = body or ""
+    low = (mime or "").lower()
+    head = text.lstrip()[:200].lower()
+    if "json" in low or head.startswith(("{", "[")):
+        return _scrub_json_text(text)
+    return _scrub_html(text)
 
 
 # ── JS 정적 분석 ─────────────────────────────────────────────────────────────
@@ -306,7 +354,15 @@ def capture(
     from playwright.sync_api import sync_playwright
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    har_raw = out_dir / "_assembly_network.raw.har"   # 원본은 업로드하지 않는다
+    # 원본 HAR 은 **업로드되는 어떤 경로에도 두지 않는다.**
+    #
+    # record_har_content="embed" 라 원본에는 쿠키·Authorization·CSRF 토큰이 응답 본문째
+    # 들어 있다. 예전에는 out_dir(tests/fixtures/) 안에 두고 캡처가 끝난 뒤 지웠는데,
+    # 그 사이 어디서든 예외가 나면 파일이 남고 워크플로가 tests/fixtures/ 를 통째로
+    # 아티팩트에 올린다(캡처 단계는 continue-on-error 라 실패해도 업로드까지 간다).
+    # 임시 디렉터리에 두고 finally 로 지우면, 지우기에 실패해도 업로드 경로 밖이다.
+    har_dir = Path(tempfile.mkdtemp(prefix="assembly-har-"))
+    har_raw = har_dir / "assembly_network.raw.har"
     console_lines: list[str] = []
     requests_log: list[dict] = []
     responses: list[dict] = []
@@ -329,6 +385,31 @@ def capture(
         # 이미 있는 Chromium 을 그대로 쓴다.
         launch_kw["executable_path"] = browser_path
 
+    try:
+        manifest = _capture_with_browser(
+            sync_playwright, PWTimeout, launch_kw, url, out_dir, timeout_ms,
+            har_raw, result, console_lines, requests_log, responses,
+        )
+    finally:
+        # 정화 성공 여부와 무관하게 원본은 반드시 없앤다. 임시 디렉터리째 지우므로
+        # 캡처가 중간에 죽어 HAR 이 flush 된 경우에도 남지 않는다.
+        shutil.rmtree(har_dir, ignore_errors=True)
+
+    result["requests"] = requests_log
+    result["responses"] = manifest
+    _write(out_dir / "browser_console.txt", _scrub_text("\n".join(console_lines)))
+    _write(
+        out_dir / "assembly_xhr_manifest.json",
+        json.dumps(result, ensure_ascii=False, indent=2),
+    )
+    return result
+
+
+def _capture_with_browser(
+    sync_playwright, PWTimeout, launch_kw, url, out_dir, timeout_ms,
+    har_raw, result, console_lines, requests_log, responses,
+) -> list[dict]:
+    """브라우저를 띄워 캡처하고 XHR manifest 를 돌려준다(HAR 정화까지)."""
     with sync_playwright() as pw:
         browser = pw.chromium.launch(**launch_kw)
         context = browser.new_context(
@@ -430,7 +511,7 @@ def capture(
         context.close()   # HAR 은 여기서 flush 된다
         browser.close()
 
-    # HAR sanitize (원본은 지우고 정화본만 남긴다)
+    # HAR sanitize — 정화본만 out_dir(업로드 경로)에 쓴다. 원본은 호출자가 지운다.
     if har_raw.exists():
         try:
             har = json.loads(har_raw.read_text(encoding="utf-8"))
@@ -440,17 +521,8 @@ def capture(
             )
         except Exception as e:  # noqa: BLE001
             result["errors"].append(f"har sanitize: {type(e).__name__}: {e}")
-        finally:
-            har_raw.unlink(missing_ok=True)
 
-    result["requests"] = requests_log
-    result["responses"] = manifest
-    _write(out_dir / "browser_console.txt", _scrub_text("\n".join(console_lines)))
-    _write(
-        out_dir / "assembly_xhr_manifest.json",
-        json.dumps(result, ensure_ascii=False, indent=2),
-    )
-    return result
+    return manifest
 
 
 def _pane_filled(page) -> bool:
@@ -491,9 +563,9 @@ def _dump_responses(responses: list[dict], out_dir: Path, result: dict) -> list[
         n += 1
         ext = "json" if is_json else "html"
         name = f"xhr_response_{n:03d}.{ext}"
-        # HTML 응답에는 CSRF meta·hidden 토큰이 그대로 실려 온다. 값 패턴만으로는
-        # UUID 형 토큰을 못 잡으므로 이름 기준 마스킹을 먼저 돌린다.
-        _write(out_dir / name, _scrub_html(body) if is_html else _scrub_text(body))
+        # HTML 이든 JSON 이든 값 패턴만으로는 UUID·Base64 토큰을 못 잡는다.
+        # 종류에 맞게 이름 기준 마스킹을 먼저 돌린다.
+        _write(out_dir / name, _scrub_body(body, is_json=is_json))
 
         markers = _markers_in(body)
         if markers:
