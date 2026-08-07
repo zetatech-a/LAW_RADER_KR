@@ -296,6 +296,79 @@ def test_missing_selector_in_response_is_error(tmp_path, monkeypatch):
     assert (tmp_path / "debug").exists()
 
 
+# --- POST 응답 selector 는 fail-closed: pre#prntSummary 만 인정 ---
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<div id="summaryContentDiv"></div>',                     # 빈 폴백 컨테이너만
+        '<div id="summaryContentDiv">제안이유 및 주요내용 본문임</div>',  # 내용까지 있어도
+        '<div id="prntSummary"></div>',                           # pre 가 아닌 태그
+        '<div id="prntSummary">현행법은 예치금 보호 의무를 규정하지 아니함</div>',
+        '<span id="summaryContentDiv"><span id="prntSummary"></span></span>',
+    ],
+)
+def test_billinfo_response_without_pre_prnt_summary_is_error(
+    tmp_path, monkeypatch, body
+):
+    """billInfo.do 응답에는 폴백 selector 를 인정하지 않는다.
+
+    #summaryContentDiv / #prntSummary 만 있고 pre#prntSummary 가 없다면 응답 구조가
+    바뀐 것이다. 폴백으로 받아 주면 구조 변경이 조용히 통과하고, 빈 폴백 컨테이너를
+    PENDING 으로 세면 고장이 '등록 대기'로 위장된다.
+    """
+    p, _f = _run(
+        _detail_page(), f"<html><body>{body}</body></html>",
+        tmp_path=tmp_path, monkeypatch=monkeypatch,
+    )
+    assert p.proposal_status is S.ERROR, p.proposal_note
+    assert p.proposal_status is not S.PENDING
+    assert p.body == ""
+
+
+def test_empty_pre_prnt_summary_is_pending(tmp_path, monkeypatch):
+    """반대로 pre#prntSummary 가 존재하고 완전히 비어 있으면 PENDING 이다."""
+    for body in (
+        '<pre id="prntSummary"></pre>',
+        '<pre id="prntSummary">   </pre>',
+        '<pre id="prntSummary">\n\n</pre>',
+    ):
+        p, f = _run(
+            _detail_page(), f"<html><body>{body}</body></html>",
+            tmp_path=tmp_path, monkeypatch=monkeypatch,
+        )
+        assert p.proposal_status is S.PENDING, (body, p.proposal_note)
+        assert len(f.posts) == 1
+        assert p.body == ""
+
+
+def test_short_notice_in_pre_is_error_not_pending(tmp_path, monkeypatch):
+    """짧은 안내 문구는 실제 PENDING fixture 로 문구를 확인하기 전까지 ERROR 다.
+
+    정규식으로 '등록 예정' 류를 추정하면 구조 변경을 '등록 대기'로 위장하게 된다.
+    """
+    for notice in ("등록 예정입니다.", "준비 중입니다", "자료가 없습니다"):
+        p, _f = _run(
+            _detail_page(), f'<html><body><pre id="prntSummary">{notice}</pre></body></html>',
+            tmp_path=tmp_path, monkeypatch=monkeypatch,
+        )
+        assert p.proposal_status is S.ERROR, (notice, p.proposal_note)
+
+
+def test_initial_get_keeps_fallback_selectors_for_legacy_pages():
+    """초기 상세 GET 은 구형 페이지 지원을 위해 폴백 selector 를 유지한다."""
+    long_text = "현행법은 가상자산사업자의 예치금 분리보관 의무를 규정하지 아니함."
+    for container in (
+        f'<div id="summaryContentDiv">{long_text}</div>',
+        f'<div id="prntSummary">{long_text}</div>',
+        f'<pre id="prntSummary">{long_text}</pre>',
+    ):
+        p, f = _run(f"<html><body>{container}</body></html>")
+        assert p.proposal_status is S.AVAILABLE, container
+        assert f.posts == []          # inline 이면 추가 요청 없음
+
+
 def test_not_found_response_is_error(tmp_path, monkeypatch):
     p, _f = _run(
         _detail_page(), "<html><body>해당 의안 정보가 존재하지 않습니다.</body></html>",

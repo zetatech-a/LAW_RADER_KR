@@ -1,15 +1,20 @@
-"""실제 의안정보시스템 응답 fixture 기반 회귀 테스트.
+"""실제 의안정보시스템 응답 fixture 기반 회귀 테스트(AVAILABLE / PENDING 분리).
 
 여기 테스트는 **추정으로 만든 HTML 이 아니라 실제 응답**을 대상으로 한다.
-fixture 는 아래 명령으로 한 번 캡처해 커밋한다(한국 네트워크 또는 GitHub Actions):
+fixture 는 아래 두 명령으로 각각 캡처해 커밋한다(한국 네트워크 또는 GitHub Actions):
 
-    python scripts/capture_assembly_fixture.py --bill-id PRC_XXXXXXXXXXXX
-    python scripts/capture_assembly_fixture.py --url "https://likms.assembly.go.kr/..."
+    python scripts/capture_assembly_fixture.py --expect available --bill-id PRC_...
+    python scripts/capture_assembly_fixture.py --expect pending   --bill-id PRC_...
 
-fixture 가 없으면 이 파일의 **fixture 의존 테스트 5건이 skip** 된다. 즉 "초록불 =
-검증 완료"가 아니라 "초록불이지만 skip 이 남아 있으면 아직 미검증"이다. 캡처가
-끝나면 skip 은 0 이 된다 — 캡처 스크립트가 HTML 과 meta JSON 을 항상 함께 쓰므로,
-fixture 가 있는데 meta 가 없으면 skip 이 아니라 '깨진 fixture'로 실패시킨다.
+디렉터리(서로 덮어쓰지 않는다):
+
+    tests/fixtures/assembly/available/{detail.html,billinfo.html,meta.json}
+    tests/fixtures/assembly/pending/{detail.html,billinfo.html,meta.json}
+
+fixture 가 없으면 해당 상태의 테스트가 **skip** 된다. 즉 "초록불 = 검증 완료"가 아니라
+"초록불이지만 skip 이 남아 있으면 아직 미검증"이다.
+
+ASSEMBLY_FIXTURE_DIR 환경변수로 루트를 바꿀 수 있다(캡처 직후 임시 디렉터리로 검증).
 """
 import json
 import os
@@ -21,36 +26,44 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import SourceConfig
-from src.models import Post, ProposalContentStatus
+from src.models import Post, ProposalContentStatus as S
 from src.scrapers.assembly import (
     _BILLINFO_ENDPOINT,
     _CSRF_HEADER,
+    _MIN_SUMMARY_CHARS,
     AssemblyBillScraper,
 )
 
-FIXTURES = Path(__file__).parent / "fixtures"
-GET_HTML = FIXTURES / "assembly_detail_get.html"
-BILLINFO_HTML = FIXTURES / "assembly_billinfo_response.html"
-META = FIXTURES / "assembly_capture_meta.json"
+FIXTURE_ROOT = Path(
+    os.environ.get("ASSEMBLY_FIXTURE_DIR")
+    or (Path(__file__).parent / "fixtures" / "assembly")
+)
+AVAILABLE_DIR = FIXTURE_ROOT / "available"
+PENDING_DIR = FIXTURE_ROOT / "pending"
 
-HAS_FIXTURE = GET_HTML.exists()
-
-_SKIP = pytest.mark.skipif(
-    not HAS_FIXTURE,
-    reason=(
-        "실제 응답 fixture 미캡처 — 라이브 검증이 아직 끝나지 않았다. "
-        "한국 네트워크나 GitHub Actions 에서 "
-        "`python scripts/capture_assembly_fixture.py --bill-id <BILL_ID>` 를 실행해 "
-        "tests/fixtures/ 를 커밋하면 이 테스트들이 활성화된다."
-    ),
+_CAPTURE_HINT = (
+    "python scripts/capture_assembly_fixture.py --expect {state} --bill-id <BILL_ID> "
+    "를 실행해 tests/fixtures/assembly/{state}/ 를 커밋하면 활성화된다."
 )
 
-# fixture 에 실제 세션값·토큰이 남아 커밋되는 것을 막는 가드. 캡처 스크립트가
-# 치환하지만, 사람이 손으로 넣은 파일에도 걸리도록 테스트로 한 번 더 검사한다.
+
+def _has(state_dir: Path) -> bool:
+    return (state_dir / "detail.html").exists()
+
+
+_SKIP_AVAILABLE = pytest.mark.skipif(
+    not _has(AVAILABLE_DIR),
+    reason="실제 AVAILABLE fixture 미캡처 — " + _CAPTURE_HINT.format(state="available"),
+)
+_SKIP_PENDING = pytest.mark.skipif(
+    not _has(PENDING_DIR),
+    reason="실제 PENDING fixture 미캡처 — " + _CAPTURE_HINT.format(state="pending"),
+)
+
+# fixture 에 실제 세션값·토큰이 남아 커밋되는 것을 막는 가드.
 _MUST_NOT_APPEAR = ("JSESSIONID=", "WMONID=")
 
 # meta JSON 이 가져도 되는 키. 값(토큰·세션)을 담는 키가 새로 생기면 실패한다.
-# 확정 계약에서는 selector 와 '있는지 여부'만 남긴다 — 토큰 값은 절대 저장하지 않는다.
 _ALLOWED_CSRF_META_KEYS = {"selector", "has_token"}
 _ALLOWED_REQUEST_KEYS = {"method", "action", "data_keys", "header_keys"}
 
@@ -74,9 +87,9 @@ class _FixtureFetcher:
     실제로 나간 요청의 method·URL·필드명·헤더명을 기록해 meta 와 대조할 수 있게 한다.
     """
 
-    def __init__(self, get_html, post_html=""):
-        self._get_html = get_html
-        self._post_html = post_html
+    def __init__(self, detail_html, billinfo_html=""):
+        self._detail = detail_html
+        self._billinfo = billinfo_html
         self.requests = []            # 상세 GET 이후의 '후속' 요청만 담는다
         self._n_get = 0
 
@@ -84,6 +97,7 @@ class _FixtureFetcher:
         self._n_get += 1
         if self._n_get == 1:
             return ("get", 0)         # 상세 페이지
+        # 확정 계약에서 후속 요청은 항상 POST 다. GET 이 기록되면 회귀다.
         self.requests.append(
             {
                 "method": "get",
@@ -93,8 +107,6 @@ class _FixtureFetcher:
             }
         )
         return ("follow", 0)
-
-    # NOTE: 확정 계약에서는 후속 요청이 항상 POST 다. GET 이 기록되면 회귀다.
 
     def post(self, url, referer=None, data=None, headers=None):
         self.requests.append(
@@ -108,207 +120,53 @@ class _FixtureFetcher:
         return ("follow", 0)
 
     def text(self, resp):
-        return self._get_html if resp[0] == "get" else self._post_html
+        return self._detail if resp[0] == "get" else self._billinfo
 
 
-def _meta() -> dict:
-    """캡처 meta. fixture 가 있는데 meta 가 없으면 '깨진 fixture'로 실패시킨다."""
-    assert META.exists(), (
-        "assembly_detail_get.html 은 있는데 assembly_capture_meta.json 이 없습니다. "
-        "캡처 스크립트는 둘을 항상 함께 씁니다 — 손으로 넣었다면 스크립트로 다시 캡처하세요."
+def _meta(state_dir: Path) -> dict:
+    """캡처 meta. detail 은 있는데 meta 가 없으면 '깨진 fixture'로 실패시킨다."""
+    path = state_dir / "meta.json"
+    assert path.exists(), (
+        f"{state_dir.name}/detail.html 은 있는데 meta.json 이 없습니다. "
+        "캡처 스크립트는 항상 함께 씁니다 — 스크립트로 다시 캡처하세요."
     )
-    return json.loads(META.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _detail_url(meta: dict) -> str:
-    """상세 URL 은 캡처 당시 '최종' URL 을 쓴다(구 fallback 경로 하드코딩 금지).
-
-    redirect 가 있었다면 final_url 이 현재 유효한 경로다. 여기에 옛 경로를 박아 두면
-    사이트가 경로를 옮겨도 테스트는 계속 통과해 변경을 놓친다.
-    """
+    """상세 URL 은 캡처 당시 '최종' URL 을 쓴다(구 fallback 경로 하드코딩 금지)."""
     url = (meta.get("final_url") or meta.get("requested_url") or "").strip()
     assert url, "meta 에 final_url·requested_url 이 모두 없습니다"
     return url
 
 
-def _post(meta: dict) -> Post:
+def _replay(state_dir: Path):
+    """fixture 로 enrich 를 재생하고 (meta, post, fetcher) 를 돌려준다."""
+    meta = _meta(state_dir)
+    billinfo = state_dir / "billinfo.html"
+    f = _FixtureFetcher(
+        (state_dir / "detail.html").read_text(encoding="utf-8"),
+        billinfo.read_text(encoding="utf-8") if billinfo.exists() else "",
+    )
     url = _detail_url(meta)
     bill_id = url.split("billId=")[1].split("&")[0] if "billId=" in url else "PRC_FIXTURE"
-    return Post(
+    p = Post(
         source_key="assembly_bill",
         source_name="의안정보시스템 · 계류의안",
         post_id=bill_id,
         title="(fixture)",
         url=url,
     )
-
-
-def _replay():
-    """fixture 로 enrich 를 재생하고 (post, fetcher) 를 돌려준다."""
-    meta = _meta()
-    f = _FixtureFetcher(
-        GET_HTML.read_text(encoding="utf-8"),
-        BILLINFO_HTML.read_text(encoding="utf-8") if BILLINFO_HTML.exists() else "",
-    )
-    p = _post(meta)
     _scraper(f).enrich(p)
     return meta, p, f
 
 
-# --- 캡처 스크립트의 정화(sanitize) 동작 — fixture 없이도 검증 가능 ---
-
-
-def test_sanitizer_removes_secrets_but_keeps_structure():
-    """커밋될 fixture 에 세션값·토큰·개인정보가 남지 않는지 미리 못박는다.
-
-    동시에 테스트가 검증하는 대상(필드'명'·action·셀렉터)은 반드시 보존되어야 한다 —
-    이름까지 지우면 fixture 로 아무것도 확인할 수 없다.
-    """
-    from scripts.capture_assembly_fixture import _sanitize
-
-    dirty = (
-        '<html><head>'
-        '<meta name="_csrf" content="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"/>'
-        '<meta name="_csrf_header" content="X-CSRF-TOKEN"/>'
-        '<meta name="_csrf_parameter" content="_csrf"/>'
-        '</head><body>'
-        '<script>document.cookie="JSESSIONID=ABCD1234EFGH";</script>'
-        '<form id="summaryForm" action="/bill/summaryPopup.do" method="post">'
-        '<input type="hidden" name="billId" value="PRC_A1"/>'
-        '<input type="hidden" name="OWASP_CSRFTOKEN" value="tok-secret-999"/>'
-        '<input type="hidden" name="jsessionid" value="ABCD1234EFGH"/>'
-        '</form>'
-        '<p>담당자 홍길동 010-1234-5678 hong@example.com 900101-1234567</p>'
-        '<pre id="prntSummary">제안이유 및 주요내용 본문</pre>'
-        '</body></html>'
-    )
-    out = _sanitize(dirty)
-
-    for secret in (
-        "tok-secret-999", "ABCD1234EFGH", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-        "hong@example.com", "010-1234-5678", "900101-1234567",
-    ):
-        assert secret not in out, secret
-
-    for kept in (
-        'name="billId"', 'name="OWASP_CSRFTOKEN"', 'name="jsessionid"',
-        'action="/bill/summaryPopup.do"', 'id="prntSummary"', "제안이유 및 주요내용 본문",
-    ):
-        assert kept in out, kept
-
-    # CSRF 헤더·파라미터'명'은 비밀이 아니고, 지우면 요청 형태를 재현할 수 없다
-    assert "X-CSRF-TOKEN" in out
-    assert 'content="_csrf"' in out
-
-
-def test_fixture_presence_is_reported():
-    """fixture 유무를 항상 드러낸다 — 미캡처를 '통과'로 오해하지 않도록."""
-    if not HAS_FIXTURE:
-        pytest.skip(
-            "라이브 미검증: tests/fixtures/assembly_detail_get.html 이 없습니다. "
-            "scripts/capture_assembly_fixture.py 로 캡처해 커밋하세요."
-        )
-    assert GET_HTML.stat().st_size > 0
-
-
-# --- 실제 응답 기반 검증 ---
-
-
-def test_no_raw_har_is_committed():
-    """원본 HAR 은 쿠키·토큰을 그대로 담는다 — 저장소에 들어오면 안 된다.
-
-    fixture 유무와 무관하게 항상 검사한다(캡처가 중단되면 남을 수 있다).
-    """
-    stray = list(FIXTURES.glob("*.raw.har"))
-    assert not stray, f"원본 HAR 이 남아 있습니다(삭제 필요): {[p.name for p in stray]}"
-
-
-def test_committed_fixture_files_contain_no_session_values():
-    """tests/fixtures/ 의 **모든** 텍스트 파일에 세션값이 없어야 한다.
-
-    HTML·meta 뿐 아니라 sanitize 된 HAR·XHR 본문·콘솔 로그까지 함께 본다. 캡처
-    아티팩트가 늘어나도 이 검사는 자동으로 따라간다.
-    """
-    checked = 0
-    for path in sorted(FIXTURES.iterdir()):
-        if not path.is_file() or path.name == "README.md":
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue
-        checked += 1
-        for marker in _MUST_NOT_APPEAR:
-            assert marker not in text, f"{path.name} 에 세션값이 남아 있음: {marker}"
-    # 파일이 없으면(미캡처) 검사할 것이 없다 — 그 사실은 다른 테스트가 드러낸다.
-    assert checked >= 0
-
-
-@_SKIP
-def test_fixture_and_meta_contain_no_secret_values():
-    """fixture·meta 어디에도 토큰/세션 '값'이 남아 있으면 안 된다."""
-    for path in (GET_HTML, BILLINFO_HTML):
-        if not path.exists():
-            continue
-        text = path.read_text(encoding="utf-8")
-        for marker in _MUST_NOT_APPEAR:
-            assert marker not in text, f"{path.name} 에 세션값이 남아 있음: {marker}"
-
-    meta = _meta()
-    # meta 는 '이름'과 '유무'만 담는다. 값을 담는 키가 늘어나면 여기서 걸린다.
-    assert set(meta.get("csrf_meta", {})) <= _ALLOWED_CSRF_META_KEYS
-    req = meta.get("follow_up_request")
-    if req is not None:
-        assert set(req) <= _ALLOWED_REQUEST_KEYS, set(req)
-    blob = json.dumps(meta, ensure_ascii=False)
-    for marker in _MUST_NOT_APPEAR:
-        assert marker not in blob
-
-
-@_SKIP
-def test_real_response_fills_proposal_reason_into_body():
-    """실제 응답으로 post.body 에 '제안이유 및 주요내용'이 저장되어야 한다."""
-    _, p, _f = _replay()
-
-    assert p.proposal_status is ProposalContentStatus.AVAILABLE, p.proposal_note
-    assert p.body, (
-        "실제 응답에서 제안이유를 뽑지 못했다. tests/fixtures/assembly_capture_meta.json 의 "
-        "prnt_summary_selector_hits / request_build_error 를 보고 고쳐야 한다."
-    )
-    assert len(p.body) >= 20        # AVAILABLE 은 20자 이상일 때만
-    # 제안이유는 body 에만 담고 details 에는 담지 않는다
-    assert p.details == []
-
-
-@_SKIP
-def test_detail_url_matches_captured_final_url():
-    """상세 URL 은 캡처 당시 최종 URL 이어야 한다(구 경로 하드코딩 금지)."""
-    meta = _meta()
-    url = _detail_url(meta)
-    assert url.startswith("https://likms.assembly.go.kr/"), url
-    # redirect 가 있었다면 최종 URL 이 요청 URL 과 다르다 — 그 사실을 드러낸다.
-    if meta.get("redirects"):
-        assert url == meta["final_url"], (
-            f"redirect 가 있었다: {meta['redirects']}. config.yaml 의 detail_url 을 "
-            f"{url} 기준으로 맞추세요."
-        )
-
-
-@_SKIP
-def test_replayed_request_matches_captured_shape():
-    """재생한 요청의 method·action·필드명·헤더명이 캡처 기록과 일치해야 한다."""
-    meta, _p, f = _replay()
-
-    if meta.get("summary_in_get_html"):
-        # 상세 HTML 에 이미 있으면 후속 요청을 하지 않아야 한다
-        assert f.requests == [], f"불필요한 후속 요청: {f.requests}"
-        assert meta.get("follow_up_request") is None
-        return
-
+def _assert_request_matches_contract(meta: dict, f: _FixtureFetcher):
+    """재생한 요청이 캡처 기록·확정 계약과 모두 일치하는지."""
     captured = meta.get("follow_up_request")
     assert captured, (
         "캡처 당시 후속 요청을 보내지 않았다. meta 의 request_build_error 를 보고 "
-        "form#form / meta[name=\"_csrf\"] / billId 를 확인해야 한다."
+        'form#form / meta[name="_csrf"] / billId 를 확인해야 한다.'
     )
     assert len(f.requests) == 1, f"후속 요청이 1회여야 한다: {f.requests}"
     replayed = f.requests[0]
@@ -318,8 +176,147 @@ def test_replayed_request_matches_captured_shape():
     assert replayed["data_keys"] == captured["data_keys"]
     assert replayed["header_keys"] == captured["header_keys"]
 
-    # 확정된 계약과도 대조한다(캡처 meta 가 낡아도 계약 위반을 잡아내도록).
+    # 확정 계약과도 대조한다(캡처 meta 가 낡아도 계약 위반을 잡아내도록).
     assert replayed["method"] == "post"
     assert replayed["action"] == _BILLINFO_ENDPOINT
     assert replayed["header_keys"] == [_CSRF_HEADER]
     assert any(k.lower() in ("billid", "bill_id") for k in replayed["data_keys"])
+
+
+# --- 캡처 스크립트의 정화(sanitize) 동작 — fixture 없이도 검증 가능 ---
+
+
+def test_sanitizer_removes_secrets_but_keeps_structure():
+    """커밋될 fixture 에 세션값·토큰·개인정보가 남지 않는지 미리 못박는다."""
+    from scripts.capture_assembly_fixture import _sanitize
+
+    dirty = (
+        "<html><head>"
+        '<meta name="_csrf" content="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"/>'
+        "</head><body>"
+        '<script>document.cookie="JSESSIONID=ABCD1234EFGH";</script>'
+        '<form id="form" action="" method="get">'
+        '<input type="hidden" name="billId" value="PRC_A1"/>'
+        '<input type="hidden" name="ageFrom" value="22"/>'
+        "</form>"
+        "<p>담당자 홍길동 010-1234-5678 hong@example.com 900101-1234567</p>"
+        '<pre id="prntSummary">제안이유 및 주요내용 본문</pre>'
+        "</body></html>"
+    )
+    out = _sanitize(dirty)
+
+    for secret in (
+        "tok-secret-999", "ABCD1234EFGH", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+        "hong@example.com", "010-1234-5678", "900101-1234567",
+    ):
+        assert secret not in out, secret
+
+    # 테스트가 검증하는 대상(필드명·selector)은 반드시 보존되어야 한다
+    for kept in (
+        'name="billId"', 'name="ageFrom"', 'id="form"',
+        'id="prntSummary"', "제안이유 및 주요내용 본문",
+    ):
+        assert kept in out, kept
+
+
+def test_fixture_presence_is_reported():
+    """fixture 유무를 항상 드러낸다 — 미캡처를 '통과'로 오해하지 않도록."""
+    missing = [d.name for d in (AVAILABLE_DIR, PENDING_DIR) if not _has(d)]
+    if missing:
+        pytest.skip(
+            f"라이브 미검증: {', '.join(missing)} fixture 가 없습니다. "
+            "scripts/capture_assembly_fixture.py --expect <state> 로 캡처해 커밋하세요."
+        )
+    assert (AVAILABLE_DIR / "detail.html").stat().st_size > 0
+    assert (PENDING_DIR / "detail.html").stat().st_size > 0
+
+
+def test_no_raw_har_is_committed():
+    """원본 HAR 은 쿠키·토큰을 그대로 담는다 — 저장소에 들어오면 안 된다."""
+    stray = list(FIXTURE_ROOT.rglob("*.raw.har")) + list(
+        (Path(__file__).parent / "fixtures").glob("*.raw.har")
+    )
+    assert not stray, f"원본 HAR 이 남아 있습니다(삭제 필요): {[p.name for p in stray]}"
+
+
+def test_committed_fixture_files_contain_no_session_values():
+    """tests/fixtures/ 의 **모든** 텍스트 파일에 세션값이 없어야 한다."""
+    root = Path(__file__).parent / "fixtures"
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.name == "README.md":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for marker in _MUST_NOT_APPEAR:
+            assert marker not in text, f"{path} 에 세션값이 남아 있음: {marker}"
+
+
+# --- AVAILABLE fixture ---
+
+
+@_SKIP_AVAILABLE
+def test_available_fixture_yields_available_status_and_body():
+    meta, p, _f = _replay(AVAILABLE_DIR)
+    assert meta.get("expect") == "available", meta.get("expect")
+    assert p.proposal_status is S.AVAILABLE, p.proposal_note
+    assert len(p.body) >= _MIN_SUMMARY_CHARS
+    assert p.details == []        # 제안이유는 body 에만 담는다
+
+
+@_SKIP_AVAILABLE
+def test_available_fixture_request_matches_contract():
+    meta, _p, f = _replay(AVAILABLE_DIR)
+    if meta.get("summary_in_get_html"):
+        assert f.requests == [], f"불필요한 후속 요청: {f.requests}"
+        return
+    _assert_request_matches_contract(meta, f)
+
+
+@_SKIP_AVAILABLE
+def test_available_fixture_meta_has_no_secret_values():
+    meta = _meta(AVAILABLE_DIR)
+    assert set(meta.get("csrf_meta", {})) <= _ALLOWED_CSRF_META_KEYS
+    req = meta.get("follow_up_request")
+    if req is not None:
+        assert set(req) <= _ALLOWED_REQUEST_KEYS, set(req)
+
+
+# --- PENDING fixture ---
+
+
+@_SKIP_PENDING
+def test_pending_fixture_yields_pending_status():
+    """등록 대기는 실패가 아니다 — PENDING 이어야 하고 본문은 비어 있어야 한다."""
+    meta, p, f = _replay(PENDING_DIR)
+    assert meta.get("expect") == "pending", meta.get("expect")
+    assert p.proposal_status is S.PENDING, p.proposal_note
+    assert p.body == ""
+    assert len(f.requests) == 1        # 확정 endpoint 에 실제로 물어봤다
+
+
+@_SKIP_PENDING
+def test_pending_fixture_request_matches_contract():
+    meta, _p, f = _replay(PENDING_DIR)
+    _assert_request_matches_contract(meta, f)
+
+
+@_SKIP_PENDING
+def test_pending_fixture_meta_has_no_secret_values():
+    meta = _meta(PENDING_DIR)
+    assert set(meta.get("csrf_meta", {})) <= _ALLOWED_CSRF_META_KEYS
+    req = meta.get("follow_up_request")
+    if req is not None:
+        assert set(req) <= _ALLOWED_REQUEST_KEYS, set(req)
+
+
+# --- 두 fixture 가 서로를 덮어쓰지 않았는지 ---
+
+
+@_SKIP_AVAILABLE
+@_SKIP_PENDING
+def test_available_and_pending_fixtures_are_distinct():
+    a = (AVAILABLE_DIR / "billinfo.html").read_text(encoding="utf-8")
+    p = (PENDING_DIR / "billinfo.html").read_text(encoding="utf-8")
+    assert a != p, "available 과 pending fixture 가 같습니다 — 덮어썼는지 확인하세요"

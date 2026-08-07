@@ -98,7 +98,7 @@ jobs:
       # ── 보조 진단: requests 기반 fixture 캡처 ────────────────────────────────
       # 초기 HTML·폼 구조를 기록한다. 현재는 실패가 예상되지만(제안이유가 XHR 로 옴)
       # 초기 HTML 스냅샷 자체가 비교 자료가 된다.
-      - name: Capture assembly fixture (requests)
+      - name: Capture assembly fixture (requests, AVAILABLE)
         id: capture
         if: ${{ env.CAPTURE_MODE == 'on' && !cancelled() }}
         continue-on-error: true
@@ -108,12 +108,25 @@ jobs:
           BILL_URL: ${{ inputs.capture_bill_url }}
         run: |
           if [ -n "$BILL_URL" ]; then
-            python scripts/capture_assembly_fixture.py --url "$BILL_URL" \
-              | tee capture_report.txt
+            python scripts/capture_assembly_fixture.py --expect available \
+              --url "$BILL_URL" | tee capture_report.txt
           else
-            python scripts/capture_assembly_fixture.py --bill-id "$BILL_ID" \
-              | tee capture_report.txt
+            python scripts/capture_assembly_fixture.py --expect available \
+              --bill-id "$BILL_ID" | tee capture_report.txt
           fi
+
+      # PENDING fixture 는 '방금 접수돼 제안이유가 아직 없는' 의안이 필요하다.
+      # pending_bill_id 를 준 경우에만 캡처한다(available fixture 를 덮어쓰지 않는다).
+      - name: Capture assembly fixture (requests, PENDING)
+        id: capturepending
+        if: ${{ !cancelled() && inputs.pending_bill_id != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          PENDING_BILL_ID: ${{ inputs.pending_bill_id }}
+        run: |
+          python scripts/capture_assembly_fixture.py --expect pending \
+            --bill-id "$PENDING_BILL_ID" | tee capture_pending_report.txt
 
       # ── pending 검증: available 검증과 **따로** 수행한다 ──────────────────────
       #
@@ -229,16 +242,27 @@ jobs:
 
       # 캡처가 성공했다면 fixture 가 있으므로 skip 이 0 이어야 한다.
       - name: Test against captured fixture
-        if: ${{ steps.capture.outcome == 'success' }}
+        id: fixturetest
+        if: ${{ env.CAPTURE_MODE == 'on' && !cancelled() }}
         continue-on-error: true
         shell: bash
         run: |
           python -m pytest tests/test_assembly_fixture.py -q -rs \
             | tee fixture_test_report.txt
+          # skip 이 남아 있으면 fixture 가 만들어지지 않은 것이다 — 초록불로 넘기지 않는다.
           if grep -q "skipped" fixture_test_report.txt; then
             echo "::error::캡처 후에도 fixture 테스트가 skip 되었습니다 — fixture 생성 실패"
             exit 1
           fi
+
+      # 러너에서 전체 테스트를 돌린다(로컬과 환경이 달라 생기는 회귀를 잡는다).
+      - name: Run full pytest
+        id: pytest
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          python -m pytest -q | tee pytest_report.txt
 
       # 실패해도 진단 자료는 반드시 남긴다(가장 필요한 순간이다).
       # 아티팩트에는 sanitize 된 HAR 만 들어간다 — 원본 HAR 은 스크립트가 지운다.
@@ -251,9 +275,11 @@ jobs:
             verify_report.txt
             network_capture_report.txt
             capture_report.txt
+            capture_pending_report.txt
             available_check_report.txt
             pending_check_report.txt
             fixture_test_report.txt
+            pytest_report.txt
             debug/
             tests/fixtures/
           if-no-files-found: warn
@@ -261,32 +287,28 @@ jobs:
 
       # ── 최종 판정 ────────────────────────────────────────────────────────────
       # 업로드 뒤에 둔다. 여기서 실패해도 아티팩트는 이미 올라가 있다.
-      - name: Gate on AVAILABLE verification
+      # capture mode 의 네 단계가 **모두** 성공해야 통과한다. 하나라도 continue-on-error
+      # 로 넘어간 채 job 이 초록불이 되면 false-green 이다.
+      - name: Gate on capture mode results
         if: ${{ !cancelled() && env.CAPTURE_MODE == 'on' }}
         shell: bash
         env:
           AVAILABLE: ${{ steps.availablecheck.outcome }}
-        run: |
-          if [ "$AVAILABLE" != "success" ]; then
-            echo "::error::생산 스크래퍼가 제안이유를 확보하지 못했습니다. available_check_report.txt 확인."
-            echo "::error::확정 계약(form#form payload / X-CSRF-TOKEN / billInfo.do POST)이 깨졌는지 확인하세요."
-            exit 2
-          fi
-          echo "생산 스크래퍼 available 검증 통과 — billInfo.do 계약이 동작합니다."
-
-      - name: Gate on capture result
-        if: ${{ !cancelled() && env.CAPTURE_MODE == 'on' }}
-        shell: bash
-        env:
           NET: ${{ steps.netcapture.outcome }}
+          CAPTURE: ${{ steps.capture.outcome }}
+          FIXTURETEST: ${{ steps.fixturetest.outcome }}
         run: |
-          echo "Playwright 네트워크 캡처 결과: $NET"
-          if [ "$NET" != "success" ]; then
-            echo "::error::제안이유/주요내용을 렌더링 HTML·XHR 응답 어디에서도 찾지 못했습니다."
-            echo "::error::verify-results 아티팩트의 assembly_xhr_manifest.json / assembly_js_report.txt 를 확인하세요."
-            exit 2
-          fi
-          echo "제안이유/주요내용 확보 — assembly_xhr_manifest.json 의 요청이 확정할 계약입니다."
+          echo "production AVAILABLE check : $AVAILABLE"
+          echo "Playwright capture         : $NET"
+          echo "requests fixture capture   : $CAPTURE"
+          echo "captured fixture replay    : $FIXTURETEST"
+          failed=0
+          [ "$AVAILABLE"   = "success" ] || { echo "::error::생산 스크래퍼 AVAILABLE 검증 실패 — available_check_report.txt 확인(확정 계약이 깨졌는지)."; failed=1; }
+          [ "$NET"         = "success" ] || { echo "::error::Playwright 네트워크 캡처 실패 — assembly_xhr_manifest.json / assembly_js_report.txt 확인."; failed=1; }
+          [ "$CAPTURE"     = "success" ] || { echo "::error::requests fixture 캡처 실패 — capture_report.txt 확인."; failed=1; }
+          [ "$FIXTURETEST" = "success" ] || { echo "::error::캡처된 fixture 재생 테스트 실패(또는 skip 잔존) — fixture_test_report.txt 확인."; failed=1; }
+          [ "$failed" = "0" ] || exit 2
+          echo "capture mode 4단계 모두 통과."
 
       # pending 검증은 available 검증과 별개로 판정한다.
       - name: Gate on PENDING classification
@@ -294,9 +316,12 @@ jobs:
         shell: bash
         env:
           PEND: ${{ steps.pendingcheck.outcome }}
+          PENDCAP: ${{ steps.capturepending.outcome }}
         run: |
-          if [ "$PEND" != "success" ]; then
-            echo "::error::등록 대기(PENDING) 판정 확인 실패. pending_check_report.txt 확인."
+          failed=0
+          [ "$PEND" = "success" ] || { echo "::error::등록 대기(PENDING) 판정 확인 실패. pending_check_report.txt 확인."; failed=1; }
+          [ "$PENDCAP" = "success" ] || { echo "::error::PENDING fixture 캡처 실패. capture_pending_report.txt 확인."; failed=1; }
+          if [ "$failed" != "0" ]; then
             echo "::error::ERROR 로 판정됐다면 구조/endpoint 문제이고, AVAILABLE 이면 더 최근 의안으로 다시 확인하세요."
             exit 1
           fi
@@ -327,3 +352,16 @@ jobs:
           echo "::error::소스 검증 실패. verify_report.txt 의 '제안이유 available/pending/failed' 를 확인하세요."
           echo "::error::failed>0 이면 구조·endpoint 문제입니다. available 검증 결과: $AVAILABLE"
           exit 1
+
+
+      - name: Gate on full pytest
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          PYTEST: ${{ steps.pytest.outcome }}
+        run: |
+          if [ "$PYTEST" != "success" ]; then
+            echo "::error::전체 pytest 실패. pytest_report.txt 확인."
+            exit 1
+          fi
+          echo "전체 pytest 통과."

@@ -70,8 +70,11 @@ _PAYLOAD_FORM_SELECTOR = "form#form"
 _CSRF_META_SELECTOR = 'meta[name="_csrf"]'
 _CSRF_HEADER = "X-CSRF-TOKEN"
 
-# 본문 selector. pre#prntSummary 가 확정된 것이고, 나머지는 구형 페이지 폴백이다.
-_SUMMARY_SELECTORS = ("pre#prntSummary", "#prntSummary", "#summaryContentDiv")
+# billInfo.do 응답에서 인정하는 **유일한** 본문 selector(확정 계약, fail-closed).
+_BILLINFO_SUMMARY_SELECTOR = "pre#prntSummary"
+
+# 초기 상세 GET 에만 쓰는 selector 목록. 구형(inline) 페이지 지원용 폴백을 포함한다.
+_SUMMARY_SELECTORS = (_BILLINFO_SUMMARY_SELECTOR, "#prntSummary", "#summaryContentDiv")
 
 
 class SummaryRequestError(ValueError):
@@ -93,16 +96,6 @@ _NOT_FOUND_MARKERS = (
     "의안정보가없습니다",
     "해당의안정보가존재하지않",
     "페이지를찾을수없",
-)
-
-# 알려진 컨테이너 '안에서만' 찾는 등록 대기 안내 문구. 컨테이너 밖의 아무 문구나
-# 보면 안 된다(첨부 없음·검색결과 없음 등이 걸린다).
-#
-# ※ 실제 문구는 라이브 확인이 필요하다. 확인 전까지 주 신호는 '컨테이너가 있는데
-#   내용이 비어 있다'이고, 아래 패턴은 보조 신호다.
-_PENDING_NOTICE = re.compile(
-    r"등록\s*(예정|대기|중)|준비\s*중|아직\s*(등록|제공|공개)|"
-    r"(내용|자료|정보)가\s*없|제공되지\s*않"
 )
 
 _WS_ALL = re.compile(r"\s+")
@@ -174,15 +167,37 @@ def _probe_summary(soup: BeautifulSoup) -> tuple[SummaryProbe, str]:
         text = clean_text(el.get_text("\n"))
         if len(text) >= _MIN_SUMMARY_CHARS:
             probe, value = SummaryProbe.FOUND, text
-        elif not text or _PENDING_NOTICE.search(text):
-            # 컨테이너는 있는데 내용이 없다 = 구조는 멀쩡, 원문이 아직 없음.
+        elif not text:
             probe, value = SummaryProbe.EMPTY, ""
         else:
-            # 짧은데 안내문도 아니다 — 뭘 받은 건지 알 수 없다.
+            # 짧은데 본문이라 하기엔 모자란다 — 뭘 받은 건지 알 수 없다.
             probe, value = SummaryProbe.UNEXPECTED, text
         if rank[probe] > rank[best]:
             best, best_text = probe, value
     return best, best_text
+
+
+def _probe_billinfo(soup: BeautifulSoup) -> tuple[SummaryProbe, str]:
+    """billInfo.do 응답 전용 판정 — **확정된 selector 하나만** 인정한다(fail-closed).
+
+    초기 상세 GET 은 구형 페이지 지원을 위해 폴백 selector 를 두지만, 확정된 계약을
+    가진 이 응답에는 폴백을 두지 않는다. #summaryContentDiv 나 #prntSummary 만 있고
+    pre#prntSummary 가 없다면 응답 구조가 바뀐 것이므로 ERROR 여야 한다 — 폴백으로
+    받아 주면 구조 변경이 조용히 통과한다.
+
+    PENDING 은 pre#prntSummary 가 **존재하고 완전히 비어 있을 때만**이다. 짧은 안내
+    문구는 실제 PENDING fixture 로 정확한 문구를 확인하기 전까지 ERROR 로 둔다 —
+    정규식으로 추정하면 구조 변경을 '등록 대기'로 위장하게 된다.
+    """
+    el = soup.select_one(_BILLINFO_SUMMARY_SELECTOR)
+    if el is None:
+        return SummaryProbe.MISSING, ""
+    text = clean_text(el.get_text("\n"))
+    if len(text) >= _MIN_SUMMARY_CHARS:
+        return SummaryProbe.FOUND, text
+    if not text:
+        return SummaryProbe.EMPTY, ""
+    return SummaryProbe.UNEXPECTED, text
 
 
 def _extract_summary(soup: BeautifulSoup) -> str:
@@ -446,8 +461,8 @@ class AssemblyBillScraper(BaseScraper):
             self._fail(post, "billInfo.do 가 '의안 정보 없음'을 응답", body_html)
             return
 
-        # 4) 확정된 selector(pre#prntSummary)로 판정한다.
-        probe, text = _probe_summary(BeautifulSoup(body_html, "lxml"))
+        # 4) 확정된 selector(pre#prntSummary)만으로 판정한다(fail-closed).
+        probe, text = _probe_billinfo(BeautifulSoup(body_html, "lxml"))
         if probe is SummaryProbe.FOUND:
             post.body = text
             self._set_status(post, ProposalContentStatus.AVAILABLE, "billInfo.do 응답")
@@ -467,7 +482,8 @@ class AssemblyBillScraper(BaseScraper):
         note = (
             f"billInfo.do 응답이 예상과 다름: {text[:80]}"
             if probe is SummaryProbe.UNEXPECTED
-            else "billInfo.do 응답에 pre#prntSummary 가 없음(selector/계약 확인 필요)"
+            else f"billInfo.do 응답에 {_BILLINFO_SUMMARY_SELECTOR} 가 없음"
+            "(selector/계약 확인 필요 — 폴백 selector 는 인정하지 않는다)"
         )
         self._fail(post, note, body_html)
 

@@ -10,12 +10,18 @@
 
 사용
 ----
-  python scripts/capture_assembly_fixture.py --bill-id PRC_XXXXXXXXXXXX
-  python scripts/capture_assembly_fixture.py --url "https://likms.assembly.go.kr/..."
+  python scripts/capture_assembly_fixture.py --expect available --bill-id PRC_XXXX
+  python scripts/capture_assembly_fixture.py --expect pending   --bill-id PRC_YYYY
+  python scripts/capture_assembly_fixture.py --expect available \
+      --url "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_XXXX"
 
-결과: tests/fixtures/assembly_detail_get.html         (상세 GET 응답)
-      tests/fixtures/assembly_billinfo_response.html  (billInfo.do 응답, 보냈을 때만)
-      tests/fixtures/assembly_capture_meta.json       (method/action/필드명만 기록)
+--url 만 줘도 billId 를 URL 에서 뽑아 쓴다(HTTPS·호스트·billId 유일성을 요청 전에 검증).
+--expect 로 지정한 상태가 실제 판정과 다르면 아티팩트는 저장하되 종료코드는 실패다.
+
+결과(기대 상태별로 분리 저장 — 서로 덮어쓰지 않는다):
+      tests/fixtures/assembly/<expect>/detail.html    (상세 GET 응답)
+      tests/fixtures/assembly/<expect>/billinfo.html  (billInfo.do 응답, 보냈을 때만)
+      tests/fixtures/assembly/<expect>/meta.json      (method/action/필드'명'만 기록)
 
 요청은 **생산 코드의 빌더**(AssemblyBillScraper.build_summary_request)를 그대로 쓴다.
 도구가 조립 규칙을 따로 구현하면 fixture 가 생산 동작을 검증하지 못한다.
@@ -30,6 +36,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -38,8 +45,10 @@ from bs4 import BeautifulSoup  # noqa: E402
 from src.config import SourceConfig  # noqa: E402
 from src.fetcher import Fetcher  # noqa: E402
 from src.models import Post  # noqa: E402
+from src.models import ProposalContentStatus  # noqa: E402
 from src.scrapers.assembly import (  # noqa: E402
     _CSRF_META_SELECTOR,
+    _MIN_SUMMARY_CHARS,
     _extract_summary,
     _hidden_inputs,
     AssemblyBillScraper,
@@ -51,8 +60,60 @@ from src.scrapers.assembly import (  # noqa: E402
 # 때문이다. fixture 와 meta 는 이 경우에도 반드시 저장된다(진단에 필요).
 EXIT_OK = 0
 EXIT_NO_SUMMARY = 2
+EXIT_BAD_TARGET = 3
 
-FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "assembly"
+
+# 캡처 대상 호스트. 다른 호스트에 세션·토큰을 보내지 않는다.
+ALLOWED_HOST = "likms.assembly.go.kr"
+
+# 기대 상태별 fixture 디렉터리. 서로 덮어쓰지 않도록 분리한다.
+EXPECT_CHOICES = ("available", "pending")
+
+
+class CaptureTargetError(ValueError):
+    """캡처 대상(billId/URL)이 잘못됨 — 요청을 보내기 전에 실패한다."""
+
+
+def resolve_capture_target(bill_id: str, url: str, template: str) -> tuple[str, str]:
+    """(bill_id, url) 을 확정한다. 잘못되면 CaptureTargetError.
+
+    --url 만 주면 URL 에서 billId 를 뽑는다. 예전에는 이때 bill_id 가 "UNKNOWN" 이
+    되어 상세 HTML form#form 의 billId 와 불일치했고, 생산 코드가 요청을 거부해
+    캡처가 항상 실패했다.
+
+    검증은 **요청 전에** 끝낸다 — 잘못된 호스트에 세션을 붙여 보내지 않기 위함이다.
+    """
+    bill_id = (bill_id or "").strip()
+    url = (url or "").strip()
+    if not bill_id and not url:
+        raise CaptureTargetError("--bill-id 또는 --url 중 하나는 필요합니다")
+
+    if not url:
+        return bill_id, template.format(bill_id=bill_id)
+
+    parts = urlparse(url)
+    if parts.scheme != "https":
+        raise CaptureTargetError(f"URL 이 HTTPS 가 아님: {url}")
+    if parts.hostname != ALLOWED_HOST:
+        raise CaptureTargetError(
+            f"URL 호스트가 {ALLOWED_HOST} 가 아님: {parts.hostname!r}"
+        )
+
+    values = parse_qs(parts.query, keep_blank_values=True).get("billId", [])
+    if not values:
+        raise CaptureTargetError(f"URL 에 billId 쿼리가 없음: {url}")
+    if len(values) > 1:
+        raise CaptureTargetError(f"URL 에 billId 가 여러 개 있음: {values}")
+    from_url = values[0].strip()
+    if not from_url:
+        raise CaptureTargetError("URL 의 billId 가 비어 있음")
+
+    if bill_id and bill_id != from_url:
+        raise CaptureTargetError(
+            f"--bill-id({bill_id!r}) 와 URL 의 billId({from_url!r}) 가 다릅니다"
+        )
+    return from_url, url
 
 # 지워야 할 값들.
 #   - 세션/토큰: 이름에 아래 조각이 든 hidden input·meta·쿠키 값
@@ -109,11 +170,14 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bill-id", default="", help="의안 ID(BILL_ID)")
     ap.add_argument("--url", default="", help="상세 URL 직접 지정(--bill-id 대신)")
-    ap.add_argument("--out", default=str(FIXTURE_DIR), help="fixture 출력 디렉터리")
+    ap.add_argument("--out", default=str(FIXTURE_DIR), help="fixture 출력 루트")
+    ap.add_argument(
+        "--expect",
+        choices=EXPECT_CHOICES,
+        required=True,
+        help="기대 상태. available/pending fixture 를 각각 다른 디렉터리에 저장한다",
+    )
     args = ap.parse_args(argv)
-
-    if not args.bill_id and not args.url:
-        ap.error("--bill-id 또는 --url 중 하나는 필요합니다")
 
     src = SourceConfig(
         key="assembly_bill",
@@ -125,9 +189,16 @@ def main(argv=None) -> int:
     fetcher = Fetcher(timeout=30.0, delay=0.5)
     scraper = AssemblyBillScraper(src, fetcher)
 
-    bill_id = args.bill_id or "UNKNOWN"
-    url = args.url or scraper.detail_url.format(bill_id=bill_id)
+    # 대상 확정과 검증을 **요청 전에** 끝낸다.
+    try:
+        bill_id, url = resolve_capture_target(
+            args.bill_id, args.url, scraper.detail_url
+        )
+    except CaptureTargetError as e:
+        print(f"캡처 대상이 잘못되었습니다: {e}", file=sys.stderr)
+        return EXIT_BAD_TARGET
 
+    print(f"기대 상태: {args.expect}")
     print(f"GET {url}")
     resp = fetcher.get(url, referer=src.list_url)
     print(f"  → HTTP {resp.status_code}, 최종 URL {resp.url}")
@@ -171,7 +242,8 @@ def main(argv=None) -> int:
         for sel in ("pre#prntSummary", "#prntSummary", "#summaryContentDiv")
     }
 
-    out_dir = Path(args.out)
+    # 기대 상태별 하위 디렉터리 — available 과 pending fixture 가 서로 덮어쓰지 않는다.
+    out_dir = Path(args.out) / args.expect
     out_dir.mkdir(parents=True, exist_ok=True)
     follow_html = ""
 
@@ -215,25 +287,74 @@ def main(argv=None) -> int:
                 print(f"  ! 후속 요청 실패: {type(e).__name__}: {e}")
 
     # --- 저장은 성공/실패와 무관하게 먼저 한다 ---
-    _write(out_dir / "assembly_detail_get.html", _sanitize(get_html))
-    if follow_html:
-        _write(out_dir / "assembly_billinfo_response.html", _sanitize(follow_html))
-    _write(
-        out_dir / "assembly_capture_meta.json",
-        json.dumps(meta, ensure_ascii=False, indent=2),
+    detail_fixture = _sanitize(get_html)
+    billinfo_fixture = _sanitize(follow_html) if follow_html else ""
+    _write(out_dir / "detail.html", detail_fixture)
+    if billinfo_fixture:
+        _write(out_dir / "billinfo.html", billinfo_fixture)
+
+    # **저장된(정화된) fixture** 로 생산 enrich 를 재생해 상태를 확정한다.
+    # 정화 후에도 생산 코드가 같은 판정을 내는지까지 여기서 확인된다.
+    status, note, body_len = _replay_status(
+        src, bill_id, resp.url, detail_fixture, billinfo_fixture
     )
+    meta["expect"] = args.expect
+    meta["status"] = status.value
+    meta["status_note"] = note
+    meta["body_length"] = body_len
+    _write(out_dir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
 
     print("\n--- 확인 결과 ---")
     print(json.dumps(meta, ensure_ascii=False, indent=2))
 
-    if meta["summary_in_get_html"] or meta["summary_in_follow_up"]:
-        where = "상세 GET 응답" if meta["summary_in_get_html"] else "후속 요청 응답"
-        print(f"\n✅ '제안이유 및 주요내용'을 {where}에서 확보했습니다.")
+    if args.expect == "available":
+        ok = status is ProposalContentStatus.AVAILABLE and body_len >= _MIN_SUMMARY_CHARS
+        want = f"AVAILABLE(본문 {_MIN_SUMMARY_CHARS}자 이상)"
+    else:
+        ok = status is ProposalContentStatus.PENDING
+        want = "PENDING(billInfo.do 응답의 pre#prntSummary 가 비어 있음)"
+
+    if ok:
+        print(f"\n✅ 기대 상태({want}) 와 일치합니다. 본문 {body_len}자.")
         print("※ 커밋 전에 fixture 를 눈으로 확인하세요. 자동 치환은 알려진 패턴만 덮습니다.")
         return EXIT_OK
 
+    print(f"\n❌ 기대({want}) 와 다릅니다: status={status.value} 본문 {body_len}자")
+    print(f"   note: {note}")
+    print("   fixture 와 meta 는 저장했습니다(진단용).")
     _print_diagnosis(meta)
     return EXIT_NO_SUMMARY
+
+
+class _FixtureFetcher:
+    """저장된 fixture 만 돌려주는 fetcher(네트워크 없음). 재생 검증용."""
+
+    def __init__(self, detail_html: str, billinfo_html: str):
+        self._detail = detail_html
+        self._billinfo = billinfo_html
+
+    def get(self, url, referer=None, params=None, headers=None):
+        return ("get", 0)
+
+    def post(self, url, referer=None, data=None, headers=None):
+        return ("post", 0)
+
+    def text(self, resp):
+        return self._detail if resp[0] == "get" else self._billinfo
+
+
+def _replay_status(src, bill_id, url, detail_html, billinfo_html):
+    """저장된 fixture 로 생산 enrich 를 재생해 (상태, 사유, 본문길이) 를 돌려준다."""
+    scraper = AssemblyBillScraper(src, _FixtureFetcher(detail_html, billinfo_html))
+    post = Post(
+        source_key="assembly_bill",
+        source_name=src.name,
+        post_id=bill_id,
+        title="(fixture replay)",
+        url=url,
+    )
+    scraper.enrich(post)
+    return post.proposal_status, post.proposal_note, len(post.body or "")
 
 
 def _write(path: Path, content: str) -> None:
@@ -279,7 +400,7 @@ def _print_diagnosis(meta: dict) -> None:
         else:
             print(
                 "    → 응답에 제안이유가 없습니다. "
-                "tests/fixtures/assembly_billinfo_response.html 을 열어 확인하세요."
+                "저장된 billinfo.html 을 열어 확인하세요."
             )
 
     if meta.get("redirects"):
