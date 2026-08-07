@@ -624,3 +624,69 @@ def test_scrub_url_keeps_public_path_parameters():
     out = _scrub_url(url)
     assert "billId=PRC_A1" in out
     assert "ageFrom=22" in out
+
+
+# --- URL 을 값으로 갖는 헤더(Referer·Location)도 URL 규칙으로 정화한다 ---
+#
+# Referer 는 보통 **그 페이지의 전체 URL** 을 그대로 담는다. 그 쿼리에 UUID·Base64
+# 자격증명이 있으면 _scrub_text 는 쿼리 파라미터 '이름'을 모르므로 값이 살아남고,
+# 헤더 이름('referer') 자체는 비밀이 아니라 REDACTED 대상도 아니다.
+
+_SECRET_REFERER = (
+    "https://likms.assembly.go.kr/bill/bi/billDetailPage.do"
+    "?billId=PRC_A1&authToken=3f2a91c4-8b7d-4e16-9a02-5c6d1e8f0b34"
+)
+
+
+def test_scrub_headers_redacts_credentials_inside_referer():
+    out = _scrub_headers({"Referer": _SECRET_REFERER})
+    assert "3f2a91c4-8b7d-4e16" not in out["Referer"]
+    assert "authToken=" in out["Referer"]        # 이름은 남는다
+    assert "billId=PRC_A1" in out["Referer"]     # 공개 식별자는 값까지
+
+
+@pytest.mark.parametrize("name", ["Referer", "referer", "Location", "Content-Location"])
+def test_url_valued_headers_all_go_through_url_rules(name):
+    out = _scrub_headers({name: _SECRET_REFERER})
+    assert "3f2a91c4-8b7d-4e16" not in out[name], name
+
+
+def test_scrub_headers_redacts_session_id_in_referer_path():
+    out = _scrub_headers(
+        {"Referer": "https://likms.assembly.go.kr/bill/x.do;jsessionid=ABC999?billId=PRC_A1"}
+    )
+    assert "ABC999" not in out["Referer"]
+    assert "billId=PRC_A1" in out["Referer"]
+
+
+def test_ordinary_referer_is_left_intact():
+    """정화가 진단을 망치면 안 된다 — 평범한 Referer 는 그대로다."""
+    url = "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A1"
+    assert _scrub_headers({"Referer": url})["Referer"] == url
+
+
+def test_non_url_headers_are_unaffected():
+    out = _scrub_headers(
+        {"X-Requested-With": "XMLHttpRequest", "Content-Type": "application/json"}
+    )
+    assert out["X-Requested-With"] == "XMLHttpRequest"
+    assert out["Content-Type"] == "application/json"
+
+
+def test_secret_named_headers_still_win_over_url_handling():
+    out = _scrub_headers({"X-CSRF-TOKEN": _SECRET_REFERER, "Cookie": "JSESSIONID=A1"})
+    assert out["X-CSRF-TOKEN"] == REDACTED
+    assert out["Cookie"] == REDACTED
+
+
+def test_sanitize_har_redacts_credentials_inside_referer_and_location():
+    """HAR 의 요청·응답 헤더도 같은 규칙을 거친다."""
+    har = _har()
+    entry = har["log"]["entries"][0]
+    entry["request"]["headers"].append({"name": "Referer", "value": _SECRET_REFERER})
+    entry["response"]["headers"].append({"name": "Location", "value": _SECRET_REFERER})
+    out = json.dumps(_sanitize_har(har), ensure_ascii=False)
+
+    assert "3f2a91c4-8b7d-4e16" not in out
+    assert "Referer" in out and "Location" in out       # 이름은 남는다
+    assert "billId=PRC_A1" in out

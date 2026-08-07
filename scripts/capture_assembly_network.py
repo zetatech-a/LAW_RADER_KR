@@ -183,11 +183,29 @@ def _scrub_body(text: str, *, is_json: bool) -> str:
     return _scrub_json_text(text) if is_json else _scrub_html(text)
 
 
+# 값이 URL 인 헤더. 값 패턴만으로는 부족하다 — Referer 는 보통 **그 페이지의 전체
+# URL** 을 그대로 담는데, 그 URL 의 쿼리에 UUID·Base64 자격증명이 있으면 _scrub_text
+# 는 쿼리 파라미터 '이름'을 모르므로 값이 통째로 살아남는다. 헤더 이름 자체는 비밀이
+# 아니어서 REDACTED 대상도 아니다. 그래서 URL 로 취급해 _scrub_url 을 태운다.
+_URL_VALUED_HEADERS = {
+    "referer", "referrer", "location", "content-location", "origin", "refresh",
+}
+
+
+def _scrub_header_value(name: str, value) -> str:
+    """헤더 값 하나를 정화한다. 이름이 비밀이면 통째로, URL 이면 URL 규칙으로."""
+    if _is_secret_name(name):
+        return REDACTED
+    text = str(value if value is not None else "")
+    if (name or "").strip().lower() in _URL_VALUED_HEADERS:
+        return _scrub_url(text)
+    return _scrub_text(text)
+
+
 def _scrub_headers(headers: dict) -> dict:
     """헤더는 이름을 모두 남기고, 비밀인 것만 값을 REDACTED 로."""
     return {
-        k: (REDACTED if _is_secret_name(k) else _scrub_text(str(v)))
-        for k, v in (headers or {}).items()
+        k: _scrub_header_value(k, v) for k, v in (headers or {}).items()
     }
 
 
@@ -306,9 +324,7 @@ def _sanitize_har(har: dict) -> dict:
             holder["headers"] = [
                 {
                     "name": h.get("name", ""),
-                    "value": REDACTED
-                    if _is_secret_name(h.get("name", ""))
-                    else _scrub_text(str(h.get("value", ""))),
+                    "value": _scrub_header_value(h.get("name", ""), h.get("value", "")),
                 }
                 for h in (holder.get("headers") or [])
             ]

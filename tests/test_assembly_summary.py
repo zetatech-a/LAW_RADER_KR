@@ -4,6 +4,7 @@
 """
 import json
 import os
+import re
 import sys
 from copy import deepcopy
 
@@ -907,3 +908,74 @@ def test_safety_block_does_not_split_the_batch():
     ok, rec = _run(posts, cfg, reply=_blocked)
     assert ok == 0
     assert len(rec.calls) == 1          # 분할했다면 3회가 된다
+
+
+# --- 프롬프트 예시는 llm.lines 를 따라야 한다 ---
+#
+# 예시를 3줄로 못박아 두면 lines 를 3 이외로 바꿨을 때 규칙(lines 개)과 예시(3개)가
+# 어긋난다. 모델은 구체적인 예시를 따르기 쉽고, 그러면 _valid_lines 가 '정확히 lines
+# 개가 아니다'라며 **모든 의안을 버려** 배치 요약이 통째로 발췌 폴백이 된다.
+
+
+def _n_lines(bill_id: str, n: int) -> list[str]:
+    return [f"{bill_id} {i}번째 문장임" for i in range(1, n + 1)]
+
+
+@pytest.mark.parametrize("lines", [1, 2, 3, 5])
+def test_prompt_example_matches_configured_lines(lines):
+    posts = [_bill(0)]
+    captured = {}
+
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+        captured["prompt"] = prompt
+        return _envelope(
+            json.dumps(
+                {"summaries": [{"bill_id": "PRC_0000",
+                                "summary": _n_lines("PRC_0000", lines)}]},
+                ensure_ascii=False,
+            )
+        )
+
+    s = Summarizer(_cfg(lines=lines))
+    s._generate = _generate
+    s.summarize_all({_SOURCE: posts})
+
+    prompt = captured["prompt"]
+    assert f"정확히 {lines}개의 문장" in prompt
+    # 예시 배열의 원소 수가 규칙과 같아야 한다
+    found = re.search(r'"summary": (\[[^\]]*\])', prompt)
+    assert found, prompt
+    assert json.loads(found.group(1)) == [f"문장{i}" for i in range(1, lines + 1)]
+
+
+@pytest.mark.parametrize("lines", [2, 5])
+def test_batch_summary_works_with_non_default_lines(lines):
+    """설정을 바꿨다고 배치 요약이 조용히 꺼지면 안 된다(끝까지 확인)."""
+    posts = [_bill(i) for i in range(3)]
+
+    def _reply_n(requested, n):
+        return _envelope(
+            json.dumps(
+                {"summaries": [{"bill_id": b, "summary": _n_lines(b, lines)} for b in requested]},
+                ensure_ascii=False,
+            )
+        )
+
+    ok, _rec = _run(posts, _cfg(lines=lines), reply=_reply_n)
+    assert ok == 3
+    assert all(len(p.summary) == lines for p in posts)
+
+
+def test_three_line_example_is_unchanged_at_the_default():
+    """기본 설정(lines=3)의 프롬프트는 종전과 같아야 한다 — 동작 무변경."""
+    posts = [_bill(0)]
+    captured = {}
+
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+        captured["prompt"] = prompt
+        return _reply(["PRC_0000"])
+
+    s = Summarizer(_cfg())
+    s._generate = _generate
+    s.summarize_all({_SOURCE: posts})
+    assert '"summary": ["문장1", "문장2", "문장3"]' in captured["prompt"]

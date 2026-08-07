@@ -70,7 +70,7 @@ _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가�
 - {count}건 모두에 대해 빠짐없이 한 항목씩 만듭니다.
 
 출력은 다음 형태의 JSON 만 반환합니다:
-{{"summaries": [{{"bill_id": "<목록의 값>", "summary": ["문장1", "문장2", "문장3"]}}]}}
+{{"summaries": [{{"bill_id": "<목록의 값>", "summary": {example}}}]}}
 
 [의안 목록]
 {bills}
@@ -334,6 +334,18 @@ def _call(
     return _parse(summarizer, data, {it.bill_id for it in items})
 
 
+def _summary_example(lines: int) -> str:
+    """출력 예시의 summary 배열. **반드시 설정된 줄 수와 같아야 한다.**
+
+    예시를 3줄로 못박아 두면 llm.lines 를 3 이외로 바꿨을 때 프롬프트가 서로 어긋난다
+    (규칙은 lines 개, 예시는 3개). 모델은 구체적인 예시를 따르기 쉬운데, 그러면
+    _valid_lines 가 정확히 lines 개가 아니라는 이유로 **모든 의안을 버려** 배치 요약이
+    통째로 발췌 폴백이 된다. 설정을 바꿨을 뿐인데 기능이 조용히 꺼지는 셈이다.
+    """
+    n = max(1, lines)
+    return json.dumps([f"문장{i}" for i in range(1, n + 1)], ensure_ascii=False)
+
+
 def _prompt(summarizer: "Summarizer", items: list[_Item]) -> str:
     bills = "\n".join(
         _BILL_BLOCK.format(bill_id=it.bill_id, title=it.title or "(제목 없음)", text=it.text)
@@ -343,6 +355,7 @@ def _prompt(summarizer: "Summarizer", items: list[_Item]) -> str:
         count=len(items),
         lines=summarizer.cfg.lines,
         max_chars=summarizer.cfg.max_line_chars,
+        example=_summary_example(summarizer.cfg.lines),
         bills=bills,
     )
 
