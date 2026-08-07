@@ -368,19 +368,11 @@ def _print_diagnosis(meta: dict) -> None:
     print("\n[진단]")
 
     hits = meta.get("prnt_summary_selector_hits") or {}
-    if not any(hits.values()):
-        print(
-            "  · 셀렉터 전부 불일치 "
-            f"({', '.join(f'{k}={v}' for k, v in hits.items())})\n"
-            "    → 저장된 HTML 에서 실제 컨테이너를 찾아 src/scrapers/assembly.py 의 "
-            "_SUMMARY_SELECTORS 를 고치세요."
-        )
-    else:
-        matched = [k for k, v in hits.items() if v]
-        print(
-            f"  · 셀렉터는 맞았으나({', '.join(matched)}) 내용이 비었거나 너무 짧습니다.\n"
-            "    → 값이 별도 요청으로 채워지는 구조일 수 있습니다. 아래 폼 목록 확인."
-        )
+    print(
+        "  · 상세 GET 의 selector 적중: "
+        + ", ".join(f"{k}={v}" for k, v in hits.items())
+        + "  (현행 페이지는 전부 False 가 정상 — 본문은 billInfo.do 가 준다)"
+    )
 
     if not meta.get("follow_up_request_made"):
         if meta.get("request_build_error"):

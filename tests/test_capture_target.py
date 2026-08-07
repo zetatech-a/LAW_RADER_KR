@@ -228,8 +228,8 @@ def test_pending_capture_does_not_overwrite_available_fixture(monkeypatch, tmp_p
     [
         ("available", "billinfo_pending.html"),          # 기대 available, 실제 pending
         ("pending", "billinfo_available.html"),          # 기대 pending, 실제 available
-        ("available", "billinfo_selector_missing.html"),  # 기대 available, 실제 error
-        ("pending", "billinfo_selector_missing.html"),    # 기대 pending, 실제 error
+        ("available", "billinfo_malformed_shell.html"),  # 기대 available, 실제 error
+        ("pending", "billinfo_malformed_shell.html"),    # 기대 pending, 실제 error
     ],
 )
 def test_status_mismatch_saves_artifacts_but_fails(

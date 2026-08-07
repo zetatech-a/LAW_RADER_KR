@@ -13,9 +13,11 @@
 | 파일 | 재현하는 상황 | 기대 판정 |
 | --- | --- | --- |
 | `bill_detail_page.html` | 확정 계약의 상세페이지(form#form + meta csrf, 제안이유 없음) | 요청 조립용 |
-| `billinfo_available.html` | billInfo.do 가 제안이유를 돌려줌 | `AVAILABLE` |
-| `billinfo_pending.html` | 2xx + `pre#prntSummary` 존재 + 내용 비어 있음 | `PENDING` |
-| `billinfo_selector_missing.html` | 응답에 `pre#prntSummary` 없음(구조 변경) | `ERROR` |
+| `billinfo_available.html` | 정상 shell + `#prntsummary-sect` + `pre#prntSummary` 본문 | `AVAILABLE` |
+| `billinfo_pending.html` | **정상 shell 만 있고 제안이유 섹션이 아예 없음**(라이브 확인된 등록 대기 구조) | `PENDING` |
+| `billinfo_section_without_pre.html` | `#prntsummary-sect` 는 있는데 `pre` 만 없음 | `ERROR` |
+| `billinfo_marker_without_selector.html` | 제안이유 표식은 있는데 예상 selector 없음 | `ERROR` |
+| `billinfo_malformed_shell.html` | 정상 심사정보 shell 자체가 없음 | `ERROR` |
 | `bill_available.html` | 구형 페이지 — 제안이유가 상세 HTML에 실려 있음 | `AVAILABLE` |
 | `bill_not_found.html` | '해당 의안 정보가 존재하지 않습니다' | `ERROR` |
 

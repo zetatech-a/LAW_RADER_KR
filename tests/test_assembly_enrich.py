@@ -58,8 +58,27 @@ def _detail_page(
     )
 
 
-def _billinfo_response(text=_REASON) -> str:
-    return f'<html><body><div class="tbl"><pre id="prntSummary">{text}</pre></div></body></html>'
+# 정상 심사정보(billInfo.do) 응답의 뼈대. 제안이유 등록 여부와 무관하게 항상 있다.
+_SHELL = (
+    '<div id="tab_billInfo_sect">'
+    '<form id="billInfoForm" method="post" action="">'
+    '<input type="hidden" name="billId" value="PRC_A2Z5C1D0"/></form>'
+    "<dl><dt>의안번호</dt><dd>2200123</dd></dl>"
+    '<div id="stage_list"><ul><li>접수</li></ul></div>'
+    '<div id="rcp_list"><table><tbody>'
+    '<tr id="insc-rcp-row"><td>2026-08-06</td></tr></tbody></table></div>'
+)
+
+
+def _billinfo_response(text=_REASON, *, section=True, shell=True) -> str:
+    """billInfo.do 응답. section=False 면 제안이유 섹션이 아예 없다(등록 대기)."""
+    inner = _SHELL if shell else '<div id="tab_billInfo_sect"></div>'
+    if section:
+        inner += (
+            '<div id="prntsummary-sect"><h4>제안이유 및 주요내용</h4>'
+            f'<pre id="prntSummary">{text}</pre></div>'
+        )
+    return f"<html><body>{inner}</div></body></html>"
 
 
 def _scraper(fetcher):
@@ -275,24 +294,14 @@ def test_available_at_20_chars():
     assert p.body == text
 
 
-def test_empty_selector_in_response_is_pending(tmp_path, monkeypatch):
-    p, f = _run(
-        _detail_page(), _billinfo_response(""),
-        tmp_path=tmp_path, monkeypatch=monkeypatch,
-    )
-    assert len(f.posts) == 1                 # 확정된 endpoint 에 실제로 물어봤다
-    assert p.proposal_status is S.PENDING
-    assert p.body == ""
-    assert not (tmp_path / "debug").exists()  # 등록 대기는 덤프하지 않는다
-
-
-def test_missing_selector_in_response_is_error(tmp_path, monkeypatch):
+def test_malformed_shell_response_is_error(tmp_path, monkeypatch):
+    """정상 심사정보 shell 자체가 없으면 ERROR — '등록 전'인지 구분할 근거가 없다."""
     p, _f = _run(
         _detail_page(), "<html><body>알 수 없는 응답</body></html>",
         tmp_path=tmp_path, monkeypatch=monkeypatch,
     )
     assert p.proposal_status is S.ERROR
-    assert "pre#prntSummary" in p.proposal_note
+    assert "정상 심사정보 응답이 아님" in p.proposal_note
     assert (tmp_path / "debug").exists()
 
 
@@ -300,57 +309,85 @@ def test_missing_selector_in_response_is_error(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "body",
+    "extra",
     [
         '<div id="summaryContentDiv"></div>',                     # 빈 폴백 컨테이너만
-        '<div id="summaryContentDiv">제안이유 및 주요내용 본문임</div>',  # 내용까지 있어도
+        '<div id="summaryContentDiv">본문임</div>',                # 내용까지 있어도
         '<div id="prntSummary"></div>',                           # pre 가 아닌 태그
         '<div id="prntSummary">현행법은 예치금 보호 의무를 규정하지 아니함</div>',
         '<span id="summaryContentDiv"><span id="prntSummary"></span></span>',
     ],
 )
-def test_billinfo_response_without_pre_prnt_summary_is_error(
-    tmp_path, monkeypatch, body
+def test_fallback_selectors_are_not_accepted_in_billinfo_response(
+    tmp_path, monkeypatch, extra
 ):
     """billInfo.do 응답에는 폴백 selector 를 인정하지 않는다.
 
-    #summaryContentDiv / #prntSummary 만 있고 pre#prntSummary 가 없다면 응답 구조가
-    바뀐 것이다. 폴백으로 받아 주면 구조 변경이 조용히 통과하고, 빈 폴백 컨테이너를
-    PENDING 으로 세면 고장이 '등록 대기'로 위장된다.
+    정상 shell 이 있어도 #summaryContentDiv / #prntSummary(비-pre) 는 본문으로 쓰지
+    않는다. 폴백으로 받아 주면 마크업 변경이 조용히 통과한다.
+    다만 이들만으로는 '섹션이 생성됐다'는 증거가 아니므로, 정상 shell 이 온전하면
+    등록 대기(PENDING)로 본다 — 라이브에서 등록 전 응답에는 섹션이 아예 없다.
     """
     p, _f = _run(
-        _detail_page(), f"<html><body>{body}</body></html>",
+        _detail_page(),
+        _billinfo_response(section=False).replace("</div></body>", f"{extra}</div></body>"),
         tmp_path=tmp_path, monkeypatch=monkeypatch,
     )
+    assert p.body == ""                       # 폴백 selector 를 본문으로 쓰지 않는다
+    assert p.proposal_status is S.PENDING     # 정상 shell + 섹션 없음
+
+
+def test_summary_section_without_pre_is_error(tmp_path, monkeypatch):
+    """#prntsummary-sect 는 있는데 pre#prntSummary 만 없으면 마크업 변경 = ERROR."""
+    body = _billinfo_response(section=False).replace(
+        "</div></body>",
+        '<div id="prntsummary-sect"><div class="summaryBody">본문</div></div></div></body>',
+    )
+    p, _f = _run(_detail_page(), body, tmp_path=tmp_path, monkeypatch=monkeypatch)
     assert p.proposal_status is S.ERROR, p.proposal_note
-    assert p.proposal_status is not S.PENDING
+    assert "#prntsummary-sect" in p.proposal_note
+
+
+def test_summary_marker_without_selector_is_error(tmp_path, monkeypatch):
+    """제안이유 표식은 있는데 예상 selector 가 없으면 마크업 변경 = ERROR."""
+    body = _billinfo_response(section=False).replace(
+        "</div></body>",
+        "<div><h4>제안이유 및 주요내용</h4><p>현행법은…</p></div></div></body>",
+    )
+    p, _f = _run(_detail_page(), body, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    assert p.proposal_status is S.ERROR, p.proposal_note
+    assert "표식은 있는데" in p.proposal_note
+
+
+def test_normal_shell_without_summary_section_is_pending(tmp_path, monkeypatch):
+    """라이브 확인(Action #13): 등록 전에는 섹션과 pre 가 **아예 생성되지 않는다**."""
+    p, f = _run(
+        _detail_page(), _billinfo_response(section=False),
+        tmp_path=tmp_path, monkeypatch=monkeypatch,
+    )
+    assert p.proposal_status is S.PENDING, p.proposal_note
+    assert len(f.posts) == 1
     assert p.body == ""
+    assert not (tmp_path / "debug").exists()   # 등록 대기는 덤프하지 않는다
 
 
 def test_empty_pre_prnt_summary_is_pending(tmp_path, monkeypatch):
-    """반대로 pre#prntSummary 가 존재하고 완전히 비어 있으면 PENDING 이다."""
-    for body in (
-        '<pre id="prntSummary"></pre>',
-        '<pre id="prntSummary">   </pre>',
-        '<pre id="prntSummary">\n\n</pre>',
-    ):
+    """pre#prntSummary 가 존재하고 완전히 비어 있어도 PENDING 이다."""
+    for text in ("", "   ", "\n\n"):
         p, f = _run(
-            _detail_page(), f"<html><body>{body}</body></html>",
+            _detail_page(), _billinfo_response(text),
             tmp_path=tmp_path, monkeypatch=monkeypatch,
         )
-        assert p.proposal_status is S.PENDING, (body, p.proposal_note)
+        assert p.proposal_status is S.PENDING, (repr(text), p.proposal_note)
         assert len(f.posts) == 1
         assert p.body == ""
 
 
-def test_short_notice_in_pre_is_error_not_pending(tmp_path, monkeypatch):
-    """짧은 안내 문구는 실제 PENDING fixture 로 문구를 확인하기 전까지 ERROR 다.
-
-    정규식으로 '등록 예정' 류를 추정하면 구조 변경을 '등록 대기'로 위장하게 된다.
-    """
+def test_short_leftover_text_in_pre_is_error_not_pending(tmp_path, monkeypatch):
+    """pre 에 짧은 잔여 텍스트가 있으면 뭘 받은 건지 알 수 없다 → ERROR."""
     for notice in ("등록 예정입니다.", "준비 중입니다", "자료가 없습니다"):
         p, _f = _run(
-            _detail_page(), f'<html><body><pre id="prntSummary">{notice}</pre></body></html>',
+            _detail_page(), _billinfo_response(notice),
             tmp_path=tmp_path, monkeypatch=monkeypatch,
         )
         assert p.proposal_status is S.ERROR, (notice, p.proposal_note)

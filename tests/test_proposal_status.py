@@ -108,8 +108,12 @@ def test_available_when_proposal_reason_is_present():
 # --- PENDING ---
 
 
-def test_pending_when_billinfo_responds_with_empty_selector(tmp_path, monkeypatch):
-    """확정 endpoint 가 2xx 정상 HTML + pre#prntSummary 를 줬는데 비어 있다 = 등록 대기."""
+def test_pending_when_billinfo_has_no_summary_section(tmp_path, monkeypatch):
+    """라이브 확인(Action #13): 등록 전에는 제안이유 섹션이 **아예 생성되지 않는다**.
+
+    HTTP 200 정상 심사정보 HTML 이고 의안번호·제안일자·제안자는 정상인데
+    #prntsummary-sect 와 pre#prntSummary 만 없다 = 등록 대기.
+    """
     p, f = _run(
         _fx("bill_detail_page.html"), _fx("billinfo_pending.html"),
         tmp_path=tmp_path, monkeypatch=monkeypatch, bill_id="PRC_SYNTH_0001",
@@ -117,7 +121,7 @@ def test_pending_when_billinfo_responds_with_empty_selector(tmp_path, monkeypatc
     assert len(f.posts) == 1        # 확정 endpoint 에 실제로 물어봤다
     assert p.proposal_status is S.PENDING
     assert p.body == ""
-    assert "pre#prntSummary" in p.proposal_note
+    assert "제안이유 섹션이 아직 없음" in p.proposal_note
     # 등록 대기는 진단 덤프를 남기지 않는다(장애가 아니므로 잡음만 된다)
     assert not (tmp_path / "debug").exists()
 
@@ -140,14 +144,22 @@ def test_empty_initial_html_alone_is_never_pending():
 # --- ERROR ---
 
 
-def test_error_when_response_selector_is_missing(tmp_path, monkeypatch):
-    """응답에 pre#prntSummary 가 아예 없으면 ERROR. 등록 대기로 위장하면 고장이 묻힌다."""
+@pytest.mark.parametrize(
+    "fixture,marker",
+    [
+        ("billinfo_section_without_pre.html", "#prntsummary-sect"),
+        ("billinfo_marker_without_selector.html", "표식은 있는데"),
+        ("billinfo_malformed_shell.html", "정상 심사정보 응답이 아님"),
+    ],
+)
+def test_error_when_billinfo_structure_changed(tmp_path, monkeypatch, fixture, marker):
+    """구조가 바뀐 응답은 ERROR. 등록 대기로 위장하면 고장이 묻힌다."""
     p, _f = _run(
-        _fx("bill_detail_page.html"), _fx("billinfo_selector_missing.html"),
+        _fx("bill_detail_page.html"), _fx(fixture),
         tmp_path=tmp_path, monkeypatch=monkeypatch, bill_id="PRC_SYNTH_0001",
     )
-    assert p.proposal_status is S.ERROR
-    assert "pre#prntSummary" in p.proposal_note
+    assert p.proposal_status is S.ERROR, p.proposal_note
+    assert marker in p.proposal_note
     assert (tmp_path / "debug").exists()      # 진단 덤프는 남긴다
 
 
@@ -233,7 +245,7 @@ def test_error_when_follow_up_response_has_no_container(tmp_path, monkeypatch):
 def test_todays_date_alone_does_not_make_it_pending(tmp_path, monkeypatch):
     """제안일이 오늘이어도, 컨테이너가 없으면 ERROR 다(정황은 근거가 아니다)."""
     monkeypatch.chdir(tmp_path)
-    f = _Fetcher(_fx("bill_detail_page.html"), _fx("billinfo_selector_missing.html"))
+    f = _Fetcher(_fx("bill_detail_page.html"), _fx("billinfo_malformed_shell.html"))
     p = _post("PRC_SYNTH_0001")
     p.date = "2026-08-06"          # 오늘
     _scraper(f).enrich(p)

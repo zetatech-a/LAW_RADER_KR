@@ -33,7 +33,10 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 >          header  : X-CSRF-TOKEN = meta[name="_csrf"] 의 content
 >                    Referer     = 위 상세 URL
 >          쿠키    : 상세 GET 과 같은 requests.Session
->          응답    : HTML — 본문은 pre#prntSummary
+>          응답    : HTML — 제안이유가 등록돼 있으면 #prntsummary-sect 안의
+>                    pre#prntSummary 에 본문이 있다. **등록 전이면 그 섹션이 아예
+>                    생성되지 않는다**(응답 자체는 HTTP 200 정상 심사정보 HTML 이고
+>                    의안번호·제안일자·제안자는 정상).
 > ```
 >
 > `form#form` 은 **payload 원천일 뿐**입니다. 그 폼의 빈 `action` 과 기본 GET 을 그대로 replay 하면 안 됩니다 — JavaScript 가 폼을 serialize 한 뒤 별도 endpoint 로 POST 하기 때문입니다(replay 했다가 `billId` 중복으로 HTTP 400 을 받았습니다).
@@ -49,11 +52,20 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 | 상태 | 뜻 | 메일 표시 | 집계 |
 |---|---|---|---|
 | `AVAILABLE` | 제안이유를 확보함 | AI 3줄 요약 (실패 시 발췌) | available |
-| `PENDING` | **정상 응답인데 원문이 아직 없음** = 등록 대기 | `제안이유 및 주요내용 · 등록 대기` + "의안정보시스템에 제안이유 및 주요내용이 아직 공개되지 않았습니다." | pending (**실패 아님**) |
-| `ERROR` | 네트워크·HTTP 오류, 예상하지 못한 응답, 셀렉터/endpoint 부재 | 제목·링크만 | failed |
+| `PENDING` | **정상 billInfo 응답인데 제안이유 섹션이 아직 없거나 비어 있음** = 등록 대기 | `제안이유 및 주요내용 · 등록 대기` + "의안정보시스템에 제안이유 및 주요내용이 아직 공개되지 않았습니다." | pending (**실패 아님**) |
+| `ERROR` | 네트워크·HTTP 오류, 마크업 변경, 정상 응답 구조 자체가 아님 | 제목·링크만 | failed |
 | `UNKNOWN` | 아직 판정 전(기본값) | — | failed |
 
-`PENDING` 은 **알려진 컨테이너가 정상 응답 안에 있는데 그 내용이 비어 있을 때만** 확정합니다. '소관위 미확정', '문서 없음', '제안일이 오늘' 같은 정황은 등록 여부와 직접 관계가 없으므로 근거로 쓰지 않습니다. 컨테이너 자체가 없으면 등록 대기인지 구조 변경인지 구분할 수 없으므로 `ERROR` 입니다 — 여기서 `PENDING` 으로 넘기면 고장이 '정상'으로 위장됩니다.
+`PENDING` 은 **정상 심사정보 뼈대(`#tab_billInfo_sect`·`form#billInfoForm`·`#stage_list`·`#rcp_list`·`#insc-rcp-row`)가 온전한데 제안이유 섹션만 없거나 비어 있을 때** 확정합니다. 라이브 확인 결과 등록 전에는 `#prntsummary-sect` 와 `pre#prntSummary` 가 아예 생성되지 않기 때문입니다.
+
+다음은 모두 `ERROR` 입니다 — 등록 대기로 넘기면 고장이 '정상'으로 위장됩니다.
+
+- `#prntsummary-sect` 는 있는데 `pre#prntSummary` 만 없음 (마크업 변경)
+- 응답에 `제안이유 및 주요내용` 표식은 있는데 예상 selector 가 없음 (마크업 변경)
+- 정상 심사정보 뼈대 자체가 없음 (기대한 응답이 아님)
+- `pre#prntSummary` 에 20자 미만의 잔여 텍스트만 있음
+
+'소관위 미확정', '문서 없음', '제안일이 오늘' 같은 정황은 등록 여부와 직접 관계가 없으므로 근거로 쓰지 않습니다.
 
 `PENDING` 의안은 Gemini 배치 요약 대상에서 제외되고(요약할 원문이 없음), `available=0` 이어도 `pending>0` 이면 전면 실패 ERROR 를 남기지 않습니다.
 

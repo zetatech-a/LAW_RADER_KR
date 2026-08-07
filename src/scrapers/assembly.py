@@ -61,7 +61,9 @@ _LEGACY_DETAIL_PATHS = frozenset(
 #        payload : 상세 HTML form#form 의 named hidden input 전체(URL-encoded)
 #        header  : X-CSRF-TOKEN = meta[name="_csrf"], Referer = 상세 URL
 #        쿠키    : 같은 세션(Fetcher 가 requests.Session 을 공유한다)
-#        응답    : HTML, 본문은 pre#prntSummary
+#        응답    : HTML. 제안이유가 등록돼 있으면 #prntsummary-sect 안의
+#                  pre#prntSummary 에 본문이 있고, 등록 전이면 그 섹션이
+#                  **아예 생성되지 않는다**(응답 자체는 정상).
 #
 # form#form 은 payload '원천'일 뿐이다 — 그 폼의 빈 action·기본 GET 을 replay 하면
 # 안 된다. JavaScript 가 폼을 serialize 한 뒤 별도 endpoint 로 POST 한다.
@@ -72,6 +74,25 @@ _CSRF_HEADER = "X-CSRF-TOKEN"
 
 # billInfo.do 응답에서 인정하는 **유일한** 본문 selector(확정 계약, fail-closed).
 _BILLINFO_SUMMARY_SELECTOR = "pre#prntSummary"
+
+# 제안이유가 등록되면 생기는 섹션. 라이브 확인(Action #13): 등록 전에는 이 섹션도
+# pre#prntSummary 도 **아예 생성되지 않는다**. 섹션은 있는데 pre 만 없다면 그건
+# 등록 대기가 아니라 구조 변경이다.
+_SUMMARY_SECTION_SELECTOR = "#prntsummary-sect"
+
+# 정상 심사정보(billInfo.do) 응답의 뼈대. 제안이유 등록 여부와 무관하게 항상 있다.
+# 이게 다 있으면 '응답 자체는 정상'이라는 근거가 된다 — 등록 대기 판정의 전제.
+_BILLINFO_SHELL_SELECTORS = (
+    "#tab_billInfo_sect",
+    "form#billInfoForm",
+    "#stage_list",
+    "#rcp_list",
+    "#insc-rcp-row",
+)
+
+# 제안이유가 응답에 실렸다는 표식. 이 문구가 있는데 예상 selector 가 없다면 마크업이
+# 바뀐 것이므로 ERROR 다(등록 대기로 넘기면 고장이 묻힌다).
+_SUMMARY_MARKER = "제안이유 및 주요내용"
 
 # 초기 상세 GET 에만 쓰는 selector 목록. 구형(inline) 페이지 지원용 폴백을 포함한다.
 _SUMMARY_SELECTORS = (_BILLINFO_SUMMARY_SELECTOR, "#prntSummary", "#summaryContentDiv")
@@ -177,27 +198,62 @@ def _probe_summary(soup: BeautifulSoup) -> tuple[SummaryProbe, str]:
     return best, best_text
 
 
-def _probe_billinfo(soup: BeautifulSoup) -> tuple[SummaryProbe, str]:
-    """billInfo.do 응답 전용 판정 — **확정된 selector 하나만** 인정한다(fail-closed).
+def _probe_billinfo(soup: BeautifulSoup) -> tuple[SummaryProbe, str, str]:
+    """billInfo.do 응답 판정 — (판정, 본문, 사유) 를 돌려준다. fail-closed.
 
-    초기 상세 GET 은 구형 페이지 지원을 위해 폴백 selector 를 두지만, 확정된 계약을
-    가진 이 응답에는 폴백을 두지 않는다. #summaryContentDiv 나 #prntSummary 만 있고
-    pre#prntSummary 가 없다면 응답 구조가 바뀐 것이므로 ERROR 여야 한다 — 폴백으로
-    받아 주면 구조 변경이 조용히 통과한다.
+    라이브 확인(Action #13)으로 드러난 실제 계약:
+    **제안이유가 등록되기 전에는 pre#prntSummary 도 #prntsummary-sect 도 아예 생성되지
+    않는다.** 그 응답도 HTTP 200 정상 심사정보 HTML 이고 의안번호·제안일자·제안자는
+    정상적으로 들어 있다. 그래서 '알려진 컨테이너가 있는데 비어 있을 때만 PENDING'
+    이라는 이전 가정은 실제와 달랐다(등록 대기가 전부 ERROR 로 잡혔다).
 
-    PENDING 은 pre#prntSummary 가 **존재하고 완전히 비어 있을 때만**이다. 짧은 안내
-    문구는 실제 PENDING fixture 로 정확한 문구를 확인하기 전까지 ERROR 로 둔다 —
-    정규식으로 추정하면 구조 변경을 '등록 대기'로 위장하게 된다.
+    판정:
+      pre#prntSummary 있음 + 20자 이상            → FOUND    (AVAILABLE)
+      pre#prntSummary 있음 + 완전히 비어 있음      → EMPTY    (PENDING)
+      pre#prntSummary 있음 + 짧은 잔여 텍스트      → UNEXPECTED (ERROR)
+      pre 없음 + #prntsummary-sect 있음            → MISSING  (ERROR, 구조 변경)
+      pre 없음 + 제안이유 marker 있음              → MISSING  (ERROR, 마크업 변경)
+      pre 없음 + 정상 shell 전부 있음 + 위 둘 다 없음 → EMPTY (PENDING, 등록 전)
+      정상 shell 자체가 없음                        → MISSING  (ERROR)
+
+    제안일자·문서 유무·소관위원회 상태 같은 정황은 보지 않는다 — 등록 여부와 직접
+    관계가 없고, 그런 정황으로 PENDING 을 추정하면 고장을 '등록 대기'로 위장하게 된다.
     """
     el = soup.select_one(_BILLINFO_SUMMARY_SELECTOR)
-    if el is None:
-        return SummaryProbe.MISSING, ""
-    text = clean_text(el.get_text("\n"))
-    if len(text) >= _MIN_SUMMARY_CHARS:
-        return SummaryProbe.FOUND, text
-    if not text:
-        return SummaryProbe.EMPTY, ""
-    return SummaryProbe.UNEXPECTED, text
+    if el is not None:
+        text = clean_text(el.get_text("\n"))
+        if len(text) >= _MIN_SUMMARY_CHARS:
+            return SummaryProbe.FOUND, text, ""
+        if not text:
+            return SummaryProbe.EMPTY, "", ""
+        return SummaryProbe.UNEXPECTED, text, "본문이 너무 짧음"
+
+    # pre#prntSummary 가 없다. 등록 전인지 구조가 바뀐 것인지 가려야 한다.
+    if soup.select_one(_SUMMARY_SECTION_SELECTOR) is not None:
+        return (
+            SummaryProbe.MISSING,
+            "",
+            f"{_SUMMARY_SECTION_SELECTOR} 는 있는데 "
+            f"{_BILLINFO_SUMMARY_SELECTOR} 가 없음(마크업 변경)",
+        )
+    if _SUMMARY_MARKER in soup.get_text(" "):
+        return (
+            SummaryProbe.MISSING,
+            "",
+            f"응답에 '{_SUMMARY_MARKER}' 표식은 있는데 "
+            f"{_BILLINFO_SUMMARY_SELECTOR} 가 없음(마크업 변경)",
+        )
+
+    missing_shell = [s for s in _BILLINFO_SHELL_SELECTORS if soup.select_one(s) is None]
+    if missing_shell:
+        return (
+            SummaryProbe.MISSING,
+            "",
+            f"정상 심사정보 응답이 아님(없는 구조: {', '.join(missing_shell)})",
+        )
+
+    # 정상 shell + 제안이유 섹션 자체가 없음 = 아직 등록되지 않음.
+    return SummaryProbe.EMPTY, "", ""
 
 
 def _extract_summary(soup: BeautifulSoup) -> str:
@@ -461,30 +517,26 @@ class AssemblyBillScraper(BaseScraper):
             self._fail(post, "billInfo.do 가 '의안 정보 없음'을 응답", body_html)
             return
 
-        # 4) 확정된 selector(pre#prntSummary)만으로 판정한다(fail-closed).
-        probe, text = _probe_billinfo(BeautifulSoup(body_html, "lxml"))
+        # 4) 확정된 계약대로 판정한다(fail-closed).
+        probe, text, reason = _probe_billinfo(BeautifulSoup(body_html, "lxml"))
         if probe is SummaryProbe.FOUND:
             post.body = text
             self._set_status(post, ProposalContentStatus.AVAILABLE, "billInfo.do 응답")
             return
         if probe is SummaryProbe.EMPTY:
-            # 확정된 endpoint 가 2xx 정상 HTML 을 줬고 알려진 selector 도 있는데
-            # 내용만 비어 있다 = 원문이 아직 등록되지 않음.
+            # 정상 심사정보 응답인데 제안이유 섹션이 아직 없거나 비어 있다
+            # = 원문이 아직 등록되지 않음(장애가 아니다).
             self._set_status(
                 post,
                 ProposalContentStatus.PENDING,
-                "billInfo.do 응답의 pre#prntSummary 가 비어 있음",
+                "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
             )
             return
 
-        # selector 자체가 없거나 읽을 수 없는 내용 → 구조 변경. PENDING 으로 넘기면
-        # 고장이 '정상'으로 위장된다.
-        note = (
-            f"billInfo.do 응답이 예상과 다름: {text[:80]}"
-            if probe is SummaryProbe.UNEXPECTED
-            else f"billInfo.do 응답에 {_BILLINFO_SUMMARY_SELECTOR} 가 없음"
-            "(selector/계약 확인 필요 — 폴백 selector 는 인정하지 않는다)"
-        )
+        # 구조가 바뀌었거나 읽을 수 없는 응답 → PENDING 으로 넘기면 고장이 묻힌다.
+        note = f"billInfo.do 응답이 예상과 다름: {reason}"
+        if probe is SummaryProbe.UNEXPECTED and text:
+            note += f" ({text[:80]})"
         self._fail(post, note, body_html)
 
     def _fail(self, post: Post, note: str, dump: str) -> None:
