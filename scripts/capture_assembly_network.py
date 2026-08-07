@@ -202,15 +202,50 @@ def _scrub_url(url: str) -> str:
         parts = urlparse(url)
     except ValueError:
         return REDACTED
+    # 경로 파라미터(;jsessionid=...)를 잊으면 안 된다. 쿠키가 막힌 클라이언트에 대고
+    # 서블릿 컨테이너가 세션 ID 를 이 자리에 붙여 주는데(likms 가 그 형태다),
+    # urlparse 는 그것을 path 가 아니라 params 로 떼어 놓는다. path 만 정화하면
+    # 세션 ID 가 그대로 살아남는다.
+    params = _scrub_path_params(parts.params)
     if not parts.query:
-        return _scrub_text(url)
+        return urlunparse(
+            parts._replace(path=_scrub_text(parts.path), params=params)
+        )
     pairs = [
         (k, REDACTED if _is_secret_name(k) else _scrub_text(v))
         for k, v in parse_qsl(parts.query, keep_blank_values=True)
     ]
     return urlunparse(
-        parts._replace(path=_scrub_text(parts.path), query=urlencode(pairs))
+        parts._replace(
+            path=_scrub_text(parts.path), params=params, query=urlencode(pairs)
+        )
     )
+
+
+def _scrub_path_params(params: str) -> str:
+    """경로 파라미터(;a=b;c=d)에서 비밀 이름의 값만 지운다. 이름은 남긴다."""
+    if not params:
+        return ""
+    out = []
+    for chunk in params.split(";"):
+        if "=" not in chunk:
+            out.append(_scrub_text(chunk))
+            continue
+        name, _, value = chunk.partition("=")
+        out.append(
+            f"{name}={REDACTED if _is_secret_name(name) else _scrub_text(value)}"
+        )
+    return ";".join(out)
+
+
+def _manifest_url(url: str) -> str:
+    """manifest·표준출력에 남기는 URL. **아티팩트로 나가는 URL 은 전부 이걸 거친다.**
+
+    requests_log 의 URL 은 처음부터 _scrub_url 을 거쳤는데 requested_url·final_url 만
+    원본이었다. 입력 URL(워크플로 입력)에 비밀 쿼리가 있거나 redirect 가 세션값이 붙은
+    주소로 끌고 가면 그 값이 그대로 실린다. 규칙에 이름을 붙여 빠뜨리지 않게 한다.
+    """
+    return _scrub_url(url)
 
 
 def _scrub_post_data(raw: str | None) -> dict:
@@ -229,13 +264,14 @@ def _scrub_post_data(raw: str | None) -> dict:
         except (json.JSONDecodeError, TypeError):
             return {"present": True, "kind": "raw", "length": len(raw)}
         if isinstance(parsed, dict):
+            # 최상위 키만 보면 안 된다. {"payload": {"csrfToken": "<UUID>"}} 처럼
+            # 비밀이 아닌 키 아래에 토큰이 들어 있으면 값이 통째로 복사되어
+            # manifest 와 정화 HAR 양쪽에 실린다. 남기는 값은 재귀 정화를 거친다.
             return {
                 "present": True,
                 "kind": "json",
                 "keys": sorted(parsed),
-                "masked": {
-                    k: (REDACTED if _is_secret_name(k) else parsed[k]) for k in parsed
-                },
+                "masked": _scrub_json_value(parsed),
             }
         return {"present": True, "kind": "json", "keys": [], "length": len(raw)}
 
@@ -368,7 +404,7 @@ def capture(
     responses: list[dict] = []
 
     result: dict = {
-        "requested_url": url,
+        "requested_url": _manifest_url(url),
         "final_url": "",
         "tab_found": False,
         "tab_clicked": False,
@@ -444,14 +480,15 @@ def _capture_with_browser(
             ),
         )
 
-        print(f"GET(browser) {url}")
+        # 표준출력도 워크플로가 report 파일로 받아 업로드하므로 정화본을 찍는다.
+        print(f"GET(browser) {_manifest_url(url)}")
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         except PWTimeout as e:
             result["errors"].append(f"goto timeout: {e}")
 
-        result["final_url"] = page.url
-        print(f"  → 최종 URL {page.url}")
+        result["final_url"] = _manifest_url(page.url)
+        print(f"  → 최종 URL {result['final_url']}")
 
         # 심사정보 탭 확인 → 필요하면 클릭
         try:

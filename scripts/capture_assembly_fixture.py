@@ -36,7 +36,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -135,6 +135,53 @@ _VALUE_PATTERNS = (
 )
 
 
+def _sanitize_url(url: str) -> str:
+    """meta.json 에 기록하는 URL. 쿼리·경로 파라미터의 비밀 '값'만 지운다.
+
+    meta.json 은 **저장소에 커밋된다.** HTML 은 정화하면서 URL 은 원본으로 남기면,
+    redirect 가 세션값이 붙은 주소로 끌고 갔을 때 그 값이 영구히 이력에 박힌다.
+    쿠키가 막힌 클라이언트에는 서블릿 컨테이너가 `;jsessionid=...` 를 경로에 붙이므로
+    (likms 가 그 형태다) 쿼리뿐 아니라 경로 파라미터도 함께 본다.
+
+    이름과 공개 식별자(billId 등)는 남긴다 — fixture 가 어느 의안의 것인지 알아야 한다.
+    """
+    text = url or ""
+    try:
+        parts = urlparse(text)
+    except ValueError:
+        return _PLACEHOLDER
+
+    def _values(raw: str, sep: str) -> str:
+        out = []
+        for chunk in raw.split(sep):
+            if not chunk:
+                continue
+            name, eq, value = chunk.partition("=")
+            if not eq:
+                out.append(_scrub_value(chunk))
+                continue
+            secret = any(h in name.lower() for h in _SECRET_NAME_HINTS)
+            out.append(f"{name}={_PLACEHOLDER if secret else _scrub_value(value)}")
+        return sep.join(out)
+
+    # 값 패턴은 **조각마다** 적용한다. 조립이 끝난 URL 에 다시 돌리면 JSESSIONID
+    # 패턴의 [^;"'\s]+ 가 '?' 와 '&' 까지 삼켜 뒤따르는 쿼리가 통째로 사라진다.
+    return urlunparse(
+        parts._replace(
+            path=_scrub_value(parts.path),
+            params=_values(parts.params, ";"),
+            query=_values(parts.query, "&"),
+        )
+    )
+
+
+def _scrub_value(text: str) -> str:
+    out = text or ""
+    for pat in _VALUE_PATTERNS:
+        out = pat.sub(_PLACEHOLDER, out)
+    return out
+
+
 def _sanitize(html: str) -> str:
     """세션값·토큰·개인정보를 지운다. 구조(태그·필드명)는 그대로 둔다.
 
@@ -201,18 +248,23 @@ def main(argv=None) -> int:
     print(f"기대 상태: {args.expect}")
     print(f"GET {url}")
     resp = fetcher.get(url, referer=src.list_url)
-    print(f"  → HTTP {resp.status_code}, 최종 URL {resp.url}")
+    print(f"  → HTTP {resp.status_code}, 최종 URL {_sanitize_url(resp.url)}")
     if resp.history:
         for h in resp.history:
-            print(f"  ↪ redirect {h.status_code} {h.url}")
+            print(f"  ↪ redirect {h.status_code} {_sanitize_url(h.url)}")
     get_html = fetcher.text(resp)
     soup = BeautifulSoup(get_html, "lxml")
 
+    # meta.json 은 저장소에 커밋된다 — 기록하는 URL 은 반드시 정화본이다.
+    # (resp.url 원본은 아래 후속 요청·재생에 그대로 쓴다. 기록만 정화한다.)
     meta = {
-        "requested_url": url,
-        "final_url": resp.url,
+        "requested_url": _sanitize_url(url),
+        "final_url": _sanitize_url(resp.url),
         "http_status": resp.status_code,
-        "redirects": [{"status": h.status_code, "url": h.url} for h in resp.history],
+        "redirects": [
+            {"status": h.status_code, "url": _sanitize_url(h.url)}
+            for h in resp.history
+        ],
         "summary_in_get_html": bool(_extract_summary(soup)),
         # 아래 셋은 후속 요청을 실제로 보냈을 때만 갱신된다.
         "follow_up_request_made": False,

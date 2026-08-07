@@ -269,3 +269,63 @@ def test_captured_fixtures_leave_no_skips(monkeypatch, tmp_path):
     )
     assert out.returncode == 0, out.stdout + out.stderr
     assert "skipped" not in out.stdout, out.stdout
+
+
+# --- meta.json 에 기록하는 URL 정화 ---
+#
+# meta.json 은 **저장소에 커밋된다.** HTML 은 정화하면서 URL 을 원본으로 남기면,
+# redirect 가 세션값이 붙은 주소로 끌고 갔을 때 그 값이 영구히 이력에 박힌다.
+
+
+def test_sanitize_url_redacts_query_secrets():
+    out = cap._sanitize_url(
+        "https://likms.assembly.go.kr/bill/x.do?billId=PRC_A1&authToken=uuid-tok-value"
+    )
+    assert "uuid-tok-value" not in out
+    assert "authToken=" in out              # 이름은 남는다
+    assert "billId=PRC_A1" in out           # 공개 식별자는 값까지
+
+
+def test_sanitize_url_redacts_path_parameter_session_id():
+    """쿠키가 막히면 서블릿 컨테이너가 ;jsessionid=... 를 경로에 붙인다."""
+    out = cap._sanitize_url(
+        "https://likms.assembly.go.kr/bill/x.do;jsessionid=ABC999XYZ?billId=PRC_A1"
+    )
+    assert "ABC999XYZ" not in out
+    assert "jsessionid=" in out
+    assert "billId=PRC_A1" in out
+
+
+def test_sanitize_url_does_not_swallow_the_query():
+    """회귀: 조립이 끝난 URL 에 값 패턴을 다시 돌리면 JSESSIONID 패턴의 [^;"'\\s]+ 가
+    '?' 와 '&' 까지 삼켜 뒤따르는 쿼리가 통째로 사라진다. 조각마다 적용해야 한다."""
+    out = cap._sanitize_url(
+        "https://likms.assembly.go.kr/bill/x.do"
+        ";jsessionid=ABC999?billId=PRC_A1&ageFrom=22"
+    )
+    assert "billId=PRC_A1" in out
+    assert "ageFrom=22" in out
+    assert "ABC999" not in out
+
+
+def test_sanitize_url_leaves_ordinary_detail_urls_untouched():
+    url = (
+        "https://likms.assembly.go.kr/bill/bi/billDetailPage.do"
+        "?billId=PRC_O2O6N0J7J3I0I1G5F0G5N0O0N1N3L2"
+    )
+    assert cap._sanitize_url(url) == url
+
+
+def test_committed_fixture_meta_urls_are_already_clean():
+    """저장소에 있는 fixture meta.json 의 URL 이 정화 규칙을 이미 만족해야 한다."""
+    root = Path(__file__).parent / "fixtures" / "assembly"
+    checked = 0
+    for meta_path in root.glob("*/meta.json"):
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        for key in ("requested_url", "final_url"):
+            if meta.get(key):
+                assert cap._sanitize_url(meta[key]) == meta[key], (meta_path, key)
+                checked += 1
+        for hop in meta.get("redirects") or []:
+            assert cap._sanitize_url(hop["url"]) == hop["url"], meta_path
+    assert checked > 0          # fixture 가 사라지면 이 테스트가 조용해지지 않도록

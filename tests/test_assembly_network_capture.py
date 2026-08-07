@@ -18,6 +18,7 @@ from scripts.capture_assembly_network import (
     REDACTED,
     _is_secret_name,
     _js_report,
+    _manifest_url,
     _markers_in,
     _sanitize_har,
     _scrub_headers,
@@ -495,3 +496,131 @@ def test_raw_har_is_removed_on_success(tmp_path, monkeypatch, fake_playwright):
     monkeypatch.setattr(cap, "_capture_with_browser", _ok)
     cap.capture("https://likms.assembly.go.kr/x", tmp_path, 1000)
     assert not seen["har_raw"].parent.exists()
+
+
+# --- 요청 본문: 중첩된 비밀도 지운다 ---
+
+
+def test_scrub_post_data_redacts_nested_secrets():
+    """회귀: 비밀이 아닌 최상위 키 아래의 토큰이 통째로 복사됐다.
+
+    manifest 와 정화 HAR 이 둘 다 _scrub_post_data 를 쓰므로, 중첩 UUID·Base64
+    자격증명이 업로드되는 tests/fixtures/ 아티팩트까지 그대로 흘러갔다.
+    """
+    raw = json.dumps(
+        {
+            "billId": "PRC_A1",
+            "payload": {
+                "csrfToken": "3f2a91c4-8b7d-4e16-9a02-5c6d1e8f0b34",
+                "tabNm": "billInfo",
+                "nested": [{"sessionId": "SVNTRVNTSU9O", "billNo": "2200123"}],
+            },
+        },
+        ensure_ascii=False,
+    )
+    out = _scrub_post_data(raw)
+    blob = json.dumps(out, ensure_ascii=False)
+
+    assert "3f2a91c4-8b7d-4e16" not in blob
+    assert "SVNTRVNTSU9O" not in blob
+    # 구조·이름·공개 값은 그대로 — 계약 확인에 필요하다
+    assert out["keys"] == ["billId", "payload"]
+    assert out["masked"]["billId"] == "PRC_A1"
+    assert out["masked"]["payload"]["csrfToken"] == REDACTED
+    assert out["masked"]["payload"]["tabNm"] == "billInfo"
+    assert out["masked"]["payload"]["nested"][0]["billNo"] == "2200123"
+
+
+def test_scrub_post_data_top_level_secret_still_masked():
+    out = _scrub_post_data('{"billId":"PRC_A1","sessionKey":"zzz"}')
+    assert out["masked"]["sessionKey"] == REDACTED
+    assert out["masked"]["billId"] == "PRC_A1"
+
+
+def test_sanitize_har_redacts_nested_secrets_in_post_data():
+    """HAR 의 postData 도 같은 정화를 거친다."""
+    har = _har()
+    har["log"]["entries"][0]["request"]["postData"] = {
+        "text": json.dumps({"payload": {"authToken": "bearer-aaa-bbb-ccc"}}),
+        "params": [],
+    }
+    out = json.dumps(_sanitize_har(har), ensure_ascii=False)
+    assert "bearer-aaa-bbb-ccc" not in out
+    assert "authToken" in out
+
+
+# --- manifest 에 남는 URL 은 전부 정화된다 ---
+
+
+_SECRET_URL = (
+    "https://likms.assembly.go.kr/bill/bi/billDetailPage.do"
+    "?billId=PRC_A1&jsessionid=ABCD1234EFGH&authToken=aaaa-bbbb-cccc"
+)
+
+
+def test_manifest_url_redacts_values_and_keeps_names():
+    out = _manifest_url(_SECRET_URL)
+    assert "ABCD1234EFGH" not in out
+    assert "aaaa-bbbb-cccc" not in out
+    assert "jsessionid=" in out and "authToken=" in out   # 키 이름은 남는다
+    assert "billId=PRC_A1" in out                          # 공개 식별자는 값까지
+
+
+def test_capture_manifest_does_not_store_the_raw_requested_url(
+    tmp_path, monkeypatch, fake_playwright
+):
+    """회귀: 입력 URL(워크플로 입력)의 비밀 쿼리가 manifest 에 원본으로 실렸다."""
+    import scripts.capture_assembly_network as cap
+
+    monkeypatch.setattr(cap, "_capture_with_browser", lambda *a, **k: [])
+    cap.capture(_SECRET_URL, tmp_path, 1000)
+
+    manifest = (tmp_path / "assembly_xhr_manifest.json").read_text(encoding="utf-8")
+    assert "ABCD1234EFGH" not in manifest
+    assert "aaaa-bbbb-cccc" not in manifest
+    assert "PRC_A1" in manifest            # 진단에 필요한 식별자는 남는다
+
+
+def test_final_url_goes_through_the_same_rule():
+    """redirect 로 세션값이 붙은 주소에 끌려가도 manifest 에는 정화본만 남는다."""
+    redirected = (
+        "https://likms.assembly.go.kr/bill/bi/billDetailPage.do"
+        ";jsessionid=ZZZZ9999?billId=PRC_A1&sessionKey=leaked-token-value"
+    )
+    out = _manifest_url(redirected)
+    assert "leaked-token-value" not in out
+    assert "ZZZZ9999" not in out
+
+
+def test_scrub_url_redacts_path_parameter_session_id():
+    """경로 파라미터(;jsessionid=...)의 세션 ID 도 지운다.
+
+    쿠키가 막힌 클라이언트에 대고 서블릿 컨테이너가 세션 ID 를 URL 경로에 붙인다
+    (likms 가 그 형태다). urlparse 는 그것을 path 가 아니라 params 로 떼어 놓기 때문에
+    path 만 정화하면 살아남는다.
+    """
+    url = (
+        "https://likms.assembly.go.kr/bill/bi/billDetailPage.do"
+        ";jsessionid=ZZZZ9999AAAA?billId=PRC_A1"
+    )
+    out = _scrub_url(url)
+    assert "ZZZZ9999AAAA" not in out
+    assert "jsessionid=" in out           # 이름은 남는다
+    assert "billId=PRC_A1" in out
+
+
+def test_scrub_url_redacts_path_parameter_without_query():
+    url = (
+        "https://likms.assembly.go.kr/bill/bi/billDetailPage.do"
+        ";jsessionid=ZZZZ9999AAAA"
+    )
+    out = _scrub_url(url)
+    assert "ZZZZ9999AAAA" not in out
+    assert "jsessionid=" in out
+
+
+def test_scrub_url_keeps_public_path_parameters():
+    url = "https://likms.assembly.go.kr/bill/x.do;billId=PRC_A1?ageFrom=22"
+    out = _scrub_url(url)
+    assert "billId=PRC_A1" in out
+    assert "ageFrom=22" in out
