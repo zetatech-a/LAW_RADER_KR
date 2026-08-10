@@ -369,6 +369,11 @@ def _sanitize_har(har: dict) -> dict:
         req = entry.get("request") or {}
         res = entry.get("response") or {}
         req["url"] = _scrub_url(req.get("url", ""))
+        # HAR 은 redirect 목적지를 Location 헤더와 **별도로** response.redirectURL 에
+        # 한 번 더 담는다. 요청 URL 과 헤더만 정화하면 이 필드로 자격증명이 그대로
+        # 빠져나간다(정화 HAR 은 7일치 아티팩트로 올라간다).
+        if res.get("redirectURL"):
+            res["redirectURL"] = _scrub_url(res["redirectURL"])
         for holder in (req, res):
             holder["cookies"] = []          # 쿠키는 통째로 버린다
             holder["headers"] = [

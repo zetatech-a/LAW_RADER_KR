@@ -828,3 +828,39 @@ def test_capture_manifest_does_not_leak_urls_through_errors(
     manifest = (tmp_path / "assembly_xhr_manifest.json").read_text(encoding="utf-8")
     assert _UUID_TOKEN not in manifest
     assert "Timeout 30000ms exceeded" in manifest      # 진단은 남는다
+
+
+def test_sanitize_har_redacts_credentials_in_redirect_url():
+    """HAR 은 redirect 목적지를 Location 헤더와 별도로 response.redirectURL 에도 담는다.
+
+    회귀: 요청 URL 과 헤더만 정화하고 이 필드는 손대지 않아, redirect 대상에 실린
+    자격증명이 정화 HAR 을 타고 그대로 아티팩트에 올라갔다.
+    """
+    har = _har()
+    har["log"]["entries"][0]["response"]["redirectURL"] = _SECRET_REFERER
+    out = json.dumps(_sanitize_har(har), ensure_ascii=False)
+
+    assert "3f2a91c4-8b7d-4e16" not in out
+    assert "redirectURL" in out                 # 필드 자체는 남는다
+    assert "billId=PRC_A1" in out               # 진단 식별자도
+
+
+def test_sanitize_har_redacts_session_id_in_redirect_url():
+    har = _har()
+    har["log"]["entries"][0]["response"]["redirectURL"] = (
+        "https://likms.assembly.go.kr/bill/x.do;jsessionid=ABC999?billId=PRC_A1"
+    )
+    out = json.dumps(_sanitize_har(har), ensure_ascii=False)
+    assert "ABC999" not in out
+    assert "billId=PRC_A1" in out
+
+
+def test_sanitize_har_leaves_empty_redirect_url_alone():
+    """redirect 가 없으면 빈 문자열이다 — 없던 필드를 만들지도, 바꾸지도 않는다."""
+    har = _har()
+    har["log"]["entries"][0]["response"]["redirectURL"] = ""
+    out = _sanitize_har(har)
+    assert out["log"]["entries"][0]["response"]["redirectURL"] == ""
+    # 필드가 아예 없는 HAR 도 그대로 통과해야 한다
+    har2 = _har()
+    assert "redirectURL" not in _sanitize_har(har2)["log"]["entries"][0]["response"]

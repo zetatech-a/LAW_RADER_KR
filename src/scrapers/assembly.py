@@ -28,7 +28,7 @@ import os
 import re
 from dataclasses import dataclass
 from enum import Enum
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
@@ -224,12 +224,80 @@ _SECRET_FIELD_HINTS = (
     "csrf", "xsrf", "token", "session", "jsessionid", "wmonid",
     "auth", "secret", "passwd", "password", "nonce", "sid",
 )
+# 세션 쿠키 값에는 '?' 도 '&' 도 들어가지 않는다. 문자 클래스에서 둘 다 빼지 않으면
+# 이미 구조가 있는 문자열에서 패턴이 URL 경계를 넘어 삼켜, 정화 뒤에 남아야 할 키
+# 이름과 공개 식별자(billId)까지 지운다 — 덤프의 진단 가치가 바로 그 billId 다.
 _SECRET_VALUE_PATTERNS = (
-    re.compile(r"JSESSIONID=[^;\"'\s&]+", re.I),
-    re.compile(r"WMONID=[^;\"'\s&]+", re.I),
+    re.compile(r"JSESSIONID=[^;\"'\s&?]+", re.I),
+    re.compile(r"WMONID=[^;\"'\s&?]+", re.I),
     re.compile(r"\b[0-9a-f]{32,}\b", re.I),
 )
 _REDACTED = "REDACTED"
+
+# 값이 URL 인 HTML 속성. 문자열이 아니라 URL 로 취급해 정화한다.
+_URL_VALUED_ATTRS = (
+    "action", "formaction", "href", "src", "poster", "cite",
+    "data-url", "data-src", "data-href", "data-action",
+)
+
+# 공개 식별자라 값을 남겨도 되는 키. 이름 힌트보다 우선한다 — 덤프가 어느 의안의
+# 것인지 알 수 없으면 진단 자료로서 쓸모가 없다.
+_PUBLIC_URL_KEYS = {"billid", "bill_id", "billno", "agefrom", "ageto", "age", "tabnm"}
+
+
+def _is_secret_field(name: str) -> bool:
+    low = (name or "").strip().lower()
+    if low in _PUBLIC_URL_KEYS:
+        return False
+    return any(h in low for h in _SECRET_FIELD_HINTS)
+
+
+def _redact_url(url: str) -> str:
+    """URL 의 쿼리·경로 파라미터에서 비밀 이름의 '값'만 지운다. 이름은 남긴다.
+
+    값 패턴만으로는 부족하다 — 하이픈 섞인 UUID·Base64 토큰은 어느 패턴에도 걸리지
+    않고, 패턴은 쿼리 파라미터 '이름'을 모른다. 경로 파라미터(;jsessionid=…)까지 보는
+    이유는 쿠키가 막힌 클라이언트에 서블릿 컨테이너가 그 자리에 세션 ID 를 붙이기
+    때문이다(likms 가 그 형태다).
+    """
+    try:
+        parts = urlparse(url or "")
+    except ValueError:
+        return _REDACTED
+
+    def _values(raw: str, sep: str) -> str:
+        out = []
+        for chunk in raw.split(sep):
+            if not chunk:
+                continue
+            name, eq, value = chunk.partition("=")
+            if not eq:
+                out.append(_redact_values(chunk))
+                continue
+            out.append(
+                f"{name}={_REDACTED if _is_secret_field(name) else _redact_values(value)}"
+            )
+        return sep.join(out)
+
+    # 값 패턴은 조각마다 적용한다. 조립이 끝난 URL 에 다시 돌리면 경계를 넘어 삼킨다.
+    return urlunparse(
+        parts._replace(
+            path=_redact_values(parts.path),
+            params=_values(parts.params, ";"),
+            query=_values(parts.query, "&"),
+        )
+    )
+
+
+def _redact_attr_url(value: str) -> str:
+    """URL 속성값 정화. 정화할 파라미터가 없으면 구조를 그대로 둔다.
+
+    이름 기준 정화가 필요한 것은 쿼리(?a=b)와 경로 파라미터(;a=b)뿐이다. 둘 다 없는
+    값까지 재조립하면 정화와 무관한 곳이 바뀐다(href="#" → href="").
+    """
+    if "?" in value or ";" in value:
+        return _redact_url(value)
+    return _redact_values(value)
 
 
 def _redact_html(html: str) -> str:
@@ -258,6 +326,16 @@ def _redact_html(html: str) -> str:
     for el in soup.find_all("script"):
         if not (el.get("src") or "").strip():
             el.string = ""
+
+    # 값이 URL 인 속성(form@action, a@href, script@src …)도 URL 규칙을 태운다.
+    # 필드 값과 같은 이유다 — 속성 이름은 비밀이 아니라 마스킹 대상이 아니고,
+    # 값 패턴은 쿼리 파라미터 '이름'을 모른다. 외부 script@src 는 위에서 일부러
+    # 남기므로 특히 위험하다. 이 덤프는 debug/ 로 아티팩트에 올라간다.
+    for el in soup.find_all(True):
+        for attr in _URL_VALUED_ATTRS:
+            value = el.get(attr)
+            if isinstance(value, str) and value.strip():
+                el[attr] = _redact_attr_url(value)
 
     return _redact_values(str(soup))
 

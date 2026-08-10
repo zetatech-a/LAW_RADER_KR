@@ -748,3 +748,62 @@ def test_billinfo_response_dump_still_readable(tmp_path, monkeypatch):
     )
     dump = _dump_text(tmp_path)
     assert "알 수 없는 응답 구조" in dump
+
+
+def test_detail_html_dump_redacts_secrets_in_url_attributes(tmp_path, monkeypatch):
+    """덤프의 URL 속성(form@action·a@href·script@src)도 정화되어야 한다.
+
+    회귀: 캡처 스크립트들은 URL 속성을 정화하는데 생산 실패 덤프 경로만 빠져 있었다.
+    속성 이름은 비밀이 아니라 마스킹 대상이 아니고, 값 패턴은 쿼리 파라미터 '이름'을
+    모르므로 action="...?csrfToken=<UUID>" 가 그대로 직렬화됐다. 이 덤프는 debug/ 로
+    아티팩트에 올라간다.
+    """
+    uuid_token = "3f2a91c4-8b7d-4e16-9a02-5c6d1e8f0b34"
+    page = (
+        f"<html><head><meta name='_csrf' content='{_TOKEN}'/></head><body>"
+        # billId hidden 이 없어 요청을 만들 수 없다 → 상세 HTML 을 덤프한다
+        f'<form id="form" action="/bill/detail.do?billId={_BILL_ID}&csrfToken={uuid_token}">'
+        '<input type="hidden" name="ageFrom" value="22"/></form>'
+        f'<a href="/x.do?sessionKey={uuid_token}">링크</a>'
+        f'<script src="/static/billDetail.js?authToken={uuid_token}"></script>'
+        '<div id="tab_billInfo_sect"></div></body></html>'
+    )
+    p, f = _run(page, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    assert p.proposal_status is S.ERROR
+    assert f.posts == []
+
+    dump = _dump_text(tmp_path)
+    assert uuid_token not in dump
+    # 이름과 공개 식별자는 남는다 — 없으면 덤프가 어느 의안 것인지 알 수 없다.
+    assert "csrfToken=" in dump and "sessionKey=" in dump and "authToken=" in dump
+    assert f"billId={_BILL_ID}" in dump
+    assert "/static/billDetail.js" in dump      # 어떤 스크립트였는지는 남아야 한다
+
+
+def test_detail_html_dump_redacts_session_id_in_path_parameter(tmp_path, monkeypatch):
+    """쿠키가 막히면 서블릿 컨테이너가 ;jsessionid=... 를 경로에 붙인다."""
+    page = (
+        f"<html><head><meta name='_csrf' content='{_TOKEN}'/></head><body>"
+        '<form id="form"><input type="hidden" name="ageFrom" value="22"/></form>'
+        f'<a href="/bill/x.do;jsessionid=ABC999XYZ?billId={_BILL_ID}">링크</a>'
+        '<div id="tab_billInfo_sect"></div></body></html>'
+    )
+    _p, _f = _run(page, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    dump = _dump_text(tmp_path)
+    assert "ABC999XYZ" not in dump
+    # 회귀: 세션 패턴이 '?' 를 삼켜 뒤따르는 billId 까지 지웠다.
+    assert f"billId={_BILL_ID}" in dump
+
+
+def test_detail_html_dump_does_not_mangle_urls_without_parameters(tmp_path, monkeypatch):
+    """파라미터가 없는 값까지 재조립하면 href="#" 이 href="" 가 된다."""
+    page = (
+        f"<html><head><meta name='_csrf' content='{_TOKEN}'/></head><body>"
+        '<form id="form"><input type="hidden" name="ageFrom" value="22"/></form>'
+        '<a class="sns" href="#">공유</a><a href="/bill/plain.do">보통 링크</a>'
+        '<div id="tab_billInfo_sect"></div></body></html>'
+    )
+    _p, _f = _run(page, tmp_path=tmp_path, monkeypatch=monkeypatch)
+    dump = _dump_text(tmp_path)
+    assert 'href="#"' in dump
+    assert 'href="/bill/plain.do"' in dump

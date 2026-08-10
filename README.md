@@ -72,7 +72,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 
 **받아온 페이지가 그 의안의 것인지 먼저 확인합니다.** Open API 의 `LINK_URL` 이 다른 의안을 가리키거나 redirect 가 걸리면 A 의안 알림에 B 의안의 제안이유가 실릴 수 있기 때문입니다. 근거는 `form#form` 의 `billId`, 요청 URL 의 `billId`, 최종 응답 URL 의 `billId` 셋이며, 하나라도 어긋나면 `ERROR` 입니다. 구형 페이지의 inline 제안이유는 이 확인을 **통과했을 때만** 채택합니다(근거가 하나도 없으면 채택하지 않습니다 — `billInfo.do` 경로는 요청을 만들 때 `billId` 를 대조하지만 inline 경로는 그 검사를 거치지 않고 바로 발행되기 때문입니다).
 
-진단 덤프(`debug/`)는 verify 워크플로가 아티팩트로 업로드하므로, 저장 전에 이름이 비밀인 `meta`/`input`(`_csrf`, `*token*`, `*session*` 등) 값과 인라인 스크립트를 지웁니다. 태그·필드 이름과 공개 값은 진단에 필요하므로 남깁니다.
+진단 덤프(`debug/`)는 verify 워크플로가 아티팩트로 업로드하므로, 저장 전에 이름이 비밀인 `meta`/`input`(`_csrf`, `*token*`, `*session*` 등) 값과 인라인 스크립트를 지우고, **값이 URL 인 속성(`form@action`·`a@href`·`script@src` 등)** 은 URL 규칙으로 정화합니다 — 쿼리뿐 아니라 `;jsessionid=…` 경로 파라미터까지 봅니다. 태그·필드 이름과 공개 값(`billId` 등)은 진단에 필요하므로 남깁니다(덤프가 어느 의안의 것인지 알 수 없으면 쓸모가 없습니다).
 
 `PENDING` 의안은 Gemini 배치 요약 대상에서 제외되고(요약할 원문이 없음), 의안 판정에서는 `available=0` 이어도 `pending>0` 이면 전면 실패 ERROR 를 남기지 않습니다(대신 실패가 섞여 있으면 경고).
 
