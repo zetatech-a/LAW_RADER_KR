@@ -130,6 +130,9 @@ _URL_VALUED_ATTRS = (
     "data-url", "data-src", "data-href", "data-action",
 )
 
+# 자유 텍스트(예외 메시지 등) 안에 박힌 절대 URL.
+_URL_IN_TEXT = re.compile(r"""https?://[^\s"'<>)\]}]+""")
+
 # 값 자체로 알아볼 수 있는 식별자(쿠키 문자열·긴 16진 해시 등)
 # 세션 쿠키 값은 '?'·'&' 를 포함하지 않는다. 문자 클래스에서 빼지 않으면 이미 구조가
 # 있는 문자열(URL 등)에서 패턴이 경계를 넘어 삼켜 키 이름·공개 식별자까지 지운다.
@@ -190,6 +193,28 @@ def _scrub_value(text: str) -> str:
     return out
 
 
+def _sanitize_attr_url(value: str) -> str:
+    """URL 속성값·기록용 URL 정화. 정화할 파라미터가 없으면 구조를 그대로 둔다.
+
+    이름 기준 정화가 필요한 것은 쿼리(?a=b)와 경로 파라미터(;a=b)뿐이다. 둘 다 없는
+    값까지 urlparse→urlunparse 를 돌리면 정화와 무관한 곳이 바뀐다(href="#" → href="").
+    """
+    if "?" in value or ";" in value:
+        return _sanitize_url(value)
+    return _scrub_value(value)
+
+
+def _scrub_free_text(text: str) -> str:
+    """예외 메시지처럼 URL 이 박혀 오는 자유 텍스트를 정화한다.
+
+    requests 예외는 실패한 요청의 전체 URL 을 메시지에 담는다(예: HTTPSConnectionPool
+    ... Max retries exceeded with url: ...). 그 문자열을 meta.json 이나 표준출력에
+    그대로 넣으면, URL 필드를 정화해 둔 것이 무의미해진다.
+    """
+    scrubbed = _URL_IN_TEXT.sub(lambda m: _sanitize_url(m.group(0)), text or "")
+    return _scrub_value(scrubbed)
+
+
 def _sanitize(html: str) -> str:
     """세션값·토큰·개인정보를 지운다. 구조(태그·필드명)는 그대로 둔다.
 
@@ -225,11 +250,7 @@ def _sanitize(html: str) -> str:
                 # 쿼리·경로 파라미터가 있을 때만 URL 로 재조립한다. 그렇지 않은 값까지
                 # urlparse→urlunparse 를 돌리면 href="#" 이 href="" 가 되는 식으로
                 # 정화와 무관한 구조가 바뀐다(빈 fragment 는 재조립에서 사라진다).
-                el[attr] = (
-                    _sanitize_url(value)
-                    if ("?" in value or ";" in value)
-                    else _scrub_value(value)
-                )
+                el[attr] = _sanitize_attr_url(value)
 
     out = str(soup)
     for pat in _VALUE_PATTERNS:
@@ -270,7 +291,10 @@ def main(argv=None) -> int:
         return EXIT_BAD_TARGET
 
     print(f"기대 상태: {args.expect}")
-    print(f"GET {url}")
+    # 이 출력은 워크플로가 capture_report.txt 로 받아 아티팩트에 올린다.
+    # resolve_capture_target 은 billId 외의 쿼리를 막지 않으므로(서명 URL 을 그대로
+    # 붙여넣을 수 있다), 원문을 찍으면 meta.json 정화가 무의미해진다.
+    print(f"GET {_sanitize_url(url)}")
     resp = fetcher.get(url, referer=src.list_url)
     print(f"  → HTTP {resp.status_code}, 최종 URL {_sanitize_url(resp.url)}")
     if resp.history:
@@ -301,7 +325,10 @@ def main(argv=None) -> int:
             {
                 "id": form.get("id") or "",
                 "name": form.get("name") or "",
-                "action": form.get("action") or "",
+                # HTML fixture 는 따로 정화되므로 이 사본은 보호받지 못한다.
+                # 라이브 폼 action 에 ?csrfToken=… / ;jsessionid=… 이 실려 오면
+                # 그대로 meta.json 에 박힌다.
+                "action": _sanitize_attr_url(form.get("action") or ""),
                 # 표준 기본값(GET)을 그대로 반영한다 — 스크래퍼와 같은 규칙.
                 "method": (form.get("method") or "").strip().lower() or "get(기본값)",
                 "hidden_input_names": sorted(_hidden_inputs(form)),
@@ -359,8 +386,10 @@ def main(argv=None) -> int:
                 )
             except Exception as e:  # noqa: BLE001
                 meta["follow_up_request_made"] = True
-                meta["follow_up_error"] = f"{type(e).__name__}: {e}"
-                print(f"  ! 후속 요청 실패: {type(e).__name__}: {e}")
+                meta["follow_up_error"] = _scrub_free_text(
+                    f"{type(e).__name__}: {e}"
+                )
+                print(f"  ! 후속 요청 실패: {meta['follow_up_error']}")
 
     # --- 저장은 성공/실패와 무관하게 먼저 한다 ---
     detail_fixture = _sanitize(get_html)

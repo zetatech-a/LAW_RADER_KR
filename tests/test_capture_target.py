@@ -372,3 +372,91 @@ def test_sanitize_is_idempotent_on_committed_fixtures():
         assert cap._sanitize(before) == before, html_path
         checked += 1
     assert checked > 0
+
+
+# --- 캡처 URL·폼 action 도 기록 전에 정화한다 ---
+#
+# resolve_capture_target 은 billId 외의 쿼리를 막지 않는다(서명 URL 을 그대로
+# 붙여넣을 수 있다). 표준출력은 capture_report.txt 로, 폼 action 은 meta.json 으로
+# 나가는데 둘 다 아티팩트에 올라가고 meta.json 은 저장소에 커밋까지 된다.
+
+_SIGNED_URL = (
+    "https://likms.assembly.go.kr/bill/bi/billDetailPage.do"
+    f"?billId=PRC_A1&authToken={_FIX_TOKEN}"
+)
+
+
+def test_extra_query_params_are_still_accepted():
+    """전제 확인: 검증기는 billId 외의 쿼리를 막지 않는다(그래서 정화가 필요하다)."""
+    bill_id, url = cap.resolve_capture_target("", _SIGNED_URL, "unused{bill_id}")
+    assert bill_id == "PRC_A1"
+    assert url == _SIGNED_URL          # 요청에는 원본을 그대로 쓴다
+
+
+def test_capture_url_is_sanitized_before_logging(capsys, monkeypatch, tmp_path):
+    """회귀: `GET {url}` 이 원문을 찍어 capture_report.txt 로 나갔다."""
+    called = {"n": 0}
+
+    class _Boom:
+        def get(self, *a, **k):
+            called["n"] += 1
+            raise RuntimeError("네트워크 없음")
+
+    monkeypatch.setattr(cap, "Fetcher", lambda **kw: _Boom())
+    with pytest.raises(RuntimeError):
+        cap.main(["--expect", "available", "--url", _SIGNED_URL,
+                  "--out", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert called["n"] == 1                 # 요청은 원본 URL 로 보냈다
+    assert _FIX_TOKEN not in out            # 로그에는 남지 않는다
+    assert "authToken=" in out              # 이름은 남는다
+    assert "billId=PRC_A1" in out           # 진단 식별자도
+
+
+def test_form_action_is_sanitized_in_metadata():
+    """폼 action 사본은 HTML fixture 정화의 보호를 받지 못한다 — 따로 정화해야 한다."""
+    assert _FIX_TOKEN not in cap._sanitize_attr_url(
+        f"/bill/bi/detail.do?billId=PRC_A1&csrfToken={_FIX_TOKEN}"
+    )
+    out = cap._sanitize_attr_url("/bill/x.do;jsessionid=ABC999?billId=PRC_A1")
+    assert "ABC999" not in out
+    assert "billId=PRC_A1" in out
+
+
+def test_form_action_keeps_ordinary_values():
+    """정화가 진단을 망치면 안 된다 — 평범한 action 과 빈 값은 그대로다."""
+    assert cap._sanitize_attr_url("") == ""
+    assert cap._sanitize_attr_url("#") == "#"
+    assert cap._sanitize_attr_url("/bill/bi/billInfo.do") == "/bill/bi/billInfo.do"
+
+
+def test_committed_fixture_form_actions_are_already_clean():
+    """저장소에 있는 meta.json 의 폼 action 이 정화 규칙을 이미 만족해야 한다."""
+    root = Path(__file__).parent / "fixtures" / "assembly"
+    checked = 0
+    for meta_path in root.glob("*/meta.json"):
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        for form in meta.get("forms") or []:
+            action = form.get("action", "")
+            assert cap._sanitize_attr_url(action) == action, (meta_path, action)
+            checked += 1
+    assert checked > 0
+
+
+def test_follow_up_error_text_is_sanitized():
+    """requests 예외는 실패한 요청의 전체 URL 을 메시지에 담는다."""
+    msg = (
+        "ConnectionError: HTTPSConnectionPool(host='likms.assembly.go.kr', port=443): "
+        "Max retries exceeded with url: "
+        f"https://likms.assembly.go.kr/bill/bi/billInfo.do?billId=PRC_A1&csrf={_FIX_TOKEN}"
+    )
+    out = cap._scrub_free_text(msg)
+    assert _FIX_TOKEN not in out
+    assert "Max retries exceeded" in out       # 진단 문구는 남는다
+    assert "billId=PRC_A1" in out
+
+
+def test_scrub_free_text_leaves_plain_messages_intact():
+    assert cap._scrub_free_text("Timeout") == "Timeout"
+    assert cap._scrub_free_text("") == ""
