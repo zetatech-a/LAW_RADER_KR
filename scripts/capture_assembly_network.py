@@ -59,8 +59,16 @@ DETAIL_TEMPLATE = (
 TAB_SELECTOR = '[data-tabnm="billInfo"]'
 TAB_PANE_SELECTOR = "#tab_billInfo_sect"
 
-# 응답 본문에서 찾을 표식. 하나라도 있으면 '제안이유를 주는 응답'으로 본다.
+# 응답 본문에서 찾을 표식. **진단 정보일 뿐 성공 판정 근거가 아니다** — 어떤 표식이
+# 어디에 나왔는지는 계약을 좇을 때 단서가 되지만, 그 존재만으로 본문을 얻었다고
+# 볼 수는 없다(빈 pre, 일반 라벨 '주요내용' 등). 성공은 _summary_text 로 판정한다.
 SUMMARY_MARKERS = ("prntSummary", "제안이유", "주요내용")
+
+# 실제 본문을 담는 컨테이너 후보. 생산 스크래퍼의 판정 대상과 같은 selector 다.
+_SUMMARY_CONTENT_SELECTORS = ("pre#prntSummary", "#prntSummary", "#summaryContentDiv")
+
+# 이만큼은 있어야 '본문'이라 부른다. 생산 코드(_MIN_SUMMARY_CHARS)와 같은 기준.
+_MIN_SUMMARY_CHARS = 20
 
 # 페이지가 로드하는 상세 스크립트(라이브 확인). 없으면 조용히 건너뛴다.
 BILL_DETAIL_JS_HINT = "billDetail.js"
@@ -600,7 +608,9 @@ def _capture_with_browser(
         # 렌더링 완료 HTML
         rendered = page.content()
         _write(out_dir / "assembly_rendered.html", _scrub_html(rendered))
-        result["summary_in_rendered_html"] = _has_summary(rendered)
+        rendered_summary = _summary_text(rendered)
+        result["summary_in_rendered_html"] = bool(rendered_summary)
+        result["rendered_summary_chars"] = len(rendered_summary)
 
         # 응답 본문 저장 (likms 호스트의 document/xhr/fetch, html/json 만)
         manifest = _dump_responses(responses, out_dir, result)
@@ -648,8 +658,34 @@ def _pane_filled(page) -> bool:
         return False
 
 
+def _summary_text(html: str) -> str:
+    """기대 selector 에서 **실제 제안이유 본문**을 뽑는다. 없으면 빈 문자열.
+
+    표식(substring) 검사만으로 성공을 선언하면 안 된다. 등록 전 응답에도 빈
+    `<pre id="prntSummary"></pre>` 가 있을 수 있고, 페이지 어딘가에 '주요내용' 같은
+    일반 라벨이 박혀 있기만 해도 참이 된다. 이 스크립트의 존재 이유가 '그 endpoint 가
+    본문을 주는가'를 확정하는 것이므로, 여기서 거짓 성공이 나면 없는 계약을 있다고
+    보고하게 된다.
+
+    가장 긴 후보를 돌려준다 — 컨테이너가 겹칠 때 바깥쪽 빈 껍데기에 속지 않는다.
+    """
+    text = html or ""
+    try:
+        soup = BeautifulSoup(text, "lxml")
+    except Exception:  # noqa: BLE001 — 진단 도구가 파서 문제로 죽지 않게 한다
+        return ""
+    best = ""
+    for sel in _SUMMARY_CONTENT_SELECTORS:
+        for el in soup.select(sel):
+            body = " ".join(el.get_text(" ").split())
+            if len(body) >= _MIN_SUMMARY_CHARS and len(body) > len(best):
+                best = body
+    return best
+
+
 def _has_summary(text: str) -> bool:
-    return any(m in (text or "") for m in SUMMARY_MARKERS)
+    """제안이유 본문을 **실제로** 확보했는지. 표식만 있는 것은 성공이 아니다."""
+    return bool(_summary_text(text))
 
 
 def _markers_in(text: str) -> list[str]:
@@ -683,9 +719,14 @@ def _dump_responses(responses: list[dict], out_dir: Path, result: dict) -> list[
         _write(out_dir / name, _scrub_body(body, is_json=is_json))
 
         markers = _markers_in(body)
-        if markers:
+        # 표식은 manifest 에 진단용으로 남기되, '본문을 주는 응답'이라는 판정은
+        # 실제 내용으로만 한다. HTML 이 아닌 응답(JSON)은 여기서 본문 대상이 아니다.
+        summary_body = _summary_text(body) if is_html else ""
+        if summary_body:
             result["summary_in_xhr"] = True
-            result["summary_sources"].append({"file": name, "url": _scrub_url(url)})
+            result["summary_sources"].append(
+                {"file": name, "url": _scrub_url(url), "summary_chars": len(summary_body)}
+            )
         manifest.append(
             {
                 "file": name,

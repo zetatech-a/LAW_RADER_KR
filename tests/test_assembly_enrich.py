@@ -807,3 +807,142 @@ def test_detail_html_dump_does_not_mangle_urls_without_parameters(tmp_path, monk
     dump = _dump_text(tmp_path)
     assert 'href="#"' in dump
     assert 'href="/bill/plain.do"' in dump
+
+
+# --- 전면 장애 시 상세 수집 폭주 방지 ---
+#
+# 사이트나 billInfo.do 가 통째로 죽으면 신규 의안 하나하나가 (타임아웃 × 재시도) 를
+# 각자 다시 겪는다. max_new_per_source 가 50 이라 상세 단계만 수십 분을 먹고, 그만큼
+# 다이제스트가 늦어지며 다음 15분 주기 실행까지 밀린다.
+
+
+def _scraper_with(extra_over, fetcher):
+    extra = {"api_service": "svc"}
+    extra.update(extra_over)
+    return AssemblyBillScraper(
+        SourceConfig(
+            key="assembly_bill", name="의안정보시스템 · 계류의안",
+            type="assembly_bill",
+            list_url="https://likms.assembly.go.kr/bill/bi/bill/state/mooringBillPage.do",
+            extra=extra,
+        ),
+        fetcher=fetcher,
+    )
+
+
+class _AlwaysDown:
+    def __init__(self):
+        self.calls = 0
+
+    def get(self, *a, **k):
+        self.calls += 1
+        raise RuntimeError("연결 실패")
+
+    def text(self, resp):  # pragma: no cover
+        raise AssertionError
+
+
+def test_consecutive_failures_stop_further_requests(tmp_path, monkeypatch):
+    """연속 실패가 쌓이면 남은 의안은 요청 없이 ERROR 로 둔다."""
+    monkeypatch.chdir(tmp_path)
+    f = _AlwaysDown()
+    sc = _scraper_with({"detail_max_consecutive_failures": 3}, f)
+
+    posts = [_post(f"PRC_{i:04d}") for i in range(20)]
+    for p in posts:
+        sc.enrich(p)
+
+    assert f.calls == 3                                  # 3회에서 멈춘다
+    assert all(p.proposal_status is S.ERROR for p in posts)   # 나머지도 ERROR
+    assert "연속 실패" in posts[-1].proposal_note
+
+
+def test_success_resets_the_consecutive_counter(tmp_path, monkeypatch):
+    """간헐적 실패로 브레이커가 헛돌면 안 된다 — 성공하면 카운터를 끊는다."""
+    monkeypatch.chdir(tmp_path)
+
+    class _Flaky(_Fetcher):
+        def __init__(self):
+            super().__init__(_detail_page(), _billinfo_response())
+            self.n = 0
+
+        def get(self, url, referer=None, params=None, headers=None):
+            self.n += 1
+            if self.n % 2 == 0:            # 한 번 걸러 실패
+                raise RuntimeError("일시 오류")
+            return super().get(url, referer=referer, params=params, headers=headers)
+
+    f = _Flaky()
+    sc = _scraper_with({"detail_max_consecutive_failures": 3}, f)
+    results = []
+    for _ in range(10):
+        p = _post()
+        sc.enrich(p)
+        results.append(p.proposal_status)
+
+    assert results.count(S.AVAILABLE) == 5     # 절반은 계속 성공한다
+    assert f.n == 10                           # 브레이커가 열리지 않았다
+
+
+def test_pending_does_not_trip_the_breaker(tmp_path, monkeypatch):
+    """등록 대기는 실패가 아니다 — 갓 접수된 의안이 몰린 날 브레이커가 헛돌면 안 된다."""
+    monkeypatch.chdir(tmp_path)
+    f = _Fetcher(_detail_page(), _billinfo_response(section=False))
+    sc = _scraper_with({"detail_max_consecutive_failures": 2}, f)
+
+    posts = [_post() for _ in range(6)]
+    for p in posts:
+        sc.enrich(p)
+
+    assert all(p.proposal_status is S.PENDING for p in posts)
+    assert len(f.gets) == 6                    # 전부 실제로 물어봤다
+
+
+def test_time_budget_stops_further_requests(tmp_path, monkeypatch):
+    """시간예산이 소진되면 남은 의안은 요청 없이 ERROR 로 둔다."""
+    monkeypatch.chdir(tmp_path)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(
+        "src.scrapers.assembly.time.monotonic", lambda: clock["t"]
+    )
+    f = _Fetcher(_detail_page(), _billinfo_response())
+    sc = _scraper_with(
+        {"detail_budget_sec": 30, "detail_max_consecutive_failures": 0}, f
+    )
+
+    first = _post()
+    sc.enrich(first)
+    assert first.proposal_status is S.AVAILABLE
+
+    clock["t"] += 31                            # 예산 초과
+    late = _post()
+    sc.enrich(late)
+    assert late.proposal_status is S.ERROR
+    assert "시간예산" in late.proposal_note
+    assert len(f.gets) == 1                     # 두 번째는 요청조차 없다
+
+
+def test_breaker_is_disabled_when_configured_to_zero(tmp_path, monkeypatch):
+    """설정으로 끌 수 있어야 한다(0 = 무제한)."""
+    monkeypatch.chdir(tmp_path)
+    f = _AlwaysDown()
+    sc = _scraper_with(
+        {"detail_max_consecutive_failures": 0, "detail_budget_sec": 0}, f
+    )
+    for _ in range(8):
+        sc.enrich(_post())
+    assert f.calls == 8
+
+
+def test_breaker_defaults_are_sane():
+    sc = _scraper_with({}, _Fetcher(""))
+    assert sc.detail_max_consecutive_failures == 5
+    assert sc.detail_budget_sec == 120.0
+
+
+def test_enrich_still_never_raises_when_breaker_is_open(tmp_path, monkeypatch):
+    """브레이커가 열려도 예외가 밖으로 나가면 안 된다(메일 발송을 막지 않는다)."""
+    monkeypatch.chdir(tmp_path)
+    sc = _scraper_with({"detail_max_consecutive_failures": 1}, _AlwaysDown())
+    for _ in range(5):
+        sc.enrich(_post())          # 예외가 나면 여기서 터진다

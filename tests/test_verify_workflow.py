@@ -394,3 +394,63 @@ def test_gate_matches_real_report_when_another_source_is_partial(
         {"assembly_bill": "🟠", "fsc_press": "🟠"},
     )
     assert _run_gate(steps, tmp_path, report, verify="failure", available="success") == 1
+
+
+# --- 파이프라인 실패가 게이트까지 전달되는지 ---
+#
+# `python ... | tee report.txt` 는 pipefail 이 없으면 tee 의 0 을 돌려주어, 생산자가
+# 죽어도 단계 outcome 이 success 가 되고 게이트가 false-green 이 된다.
+#
+# GitHub Actions 의 `shell: bash` 기본값은 `bash --noprofile --norc -e -o pipefail {0}`
+# 라 pipefail 이 **이미 켜져 있다**(2026-08-10 라이브 실행 로그로 확인). 다만 그건
+# 암묵적 의존이므로, 셸을 약한 형태로 바꾸면 조용히 깨진다. 여기서 못박는다.
+
+
+def _piped_steps(steps):
+    return [s for s in steps if "| tee " in (s.get("run") or "")]
+
+
+def test_piped_steps_exist(steps):
+    """전제 확인 — 파이프라인을 쓰는 단계가 실제로 있다."""
+    assert len(_piped_steps(steps)) >= 4
+
+
+def test_piped_steps_use_pipefail_shell(steps):
+    """`shell: bash` 여야 한다. `bash -e {0}` 등으로 바꾸면 pipefail 이 사라진다.
+
+    GitHub Actions 는 `shell: bash` 일 때만 -e -o pipefail 을 붙인다. 명시적 인자를
+    준 커스텀 셸(`bash -e {0}`, `bash {0}`)이나 `sh` 는 pipefail 이 없다.
+    """
+    for step in _piped_steps(steps):
+        shell = step.get("shell")
+        name = step.get("name") or step.get("id") or "(이름 없음)"
+        assert shell == "bash", f"{name}: shell={shell!r} 는 pipefail 을 보장하지 않는다"
+
+
+def test_no_step_overrides_shell_to_a_weaker_form(steps):
+    """어떤 단계도 pipefail 없는 셸로 내려가면 안 된다."""
+    for step in steps:
+        shell = step.get("shell")
+        if shell is None:
+            continue
+        assert shell == "bash", f"예상치 못한 shell: {shell!r}"
+
+
+def test_pipefail_actually_propagates_producer_failure(tmp_path):
+    """문서가 아니라 동작으로 확인 — 실패한 생산자가 tee 를 지나 종료코드를 남긴다."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+         "python3 -c 'import sys; sys.exit(3)' | tee out.txt"],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert proc.returncode == 3, "pipefail 셸에서 생산자 실패가 전달되지 않았다"
+
+    # 반대로 pipefail 이 없으면 0 이 된다 — 이것이 막으려는 상황이다.
+    proc2 = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-c",
+         "python3 -c 'import sys; sys.exit(3)' | tee out.txt"],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert proc2.returncode == 0

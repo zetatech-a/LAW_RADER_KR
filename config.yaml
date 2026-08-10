@@ -178,6 +178,17 @@ sources:
     api_endpoint: "https://open.assembly.go.kr/portal/openapi"
     api_service: "nwbqublzajtcqpdae"
     page_size: 100
+    # 상세 수집 단계 안전장치(기본값은 코드에 있으므로 평소에는 지정할 필요가 없습니다).
+    #
+    # 사이트나 billInfo.do 가 통째로 죽으면 신규 의안 하나하나가 (타임아웃 × 재시도)를
+    # 각자 다시 겪습니다. max_new_per_source 가 50 이라 상세 단계만 수십 분을 먹고,
+    # 그만큼 다이제스트가 늦어지며 다음 15분 주기 실행까지 밀립니다. 둘 중 하나라도
+    # 걸리면 남은 의안은 **요청 없이** ERROR 로 떨어뜨립니다(발송은 그대로 진행).
+    #
+    # 등록 대기(PENDING)는 실패로 세지 않습니다 — 갓 접수된 의안이 몰린 날
+    # 브레이커가 헛돌면 안 되기 때문입니다. 0 으로 두면 해당 장치를 끕니다.
+    # detail_max_consecutive_failures: 5     # 연속 실패 상한
+    # detail_budget_sec: 120                 # 상세 단계 전체 시간예산(초)
     # 상세 URL 템플릿(기본값은 코드에 있으므로 평소에는 지정할 필요가 없습니다).
     #
     # 라이브 검증 완료(2026-08):

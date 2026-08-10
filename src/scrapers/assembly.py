@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import parse_qsl, urlparse, urlunparse
@@ -554,6 +555,19 @@ class AssemblyBillScraper(BaseScraper):
         self.detail_url = str(ex.get("detail_url") or _DETAIL)
         self.api_key = os.environ.get("ASSEMBLY_API_KEY", "")
 
+        # 상세 수집 단계의 안전장치. 사이트나 billInfo.do 가 통째로 죽으면 신규 의안
+        # 하나하나가 (타임아웃 × 재시도) 를 각자 다시 겪는다. max_new_per_source 가
+        # 50 이므로 전면 장애 때 상세 단계만 수십 분을 먹고, 그만큼 다이제스트가
+        # 늦어지며 다음 15분 주기 실행까지 밀린다. 둘 중 하나라도 걸리면 남은 의안은
+        # **요청 없이** ERROR 로 떨어뜨린다(발송은 그대로 진행되고 실패로 집계된다).
+        self.detail_budget_sec = float(ex.get("detail_budget_sec", 120.0))
+        self.detail_max_consecutive_failures = int(
+            ex.get("detail_max_consecutive_failures", 5)
+        )
+        self._detail_deadline: float | None = None
+        self._consecutive_failures = 0
+        self._breaker_note = ""
+
     def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
         if not self.api_key:
             log.warning(
@@ -680,7 +694,14 @@ class AssemblyBillScraper(BaseScraper):
 
         어떤 실패도 밖으로 던지지 않는다 — 의안 한 건의 수집 실패가 다른 의안이나
         메일 발송을 막아서는 안 된다.
+
+        전면 장애일 때는 요청을 아예 보내지 않고 ERROR 로 떨어뜨린다(_detail_blocked).
         """
+        blocked = self._detail_blocked()
+        if blocked:
+            self._set_status(post, ProposalContentStatus.ERROR, blocked)
+            return
+
         try:
             self._fill_proposal_reason(post)
         except Exception as e:  # noqa: BLE001
@@ -695,6 +716,43 @@ class AssemblyBillScraper(BaseScraper):
                 post.url,
                 e,
             )
+
+        # AVAILABLE·PENDING 은 '응답을 제대로 받았다'는 뜻이다 — 연속 실패를 끊는다.
+        # 등록 대기를 실패로 세면 갓 접수된 의안이 몰린 날 브레이커가 헛돈다.
+        if post.proposal_status is ProposalContentStatus.ERROR:
+            self._consecutive_failures += 1
+        else:
+            self._consecutive_failures = 0
+
+    def _detail_blocked(self) -> str:
+        """상세 수집을 더 시도하지 말아야 하면 그 사유, 계속해도 되면 빈 문자열.
+
+        첫 호출에 시간예산을 건다. 목록 수집까지의 시간은 세지 않는다 — 막고 싶은 것은
+        상세 단계가 혼자 폭주하는 것이다.
+        """
+        limit = self.detail_max_consecutive_failures
+        if limit > 0 and self._consecutive_failures >= limit:
+            if not self._breaker_note:
+                self._breaker_note = (
+                    f"상세 수집 연속 실패 {self._consecutive_failures}건 — "
+                    "전면 장애로 판단해 남은 의안은 요청 없이 ERROR 로 둡니다."
+                )
+                log.error("[%s] %s", self.key, self._breaker_note)
+            return self._breaker_note
+
+        if self.detail_budget_sec > 0:
+            now = time.monotonic()
+            if self._detail_deadline is None:
+                self._detail_deadline = now + self.detail_budget_sec
+            elif now >= self._detail_deadline:
+                if not self._breaker_note:
+                    self._breaker_note = (
+                        f"상세 수집 시간예산({self.detail_budget_sec:.0f}초) 소진 — "
+                        "남은 의안은 요청 없이 ERROR 로 둡니다."
+                    )
+                    log.error("[%s] %s", self.key, self._breaker_note)
+                return self._breaker_note
+        return ""
 
     def _set_status(
         self, post: Post, status: ProposalContentStatus, note: str = ""

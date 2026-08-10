@@ -19,6 +19,7 @@ from scripts.capture_assembly_network import (
     _is_secret_name,
     _js_report,
     _manifest_url,
+    _has_summary,
     _markers_in,
     _sanitize_har,
     _scrub_headers,
@@ -29,6 +30,7 @@ from scripts.capture_assembly_network import (
     _scrub_post_data,
     _scrub_text,
     _scrub_url,
+    _summary_text,
 )
 
 
@@ -864,3 +866,68 @@ def test_sanitize_har_leaves_empty_redirect_url_alone():
     # 필드가 아예 없는 HAR 도 그대로 통과해야 한다
     har2 = _har()
     assert "redirectURL" not in _sanitize_har(har2)["log"]["entries"][0]["response"]
+
+
+# --- 성공 판정: 표식이 아니라 실제 본문을 요구한다 ---
+#
+# 이 스크립트의 존재 이유가 '그 endpoint 가 본문을 주는가'를 확정하는 것이다.
+# 표식(substring)만으로 성공을 선언하면 없는 계약을 있다고 보고하게 된다.
+
+_REAL_BODY = (
+    "현행법은 지방자치단체가 여성기업ㆍ장애인기업 등과 계약을 체결할 때 "
+    "수의계약 한도를 달리 정할 수 있도록 하고 있음."
+)
+
+
+def test_empty_pre_is_not_a_successful_capture():
+    """회귀: 등록 전 응답의 빈 pre#prntSummary 만으로 성공이 선언됐다."""
+    html = '<html><body><pre id="prntSummary"></pre></body></html>'
+    assert _markers_in(html)                 # 표식은 있다
+    assert _summary_text(html) == ""         # 그러나 본문은 없다
+    assert _has_summary(html) is False
+
+
+def test_generic_label_alone_is_not_a_successful_capture():
+    """페이지 어딘가의 '주요내용' 라벨만으로 성공이 되면 안 된다."""
+    html = "<html><body><h3>주요내용</h3><div>표로 안내합니다</div></body></html>"
+    assert _markers_in(html)
+    assert _has_summary(html) is False
+
+
+def test_short_leftover_text_is_not_a_successful_capture():
+    html = '<html><body><pre id="prntSummary">준비 중입니다</pre></body></html>'
+    assert _has_summary(html) is False
+
+
+def test_real_body_is_a_successful_capture():
+    html = f'<html><body><pre id="prntSummary">{_REAL_BODY}</pre></body></html>'
+    assert _has_summary(html) is True
+    assert len(_summary_text(html)) >= 20
+
+
+def test_summary_text_prefers_the_longest_container():
+    """컨테이너가 겹칠 때 바깥쪽 빈 껍데기에 속지 않는다."""
+    html = (
+        "<html><body>"
+        f'<div id="summaryContentDiv"><pre id="prntSummary">{_REAL_BODY}</pre></div>'
+        "</body></html>"
+    )
+    assert _REAL_BODY.split(".")[0][:20] in _summary_text(html)
+
+
+def test_fallback_selectors_are_accepted_for_legacy_pages():
+    """구형 페이지의 폴백 컨테이너도 본문이 실려 있으면 성공이다."""
+    for sel_id in ("prntSummary", "summaryContentDiv"):
+        html = f'<html><body><div id="{sel_id}">{_REAL_BODY}</div></body></html>'
+        assert _has_summary(html) is True, sel_id
+
+
+def test_summary_text_survives_broken_html():
+    assert _summary_text("") == ""
+    assert _summary_text("본문만 있고 태그가 없음") == ""
+
+
+def test_markers_stay_available_as_diagnostics():
+    """표식 목록 자체는 계약을 좇는 단서라 manifest 에 남는다(판정 근거만 아닐 뿐)."""
+    html = '<html><body><pre id="prntSummary"></pre></body></html>'
+    assert _markers_in(html) == ["prntSummary"]
