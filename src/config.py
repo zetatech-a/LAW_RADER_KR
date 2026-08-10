@@ -45,6 +45,32 @@ _DEFAULT_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash-lite")
 
 
 @dataclass
+class AssemblyBatchConfig:
+    """의안(계류의안) 전용 배치 요약 설정.
+
+    일반 게시물은 1건당 1회 호출을 유지하고, 의안만 여러 건을 한 번에 묶어 보낸다.
+    의안은 신규가 하루에도 수십 건씩 쏟아져 1건당 1회로는 무료 티어 한도를 곧바로
+    태우기 때문이다. 그래서 상한(max_posts)·시간예산도 일반 경로와 따로 둔다.
+    """
+
+    enabled: bool = True
+    # 한 번의 요청에 담을 최대 의안 수
+    batch_size: int = 25
+    # 한 번의 실행에서 요약할 최대 의안 수(초과분은 발췌로 발송)
+    max_bills: int = 50
+    # 의안 1건의 제안이유를 프롬프트에 담을 최대 길이(초과분 절단)
+    max_input_chars_per_bill: int = 20000
+    # 한 요청의 입력 총량 상한. batch_size 와 함께 지켜진다(둘 중 먼저 걸리는 쪽).
+    max_batch_chars: int = 250000
+    # 배치 응답은 의안 수만큼 길어지므로 단건보다 큰 출력 상한이 필요하다.
+    max_output_tokens: int = 16384
+    # 의안 배치 요약 단계 전체 시간예산(초, 0=무제한)
+    budget_sec: float = 120.0
+    # 응답에서 빠진 의안이 있으면 그 ID 만 한 번 다시 요청할지
+    retry_missing_once: bool = True
+
+
+@dataclass
 class LLMConfig:
     """본문 3줄 요약용 LLM(Gemini) 설정. api_key 는 환경변수에서 주입."""
 
@@ -54,7 +80,9 @@ class LLMConfig:
     max_line_chars: int     # 문장 1개 길이 상한(프롬프트 지시용)
     min_body_chars: int     # 이보다 짧은 본문은 요약하지 않고 그대로 보여준다
     max_input_chars: int    # 모델에 넣을 본문 최대 길이(초과분 절단)
-    max_posts: int          # 한 번의 실행에서 요약할 최대 게시글 수(무료 티어 보호)
+    # 한 번의 실행에서 요약할 최대 '일반' 게시글 수(무료 티어 보호).
+    # 의안(assembly_bill)은 이 상한을 쓰지 않는다 — assembly_batch.max_bills 로 따로 센다.
+    max_posts: int
     rpm: int                # 분당 요청 상한(0=제한 없음). 이 간격만큼 호출을 벌린다
     timeout_sec: float
     max_retries: int
@@ -67,6 +95,8 @@ class LLMConfig:
     # model 이 사용 불가(404/NOT_FOUND)일 때 이 순서로 넘어갈 대체 모델들.
     fallback_models: list[str] = field(default_factory=list)
     api_key: str = ""
+    # 의안 전용 배치 요약 설정(일반 게시물 경로에는 영향 없음).
+    assembly_batch: AssemblyBatchConfig = field(default_factory=AssemblyBatchConfig)
 
     @property
     def model_chain(self) -> list[str]:
@@ -141,6 +171,22 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     raw_fallbacks = lm.get("fallback_models")
     if raw_fallbacks is None:
         raw_fallbacks = list(_DEFAULT_FALLBACK_MODELS)
+    ab = lm.get("assembly_batch") or {}
+    _ab_default = AssemblyBatchConfig()
+    assembly_batch = AssemblyBatchConfig(
+        enabled=bool(ab.get("enabled", _ab_default.enabled)),
+        batch_size=int(ab.get("batch_size", _ab_default.batch_size)),
+        max_bills=int(ab.get("max_bills", _ab_default.max_bills)),
+        max_input_chars_per_bill=int(
+            ab.get("max_input_chars_per_bill", _ab_default.max_input_chars_per_bill)
+        ),
+        max_batch_chars=int(ab.get("max_batch_chars", _ab_default.max_batch_chars)),
+        max_output_tokens=int(ab.get("max_output_tokens", _ab_default.max_output_tokens)),
+        budget_sec=float(ab.get("budget_sec", _ab_default.budget_sec)),
+        retry_missing_once=bool(
+            ab.get("retry_missing_once", _ab_default.retry_missing_once)
+        ),
+    )
     llm = LLMConfig(
         enabled=bool(lm.get("enabled", True)),
         model=str(lm.get("model", _DEFAULT_MODEL)),
@@ -159,6 +205,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         max_consecutive_failures=int(lm.get("max_consecutive_failures", 3)),
         budget_sec=float(lm.get("budget_sec", 240)),
         api_key=_env("GEMINI_API_KEY"),
+        assembly_batch=assembly_batch,
     )
 
     sources = []

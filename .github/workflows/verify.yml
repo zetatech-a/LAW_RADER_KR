@@ -4,6 +4,12 @@ name: Verify sources (live)
 # 대상 사이트 파서/페이지 파라미터가 실제로 동작하는지 GitHub 러너에서 확인한다.
 # 메일을 보내지 않고 state 도 바꾸지 않으며, 결과 로그와 debug/ 원본 HTML 을
 # 아티팩트로 업로드한다. Actions 탭에서 "Run workflow" 로 수동 실행.
+#
+# capture_bill_id 또는 capture_bill_url 을 넣으면 '의안 캡처 모드'가 켜진다:
+#   1) Playwright 로 브라우저를 띄워 심사정보 탭이 실제로 보내는 XHR 을 캡처(주 진단)
+#   2) requests 기반 fixture 캡처(보조 진단 — 초기 HTML 만 보는 경로)
+#   3) fixture 회귀 테스트
+# 제안이유/주요내용을 어디에서도 찾지 못하면 job 을 exit 2 로 실패시킨다.
 on:
   workflow_dispatch:
     inputs:
@@ -11,10 +17,29 @@ on:
         description: "특정 소스만 검증(쉼표구분 key, 비우면 전체)"
         required: false
         default: ""
+      capture_bill_id:
+        description: "의안 상세 캡처용 BILL_ID(비우면 캡처 생략)"
+        required: false
+        default: ""
+      capture_bill_url:
+        description: "의안 상세 URL 직접 지정(입력하면 BILL_ID 보다 우선)"
+        required: false
+        default: ""
+      pending_bill_id:
+        description: "등록 대기(PENDING) 판정 확인용 BILL_ID — 방금 접수돼 제안이유가 아직 없는 의안"
+        required: false
+        default: ""
+      assembly_sample:
+        description: "의안 상세 표본 건수(available/pending 구분용, 기본 3)"
+        required: false
+        default: "3"
 
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      # 캡처 모드 여부를 한 곳에서 정한다(각 step 의 if 조건이 흩어지지 않도록).
+      CAPTURE_MODE: ${{ (inputs.capture_bill_id != '' || inputs.capture_bill_url != '') && 'on' || 'off' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -24,15 +49,218 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest
 
+      # Playwright 는 진단 전용이다. requirements.txt(생산 의존성)에는 넣지 않고
+      # 캡처 모드에서만 설치한다 — 평소 검증 실행이 느려지지 않게.
+      - name: Install Playwright (capture mode only)
+        if: ${{ env.CAPTURE_MODE == 'on' }}
+        run: |
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+
+      # 입력값은 env 로 넘긴다. run 블록에 ${{ }} 를 직접 끼워 넣으면 입력 문자열이
+      # 셸 스크립트로 해석될 수 있다(script injection).
       - name: Run verification
+        id: verify
+        continue-on-error: true
+        shell: bash
         env:
           ASSEMBLY_API_KEY: ${{ secrets.ASSEMBLY_API_KEY }}
+          ONLY: ${{ inputs.only }}
+          SAMPLE: ${{ inputs.assembly_sample }}
         run: |
-          python scripts/verify_sources.py --only "${{ github.event.inputs.only }}" \
-            | tee verify_report.txt
+          python scripts/verify_sources.py --only "$ONLY" \
+            --assembly-sample "${SAMPLE:-3}" | tee verify_report.txt
 
+      # ── 주 진단: 브라우저가 실제로 보내는 XHR 캡처 ──────────────────────────
+      #
+      # 초기 HTML 에는 제안이유가 없고 심사정보 탭을 JS 가 채운다. requests 로는 그
+      # endpoint 를 알 수 없으므로 브라우저를 띄워 그대로 기록한다.
+      # requests 기반 캡처보다 **먼저** 돌린다 — 이쪽이 계약을 확정하는 도구다.
+      - name: Capture assembly network (Playwright)
+        id: netcapture
+        if: ${{ env.CAPTURE_MODE == 'on' && !cancelled() }}
+        continue-on-error: true     # 아티팩트를 남기고 마지막 게이트에서 실패시킨다
+        shell: bash
+        env:
+          BILL_ID: ${{ inputs.capture_bill_id }}
+          BILL_URL: ${{ inputs.capture_bill_url }}
+        run: |
+          if [ -n "$BILL_URL" ]; then
+            python scripts/capture_assembly_network.py --url "$BILL_URL" \
+              | tee network_capture_report.txt
+          else
+            python scripts/capture_assembly_network.py --bill-id "$BILL_ID" \
+              | tee network_capture_report.txt
+          fi
+
+      # ── fixture 캡처: 생산 요청 빌더로 billInfo.do 를 부르고 응답을 저장한다 ──
+      - name: Capture assembly fixture (requests, AVAILABLE)
+        id: capture
+        if: ${{ env.CAPTURE_MODE == 'on' && !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          BILL_ID: ${{ inputs.capture_bill_id }}
+          BILL_URL: ${{ inputs.capture_bill_url }}
+        run: |
+          if [ -n "$BILL_URL" ]; then
+            python scripts/capture_assembly_fixture.py --expect available \
+              --url "$BILL_URL" | tee capture_report.txt
+          else
+            python scripts/capture_assembly_fixture.py --expect available \
+              --bill-id "$BILL_ID" | tee capture_report.txt
+          fi
+
+      # PENDING fixture 는 '방금 접수돼 제안이유가 아직 없는' 의안이 필요하다.
+      # pending_bill_id 를 준 경우에만 캡처한다(available fixture 를 덮어쓰지 않는다).
+      - name: Capture assembly fixture (requests, PENDING)
+        id: capturepending
+        if: ${{ !cancelled() && inputs.pending_bill_id != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          PENDING_BILL_ID: ${{ inputs.pending_bill_id }}
+        run: |
+          python scripts/capture_assembly_fixture.py --expect pending \
+            --bill-id "$PENDING_BILL_ID" | tee capture_pending_report.txt
+
+      # ── pending 검증: available 검증과 **따로** 수행한다 ──────────────────────
+      #
+      # 방금 접수돼 제안이유가 아직 없는 의안을 넣으면, 그 의안이 ERROR 가 아니라
+      # PENDING 으로 판정되는지 확인한다. '본문 없음'을 '수집 실패'로 세면 매 실행마다
+      # 거짓 ERROR 가 쌓여 진짜 고장을 가린다.
+      - name: Verify PENDING classification
+        id: pendingcheck
+        if: ${{ !cancelled() && inputs.pending_bill_id != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          PENDING_BILL_ID: ${{ inputs.pending_bill_id }}
+        run: |
+          python - <<'PY' | tee pending_check_report.txt
+          import os, sys
+          sys.path.insert(0, ".")
+          from src.config import SourceConfig
+          from src.fetcher import Fetcher
+          from src.models import Post, ProposalContentStatus as S
+          from src.scrapers.assembly import AssemblyBillScraper, _DETAIL
+
+          bill_id = os.environ["PENDING_BILL_ID"]
+          src = SourceConfig(
+              key="assembly_bill", name="의안정보시스템 · 계류의안",
+              type="assembly_bill",
+              list_url="https://likms.assembly.go.kr/bill/bi/bill/state/mooringBillPage.do",
+              extra={},
+          )
+          sc = AssemblyBillScraper(src, Fetcher(timeout=30.0, delay=0.5))
+          p = Post(source_key="assembly_bill", source_name=src.name, post_id=bill_id,
+                   title="(pending check)", url=_DETAIL.format(bill_id=bill_id))
+          sc.enrich(p)
+          print(f"bill_id      : {bill_id}")
+          print(f"url          : {p.url}")
+          print(f"status       : {p.proposal_status.value}")
+          print(f"note         : {p.proposal_note}")
+          print(f"body length  : {len(p.body or '')}")
+          if p.proposal_status is S.PENDING:
+              print("\n✅ 등록 대기로 올바르게 판정되었습니다(실패로 세지 않음).")
+              sys.exit(0)
+          if p.proposal_status is S.AVAILABLE:
+              print("\n⚠️ 이 의안에는 이미 제안이유가 있습니다 — 더 최근 의안으로 다시 확인하세요.")
+              sys.exit(1)
+          print("\n❌ 등록 대기가 아니라 ERROR 로 판정되었습니다. 구조/endpoint 확인 필요.")
+          sys.exit(2)
+          PY
+
+      # ── available 검증: 생산 스크래퍼로 '제안이유가 있는 의안'을 실제로 뽑아본다 ──
+      #
+      # verify_sources 의 표본은 목록 최신순이라 전부 등록 대기일 수 있다. 그러면
+      # available 을 확인하지 못한 채 지나간다. capture_bill_id/url 로 지정한 의안은
+      # '제안이유가 있다고 알려진' 것이므로, 여기서 생산 코드가 AVAILABLE 을 내는지
+      # 결정적으로 확인한다. 이 검증이 통과하고 failed=0 이면 표본이 전부 PENDING
+      # 이어도 job 은 통과한다.
+      - name: Verify AVAILABLE with production scraper
+        id: availablecheck
+        if: ${{ env.CAPTURE_MODE == 'on' && !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          BILL_ID: ${{ inputs.capture_bill_id }}
+          BILL_URL: ${{ inputs.capture_bill_url }}
+        run: |
+          python - <<'PY' | tee available_check_report.txt
+          import os, sys
+          sys.path.insert(0, ".")
+          from src.config import SourceConfig
+          from src.fetcher import Fetcher
+          from src.models import Post, ProposalContentStatus as S
+          from src.scrapers.assembly import _DETAIL
+
+          from src.scrapers.assembly import AssemblyBillScraper
+
+          url = os.environ.get("BILL_URL", "").strip()
+          bill_id = os.environ.get("BILL_ID", "").strip()
+          if url:
+              bill_id = url.split("billId=")[1].split("&")[0] if "billId=" in url else bill_id
+          else:
+              url = _DETAIL.format(bill_id=bill_id)
+          if not bill_id:
+              print("❌ billId 를 알 수 없습니다(capture_bill_url 에 billId 가 없음).")
+              sys.exit(2)
+
+          src = SourceConfig(
+              key="assembly_bill", name="의안정보시스템 · 계류의안",
+              type="assembly_bill",
+              list_url="https://likms.assembly.go.kr/bill/bi/bill/state/mooringBillPage.do",
+              extra={},
+          )
+          sc = AssemblyBillScraper(src, Fetcher(timeout=30.0, delay=0.5))
+          p = Post(source_key="assembly_bill", source_name=src.name, post_id=bill_id,
+                   title="(available check)", url=url)
+          sc.enrich(p)
+          print(f"bill_id     : {bill_id}")
+          print(f"url         : {p.url}")
+          print(f"status      : {p.proposal_status.value}")
+          print(f"note        : {p.proposal_note}")
+          print(f"body length : {len(p.body or '')}")
+          print(f"body head   : {(p.body or '')[:120]}")
+          if p.proposal_status is S.AVAILABLE and len(p.body or "") >= 20:
+              print("\n✅ 생산 스크래퍼가 제안이유를 확보했습니다(billInfo.do 계약 동작).")
+              sys.exit(0)
+          if p.proposal_status is S.PENDING:
+              print("\n⚠️ 이 의안은 아직 등록 대기입니다 — 제안이유가 있는 의안으로 지정하세요.")
+              sys.exit(1)
+          print("\n❌ 제안이유를 확보하지 못했습니다. 계약(form#form/CSRF/billInfo.do) 확인 필요.")
+          sys.exit(2)
+          PY
+
+      # 캡처가 성공했다면 fixture 가 있으므로 skip 이 0 이어야 한다.
+      - name: Test against captured fixture
+        id: fixturetest
+        if: ${{ env.CAPTURE_MODE == 'on' && !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          python -m pytest tests/test_assembly_fixture.py -q -rs \
+            | tee fixture_test_report.txt
+          # skip 이 남아 있으면 fixture 가 만들어지지 않은 것이다 — 초록불로 넘기지 않는다.
+          if grep -q "skipped" fixture_test_report.txt; then
+            echo "::error::캡처 후에도 fixture 테스트가 skip 되었습니다 — fixture 생성 실패"
+            exit 1
+          fi
+
+      # 러너에서 전체 테스트를 돌린다(로컬과 환경이 달라 생기는 회귀를 잡는다).
+      - name: Run full pytest
+        id: pytest
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          python -m pytest -q | tee pytest_report.txt
+
+      # 실패해도 진단 자료는 반드시 남긴다(가장 필요한 순간이다).
+      # 아티팩트에는 sanitize 된 HAR 만 들어간다 — 원본 HAR 은 스크립트가 지운다.
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7
@@ -40,6 +268,110 @@ jobs:
           name: verify-results
           path: |
             verify_report.txt
+            network_capture_report.txt
+            capture_report.txt
+            capture_pending_report.txt
+            available_check_report.txt
+            pending_check_report.txt
+            fixture_test_report.txt
+            pytest_report.txt
             debug/
+            tests/fixtures/
           if-no-files-found: warn
           retention-days: 7
+
+      # ── 최종 판정 ────────────────────────────────────────────────────────────
+      # 업로드 뒤에 둔다. 여기서 실패해도 아티팩트는 이미 올라가 있다.
+      # capture mode 의 네 단계가 **모두** 성공해야 통과한다. 하나라도 continue-on-error
+      # 로 넘어간 채 job 이 초록불이 되면 false-green 이다.
+      - name: Gate on capture mode results
+        if: ${{ !cancelled() && env.CAPTURE_MODE == 'on' }}
+        shell: bash
+        env:
+          AVAILABLE: ${{ steps.availablecheck.outcome }}
+          NET: ${{ steps.netcapture.outcome }}
+          CAPTURE: ${{ steps.capture.outcome }}
+          FIXTURETEST: ${{ steps.fixturetest.outcome }}
+        run: |
+          echo "production AVAILABLE check : $AVAILABLE"
+          echo "Playwright capture         : $NET"
+          echo "requests fixture capture   : $CAPTURE"
+          echo "captured fixture replay    : $FIXTURETEST"
+          failed=0
+          [ "$AVAILABLE"   = "success" ] || { echo "::error::생산 스크래퍼 AVAILABLE 검증 실패 — available_check_report.txt 확인(확정 계약이 깨졌는지)."; failed=1; }
+          [ "$NET"         = "success" ] || { echo "::error::Playwright 네트워크 캡처 실패 — assembly_xhr_manifest.json / assembly_js_report.txt 확인."; failed=1; }
+          [ "$CAPTURE"     = "success" ] || { echo "::error::requests fixture 캡처 실패 — capture_report.txt 확인."; failed=1; }
+          [ "$FIXTURETEST" = "success" ] || { echo "::error::캡처된 fixture 재생 테스트 실패(또는 skip 잔존) — fixture_test_report.txt 확인."; failed=1; }
+          [ "$failed" = "0" ] || exit 2
+          echo "capture mode 4단계 모두 통과."
+
+      # pending 검증은 available 검증과 별개로 판정한다.
+      - name: Gate on PENDING classification
+        if: ${{ !cancelled() && inputs.pending_bill_id != '' }}
+        shell: bash
+        env:
+          PEND: ${{ steps.pendingcheck.outcome }}
+          PENDCAP: ${{ steps.capturepending.outcome }}
+        run: |
+          failed=0
+          [ "$PEND" = "success" ] || { echo "::error::등록 대기(PENDING) 판정 확인 실패. pending_check_report.txt 확인."; failed=1; }
+          [ "$PENDCAP" = "success" ] || { echo "::error::PENDING fixture 캡처 실패. capture_pending_report.txt 확인."; failed=1; }
+          if [ "$failed" != "0" ]; then
+            echo "::error::ERROR 로 판정됐다면 구조/endpoint 문제이고, AVAILABLE 이면 더 최근 의안으로 다시 확인하세요."
+            exit 1
+          fi
+          echo "등록 대기 판정 정상 — 본문 없음을 수집 실패로 세지 않습니다."
+
+      # available 검증(명시적 의안)이 성공했고 표본에 failed 가 없으면, 표본이 전부
+      # 등록 대기여도 통과시킨다 — '최신 의안이 마침 전부 신규'라는 우연으로 job 결과가
+      # 흔들리면 검증이 결정적이지 않다.
+      #
+      # 단, 이 예외는 **의안 하나에만** 적용해야 한다. verify_sources 는 모든 소스의
+      # 리포트를 한 파일에 찍으므로, 리포트 전체를 grep 하면 무관한 소스(금융위·금감원
+      # 등)의 실패가 의안의 '모두 등록 대기' 문구에 가려 초록불로 넘어간다. 그래서
+      # 문구 두 개를 추측하는 대신 요약부의 결정적 집계를 판다.
+      - name: Gate on source verification
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          VERIFY: ${{ steps.verify.outcome }}
+          AVAILABLE: ${{ steps.availablecheck.outcome }}
+        run: |
+          if [ "$VERIFY" = "success" ]; then
+            echo "소스 검증 통과."
+            exit 0
+          fi
+          # 요약부: "실패(수정 필요) 소스: N/M" 과 "  🟠 <key>: ..." 목록.
+          # FAIL 소스가 하나라도 있으면 예외 없이 실패다.
+          if ! grep -q "^실패(수정 필요) 소스: 0/" verify_report.txt 2>/dev/null; then
+            echo "::error::FAIL 로 판정된 소스가 있습니다. verify_report.txt 요약부를 확인하세요."
+            echo "::error::available 검증 결과: $AVAILABLE"
+            exit 1
+          fi
+          # 부분 실패가 '의안 1건, 사유는 모두 등록 대기' 인 경우에만 예외를 적용한다.
+          # 패턴의 콜론이 중요하다 — 요약부에는 소스별 한 줄 요약("  🟠 assembly_bill
+          # 목록 10건 ...")도 같은 들여쓰기·기호로 찍힌다. 부분 실패 목록만 "키:" 형태다.
+          partial_total=$(grep -cE "^  🟠 [A-Za-z0-9_]+: " verify_report.txt 2>/dev/null || true)
+          partial_pending=$(grep -cE "^  🟠 assembly_bill: .*모두 등록 대기" verify_report.txt 2>/dev/null || true)
+          if [ "$AVAILABLE" = "success" ] && \
+             [ "$partial_total" = "1" ] && [ "$partial_pending" = "1" ]; then
+            echo "::notice::의안 표본이 전부 등록 대기였지만 명시적 available 검증이 통과했고 FAIL 소스 0건이므로 통과 처리합니다."
+            exit 0
+          fi
+          echo "::error::소스 검증 실패. verify_report.txt 의 '제안이유 available/pending/failed' 를 확인하세요."
+          echo "::error::부분 실패 소스 ${partial_total}건(의안 등록 대기 ${partial_pending}건). available 검증 결과: $AVAILABLE"
+          echo "::error::failed>0 이면 구조·endpoint 문제입니다."
+          exit 1
+
+
+      - name: Gate on full pytest
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          PYTEST: ${{ steps.pytest.outcome }}
+        run: |
+          if [ "$PYTEST" != "success" ]; then
+            echo "::error::전체 pytest 실패. pytest_report.txt 확인."
+            exit 1
+          fi
+          echo "전체 pytest 통과."

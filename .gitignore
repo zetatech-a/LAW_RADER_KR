@@ -10,3 +10,10 @@ cloudflare-scheduler/.dev.vars
 cloudflare-scheduler/.dev.vars.*
 cloudflare-scheduler/.wrangler/
 cloudflare-scheduler/worker-configuration.d.ts
+
+# 브라우저 네트워크 캡처의 원본 HAR(쿠키·토큰 포함). sanitize 된 복사본만 남긴다.
+# 스크립트가 정상 종료하면 스스로 지우지만, 중단된 경우에도 커밋되지 않도록 막는다.
+tests/fixtures/_*.raw.har
+
+# pytest 캐시(작업 디렉터리 어디에 생기든 커밋하지 않는다)
+.pytest_cache/

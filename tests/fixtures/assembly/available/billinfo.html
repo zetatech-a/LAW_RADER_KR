@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ko">
+<body><div id="tab_billInfo_sect">
+<!-- 심사정보 반응형 탭 -->
+<!--    <div class="sw_con swiper-container snbSwiper">-->
+<!--        <ul class="swtab conlist swiper-wrapper">-->
+<!--            <li th:if="${param.tmprAnYn != null and param.tmprAnYn.toString() != 'Y'}" th:classappend="${param.tmprAnYn != null and param.tmprAnYn.toString() != 'Y'} ? 'on'" class="swiper-slide"><a href="javascript:" th:data-tabnm="stage" th:onclick="|app.Tab.billInfoTabClick(this)|">심사진행단계</a></li>-->
+<!--            <li th:if="${param.tmprAnYn != null and param.tmprAnYn.toString() != 'Y'}"  class="swiper-slide"><a href="javascript:" th:data-tabnm="rcp" th:onclick="|app.Tab.billInfoTabClick(this)|">접수정보</a></li>-->
+<!--            <li th:if="${(cmtProc != null and cmtProc.size() > 0) or (chegeProc != null and chegeProc.size() > 0)}" th:classappend="${param.tmprAnYn != null and param.tmprAnYn.toString() == 'Y'} ? 'on'" class="swiper-slide"><a href="javascript:" th:data-tabnm="cmt" th:onclick="|app.Tab.billInfoTabClick(this)|">위원회 심사</a></li>-->
+<!--            <li th:if="${bdgCmtProc != null and bdgCmtProc.size() > 0}" class="swiper-slide"><a href="javascript:" th:data-tabnm="bdgCmt" th:onclick="|app.Tab.billInfoTabClick(this)|">예비심사</a></li>-->
+<!--            <li th:if="${bdgProc != null and bdgProc.size() > 0}" class="swiper-slide"><a href="javascript:" th:data-tabnm="bdg" th:onclick="|app.Tab.billInfoTabClick(this)|">종합심사</a></li>-->
+<!--            <li th:if="${(plnryProc != null and plnryProc.size() > 0) and (plnryProc[0].presentDt != null or plnryProc[0].procDt != null or plnryProc[0].procResultCd != null or plnryProc[0].memoInfo != null)}" class="swiper-slide"><a href="javascript:" th:data-tabnm="plnry" th:onclick="|app.Tab.billInfoTabClick(this)|">본회의 심의</a></li>-->
+<!--            <li th:if="${param.govTransDt != null}" class="swiper-slide"><a href="javascript:" th:data-tabnm="govTrans" th:onclick="|app.Tab.billInfoTabClick(this)|" th:text="${isGovTransfer != null and isGovTransfer ? '정부이송' : '이송(통지)'}">정부이송</a></li>-->
+<!--            <li th:if="${billKindCd == '청원' and (procNotiDt != '' or procNotiInfo != '')}" class="swiper-slide"><a href="javascript:" th:data-tabnm="procNoti" th:onclick="|app.Tab.billInfoTabClick(this)|">처리통지</a></li>-->
+<!--            <li th:if="${param.announceDt != null and announce?.size() > 0}" class="swiper-slide"><a href="javascript:" th:data-tabnm="announce" th:onclick="|app.Tab.billInfoTabClick(this)|">공포</a></li>-->
+<!--            <li th:if="${param.headMemo != null and param.headMemo.toString() == 'Y'}" class="swiper-slide"><a href="javascript:" th:data-tabnm="addInfo" th:onclick="|app.Tab.billInfoTabClick(this)|">부가정보</a></li>-->
+<!--        </ul>-->
+<!--    </div>-->
+<!-- //심사정보 반응형 탭 -->
+<div class="container bill_info" id="container" style="height: auto;">
+<form id="billInfoForm">
+<h2 class="blind">심사정보탭</h2>
+<!-- 임시대안(DD로 시작하는 ID)은 의안정보 제외 -->
+<!-- 심사진행단계 -->
+<div class="bill_info_div div_on" id="stage_list">
+<div class="theme_title_wrap">
+<h3>심사진행단계</h3>
+<div class="exam_txt">※ 접수는 제안일자, 심사단계는 처리일자, 본회의는 의결일자 기준임</div>
+</div>
+<div class="exam_step">
+<div class="bill_step_list" id="insc-step-sect">
+<div class="on" data-gbn="RECEIVE" title="접수 (현재 진행중)">
+<div class="title">접수</div>
+<div class="stepdate">2026-08-06</div>
+</div>
+<div class="icon_step_arrow"></div>
+<div class="proc" data-gbn="CMT">
+<div class="title">위원회 심사</div>
+<div class="stepdate"></div>
+</div>
+<div class="icon_step_arrow"></div>
+<div class="proc" data-gbn="EXAM">
+<div class="title">체계자구 심사</div>
+<div class="stepdate"></div>
+</div>
+<div class="icon_step_arrow"></div>
+<div class="proc" data-gbn="MAIN">
+<div class="title">본회의 심의</div>
+<div class="stepdate"></div>
+</div>
+<div class="icon_step_arrow"></div>
+<div class="proc" data-gbn="GOVTRANS">
+<div class="title">정부이송</div>
+<div class="stepdate"></div>
+</div>
+<div class="icon_step_arrow"></div>
+<div class="proc" data-gbn="DCS">
+<div class="title">공포</div>
+<div class="stepdate"></div>
+</div>
+</div>
+</div>
+</div>
+<!-- //심사진행단계 -->
+<!-- 접수 정보 -->
+<div class="theme_area bill_info_div" id="rcp_list">
+<div class="theme_list">
+<h3>접수정보</h3>
+<div>
+<h4>의안접수정보</h4>
+<table class="align_center">
+<caption>의안접수정보 : 의안번호, 제안일자, 제안자, 문서, 제안회기</caption>
+<colgroup>
+<col style="width:120px;"/>
+<col style="width:120px;"/>
+<col style="width:220px;"/>
+<col style="width:200px;"/>
+<col style="width:370px"/>
+</colgroup>
+<thead>
+<tr>
+<th scope="col">의안번호</th>
+<th scope="col">제안일자</th>
+<th scope="col">제안자</th>
+<th scope="col">제안회기</th>
+<th scope="col">문서</th>
+</tr>
+</thead>
+<tbody id="insc-rcp-row">
+<tr>
+<td class="billNo">
+<i>의안번호</i>
+<span>2220475</span>
+</td>
+<td class="proposeDt">
+<i>제안일자</i>
+<span>2026-08-06</span>
+</td>
+<td class="proposer">
+<i>제안자</i>
+<span>권영세의원 등 10인</span>
+<a class="icon_list" href="javascript:;" onclick="Navigation.bill.popup.billProposer({billId: 'PRC_O2O6N0J7J3I0I1G5F0G5N0O0N1N3L2', billNo: '2220475', billName: '\uC870\uC138\uD2B9\uB840\uC81C\uD55C\uBC95 \uC77C\uBD80\uAC1C\uC815\uBC95\uB960\uC548', info: '\uAD8C\uC601\uC138\uC758\uC6D0 \uB4F1 10\uC778'});" title="새창 열림">제안자 목록</a>
+</td>
+<td class="sessionTitle">
+<i>제안회기</i>
+<span>제22대(2024~2028)제438회</span>
+</td>
+<td class="doc align_left">
+<i>문서</i>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<div class="theme_list" id="prntsummary-sect">
+<div>
+<h4>제안이유 및 주요내용</h4>
+<pre class="theme_list_summary" id="prntSummary" style="height: 130px;">제안이유 및 주요내용
+
+  현행법은 「기업 활력 제고를 위한 특별법」에 따른 사업재편계획에 따라 기업 간 주식 등의 교환이 이루어지는 경우, 주식 등의 양도로 발생하는 양도차익에 대한 양도소득세 또는 법인세를 양수한 주식 등을 처분할 때까지 과세 이연하는 특례를 적용하고 있으며, 그 적용기한을 2026년 12월 31일까지로 정하고 있음.
+  그런데 「기업 활력 제고를 위한 특별법」이 영구법으로 전환되고, 공급망 안정과 신산업 진출, 디지털전환ㆍ탄소중립 등 다양한 유형의 사업재편을 지속적으로 지원하고 있는 만큼, 기업 간 주식 등의 교환을 통한 사업재편이 원활하게 이루어질 수 있도록 관련 과세특례도 계속 유지할 필요가 있음.
+  이에 사업재편계획에 따른 기업 간 주식 등의 교환에 대한 과세특례의 적용기한을 2029년 12월 31일까지 3년 연장함으로써 전략적인 사업재편을 촉진하고 기업의 경쟁력 강화를 지원하려는 것임(안 제121조의30제1항).</pre>
+</div>
+<div class="member_list_more">
+<a class="closed" href="javascript:;" id="btnPrntSummaryMore">+더보기</a>
+</div>
+</div>
+</div>
+<script></script>
+<!--// 접수 정보 -->
+<!-- 심사경과 -->
+<!-- 위원회 심사 -->
+<!-- //위원회 심사 -->
+<!-- 예결산 예비심사/종합심사 -->
+<!-- // 예결산 예비심사/종합심사 -->
+<!-- 본회의 심의 (본회의 심의정보 or 본회의 수정안)-->
+<!-- //본회의 심의 -->
+<!-- 정부이송/이송(통지) -->
+<!-- //정부이송/이송(통지) -->
+<!-- 처리통지(청원) -->
+<!-- //처리통지(청원) -->
+<!-- 공포 -->
+<!-- //공포 -->
+<!-- 부가정보 -->
+<div class="theme_area bill_info_div" id="addInfo_list">
+<div class="theme_list">
+<h3>부가정보</h3>
+<div class="add_ds">
+<h4>비고</h4>
+<pre class="bill_memo">비용추계요구서 제출됨.</pre>
+</div>
+</div>
+</div>
+<!-- //부가정보 -->
+<!--// 심사경과 -->
+</form>
+</div>
+</div>
+</body></html>

@@ -15,19 +15,520 @@
   { "<service>": [ {"head":[...]}, {"row":[ {..필드..}, ... ]} ] }
 필드명은 서비스마다 다를 수 있어 흔한 후보를 순서대로 시도하고, 파싱 실패 시
 원본 JSON 을 debug/ 에 덤프한다(→ 한 번의 verify 로 정확한 필드 확정).
+
+enrich() 는 상세 페이지에서 '제안이유 및 주요내용'을 가져와 post.body 에 담는다.
+이 본문은 의안 전용 배치 요약(src/assembly_summary.py)의 입력이 되고, 요약이 실패하면
+메일에서 발췌 폴백으로 쓰인다.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
+import time
+from dataclasses import dataclass
+from enum import Enum
+from urllib.parse import parse_qsl, urlparse, urlunparse
 
-from ..models import Post
+from bs4 import BeautifulSoup
+
+from ..models import Post, ProposalContentStatus
 from .base import BaseScraper, clean_text
 
 log = logging.getLogger(__name__)
 
-_DETAIL = "https://likms.assembly.go.kr/bill/billDetail.do?billId={bill_id}"
+# 상세 URL 템플릿.
+#
+# 2026-08 라이브 확인 결과:
+#   - Open API 의 LINK_URL 은 아직 구 경로 /bill/billDetail.do 를 돌려주는데, 최신
+#     의안에서 그 경로는 "해당 의안 정보가 존재하지 않습니다" 를 응답한다(redirect 없음).
+#   - 현재 경로 /bill/bi/billDetailPage.do 는 HTTP 200 이다.
+# 그래서 LINK_URL 을 그대로 믿지 않고 BILL_ID 로 현재 경로를 다시 만든다(canonicalize).
+# config.yaml 의 assembly 소스에 detail_url 로 덮어쓸 수 있다.
+_DETAIL = "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId={bill_id}"
+
+# LINK_URL 이 이 경로들로 오면 무시하고 위 템플릿으로 다시 만든다. 경로 목록을 좁게
+# 유지하는 이유: 우리가 모르는 다른 상세 경로(예: 예산안·청원 전용)가 오면 그것은
+# 그대로 써야 하기 때문이다. '아는 죽은 경로'만 갈아끼운다.
+_LEGACY_DETAIL_PATHS = frozenset(
+    {"/bill/billdetail.do", "/bill/jsp/billdetail.jsp"}
+)
+
+# --- 제안이유 및 주요내용 수집 (2026-08 Playwright 캡처로 확정된 계약) ---
+#
+#   1) 상세 GET  : billDetailPage.do?billId=...  (초기 HTML 에는 제안이유가 없다)
+#   2) 후속 POST : billInfo.do
+#        payload : 상세 HTML form#form 의 named hidden input 전체(URL-encoded)
+#        header  : X-CSRF-TOKEN = meta[name="_csrf"], Referer = 상세 URL
+#        쿠키    : 같은 세션(Fetcher 가 requests.Session 을 공유한다)
+#        응답    : HTML. 제안이유가 등록돼 있으면 #prntsummary-sect 안의
+#                  pre#prntSummary 에 본문이 있고, 등록 전이면 그 섹션이
+#                  **아예 생성되지 않는다**(응답 자체는 정상).
+#
+# form#form 은 payload '원천'일 뿐이다 — 그 폼의 빈 action·기본 GET 을 replay 하면
+# 안 된다. JavaScript 가 폼을 serialize 한 뒤 별도 endpoint 로 POST 한다.
+_BILLINFO_ENDPOINT = "https://likms.assembly.go.kr/bill/bi/bill/detail/billInfo.do"
+_PAYLOAD_FORM_SELECTOR = "form#form"
+_CSRF_META_SELECTOR = 'meta[name="_csrf"]'
+_CSRF_HEADER = "X-CSRF-TOKEN"
+
+# billInfo.do 응답에서 인정하는 **유일한** 본문 selector(확정 계약, fail-closed).
+_BILLINFO_SUMMARY_SELECTOR = "pre#prntSummary"
+
+# 제안이유가 등록되면 생기는 섹션. 라이브 확인(Action #13): 등록 전에는 이 섹션도
+# pre#prntSummary 도 **아예 생성되지 않는다**. 섹션은 있는데 pre 만 없다면 그건
+# 등록 대기가 아니라 구조 변경이다.
+_SUMMARY_SECTION_SELECTOR = "#prntsummary-sect"
+
+# 정상 심사정보(billInfo.do) 응답의 뼈대. 제안이유 등록 여부와 무관하게 항상 있다.
+# 이게 다 있으면 '응답 자체는 정상'이라는 근거가 된다 — 등록 대기 판정의 전제.
+_BILLINFO_SHELL_SELECTORS = (
+    "#tab_billInfo_sect",
+    "form#billInfoForm",
+    "#stage_list",
+    "#rcp_list",
+    "#insc-rcp-row",
+)
+
+# 제안이유가 응답에 실렸다는 표식. 이 문구가 있는데 예상 selector 가 없다면 마크업이
+# 바뀐 것이므로 ERROR 다(등록 대기로 넘기면 고장이 묻힌다).
+_SUMMARY_MARKER = "제안이유 및 주요내용"
+
+# 초기 상세 GET 에만 쓰는 selector 목록. 구형(inline) 페이지 지원용 폴백을 포함한다.
+_SUMMARY_SELECTORS = (_BILLINFO_SUMMARY_SELECTOR, "#prntSummary", "#summaryContentDiv")
+
+
+class SummaryRequestError(ValueError):
+    """확정된 계약대로 요청을 만들 수 없음(form#form·CSRF·billId 문제).
+
+    이 예외가 나면 **요청을 보내지 않고** ERROR 로 처리한다. 근거가 어긋난 요청을
+    보내면 남의 의안 본문을 받거나 서버에 400 을 반복해서 던지게 된다.
+    """
+
+
+# 상세 페이지에는 값이 채워지기 전의 빈 컨테이너가 먼저 있을 수 있다. 공백·안내문
+# 수준의 짧은 텍스트를 '수집 성공'으로 보면 요약도 발췌도 못 쓰는 본문이 실린다.
+_MIN_SUMMARY_CHARS = 20
+
+# 상세 페이지가 '그 의안이 없다'고 답하는 경우(죽은 구 경로 등). 이건 등록 대기가
+# 아니라 우리가 잘못된 주소를 부른 것이므로 ERROR 다.
+_NOT_FOUND_MARKERS = (
+    "의안정보가존재하지않",
+    "의안정보가없습니다",
+    "해당의안정보가존재하지않",
+    "페이지를찾을수없",
+)
+
+_WS_ALL = re.compile(r"\s+")
+
+
+class SummaryProbe(str, Enum):
+    """응답에서 제안이유를 찾아본 결과. 이 네 값이 곧 상태 판정의 근거다.
+
+      FOUND      쓸 만한 본문이 있다                        → AVAILABLE
+      EMPTY      응답은 정상인데 제안이유가 아직 없다        → PENDING
+      MISSING    기대한 구조가 아니다(마크업/응답 변경)      → ERROR
+      UNEXPECTED 컨테이너에 알 수 없는 내용이 있다            → ERROR
+
+    **EMPTY 는 '컨테이너가 있는데 비어 있다'로 한정되지 않는다.** 라이브 확인
+    (Action #13) 결과, 제안이유가 등록되기 전에는 #prntsummary-sect 와
+    pre#prntSummary 가 아예 생성되지 않는다. 그 응답도 HTTP 200 정상 심사정보
+    HTML 이고 의안번호·제안일자·제안자는 정상적으로 들어 있다. 그래서 EMPTY 는
+    다음 둘 다를 뜻한다:
+
+      - pre#prntSummary 가 있는데 내용이 완전히 비어 있다
+      - pre#prntSummary 도 #prntsummary-sect 도 없지만 **정상 billInfo shell 은
+        온전하다**(= 응답 자체는 정상, 원문만 아직 등록되지 않음)
+
+    반대로 섹션은 있는데 pre 만 없거나, 제안이유 표식은 있는데 예상 selector 가
+    없거나, 정상 shell 자체가 없으면 MISSING(ERROR) 이다 — 그런 것을 EMPTY 로
+    넘기면 마크업 변경이 '등록 대기'로 위장된다.
+
+    판정 규칙 전체는 _probe_billinfo 참고. 초기 상세 GET 용 _probe_summary 는
+    구형(inline) 페이지 지원이라 폴백 selector 를 함께 본다.
+    """
+
+    FOUND = "found"
+    EMPTY = "empty"
+    MISSING = "missing"
+    UNEXPECTED = "unexpected"
+
+
+# 상세 URL canonicalize 에 쓰는 호스트.
+_ALLOWED_HOST = "likms.assembly.go.kr"
+
+# 디버그 덤프 파일명에 bill_id 를 그대로 쓰면 경로 조작이 될 수 있다.
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def _canonical_detail_url(link: str, bill_id: str, template: str) -> str:
+    """상세 URL 을 현재 유효한 경로로 맞춘다.
+
+    Open API 의 LINK_URL 이 죽은 구 경로(/bill/billDetail.do)를 돌려주므로, 그 경로가
+    오면 BILL_ID 로 현재 경로를 다시 만든다. 그 외의 LINK_URL 은 공식 값이므로
+    존중한다 — 우리가 모르는 상세 경로를 임의로 갈아끼우면 오히려 깨진다.
+    """
+    link = (link or "").strip()
+    if not link.lower().startswith("http"):
+        return template.format(bill_id=bill_id)
+    parts = urlparse(link)
+    if parts.hostname == _ALLOWED_HOST and parts.path.lower() in _LEGACY_DETAIL_PATHS:
+        return template.format(bill_id=bill_id)
+    return link
+
+
+def _is_not_found_page(html: str) -> bool:
+    """상세 페이지가 '해당 의안 정보가 존재하지 않습니다' 류를 응답했는지."""
+    squished = _WS_ALL.sub("", html or "")
+    return any(m in squished for m in _NOT_FOUND_MARKERS)
+
+
+def _probe_summary(soup: BeautifulSoup) -> tuple[SummaryProbe, str]:
+    """제안이유 컨테이너를 들여다보고 (판정, 텍스트) 를 돌려준다.
+
+    컨테이너가 여럿 걸리면 가장 좋은 결과를 쓴다(FOUND > EMPTY > UNEXPECTED). 하나가
+    비어 있어도 다른 하나에 본문이 있으면 본문을 쓴다는 뜻이다.
+    """
+    best = SummaryProbe.MISSING
+    best_text = ""
+    rank = {
+        SummaryProbe.MISSING: 0,
+        SummaryProbe.UNEXPECTED: 1,
+        SummaryProbe.EMPTY: 2,
+        SummaryProbe.FOUND: 3,
+    }
+    for sel in _SUMMARY_SELECTORS:
+        el = soup.select_one(sel)
+        if el is None:
+            continue                      # 이 셀렉터는 없음 — 다음 후보로
+        text = clean_text(el.get_text("\n"))
+        if len(text) >= _MIN_SUMMARY_CHARS:
+            probe, value = SummaryProbe.FOUND, text
+        elif not text:
+            probe, value = SummaryProbe.EMPTY, ""
+        else:
+            # 짧은데 본문이라 하기엔 모자란다 — 뭘 받은 건지 알 수 없다.
+            probe, value = SummaryProbe.UNEXPECTED, text
+        if rank[probe] > rank[best]:
+            best, best_text = probe, value
+    return best, best_text
+
+
+# --- 진단 덤프 정화 ---
+#
+# debug/ 는 verify 워크플로가 아티팩트로 업로드한다(보존 7일). 그런데 덤프가 남는 때는
+# 정확히 '요청을 만들지 못했거나 응답이 이상한' 때이고, 그 원본 HTML 에는 살아 있는
+# 세션의 CSRF 토큰이 meta[name="_csrf"] 와 hidden input 값으로 들어 있다. 진단에
+# 필요한 것은 구조와 필드 '이름'이므로, 값만 지우고 이름은 남긴다.
+_SECRET_FIELD_HINTS = (
+    "csrf", "xsrf", "token", "session", "jsessionid", "wmonid",
+    "auth", "secret", "passwd", "password", "nonce", "sid",
+)
+# 세션 쿠키 값에는 '?' 도 '&' 도 들어가지 않는다. 문자 클래스에서 둘 다 빼지 않으면
+# 이미 구조가 있는 문자열에서 패턴이 URL 경계를 넘어 삼켜, 정화 뒤에 남아야 할 키
+# 이름과 공개 식별자(billId)까지 지운다 — 덤프의 진단 가치가 바로 그 billId 다.
+_SECRET_VALUE_PATTERNS = (
+    re.compile(r"JSESSIONID=[^;\"'\s&?]+", re.I),
+    re.compile(r"WMONID=[^;\"'\s&?]+", re.I),
+    re.compile(r"\b[0-9a-f]{32,}\b", re.I),
+)
+_REDACTED = "REDACTED"
+
+# 값이 URL 인 HTML 속성. 문자열이 아니라 URL 로 취급해 정화한다.
+_URL_VALUED_ATTRS = (
+    "action", "formaction", "href", "src", "poster", "cite",
+    "data-url", "data-src", "data-href", "data-action",
+)
+
+# 공개 식별자라 값을 남겨도 되는 키. 이름 힌트보다 우선한다 — 덤프가 어느 의안의
+# 것인지 알 수 없으면 진단 자료로서 쓸모가 없다.
+_PUBLIC_URL_KEYS = {"billid", "bill_id", "billno", "agefrom", "ageto", "age", "tabnm"}
+
+
+def _is_secret_field(name: str) -> bool:
+    low = (name or "").strip().lower()
+    if low in _PUBLIC_URL_KEYS:
+        return False
+    return any(h in low for h in _SECRET_FIELD_HINTS)
+
+
+def _redact_url(url: str) -> str:
+    """URL 의 쿼리·경로 파라미터에서 비밀 이름의 '값'만 지운다. 이름은 남긴다.
+
+    값 패턴만으로는 부족하다 — 하이픈 섞인 UUID·Base64 토큰은 어느 패턴에도 걸리지
+    않고, 패턴은 쿼리 파라미터 '이름'을 모른다. 경로 파라미터(;jsessionid=…)까지 보는
+    이유는 쿠키가 막힌 클라이언트에 서블릿 컨테이너가 그 자리에 세션 ID 를 붙이기
+    때문이다(likms 가 그 형태다).
+    """
+    try:
+        parts = urlparse(url or "")
+    except ValueError:
+        return _REDACTED
+
+    def _values(raw: str, sep: str) -> str:
+        out = []
+        for chunk in raw.split(sep):
+            if not chunk:
+                continue
+            name, eq, value = chunk.partition("=")
+            if not eq:
+                out.append(_redact_values(chunk))
+                continue
+            out.append(
+                f"{name}={_REDACTED if _is_secret_field(name) else _redact_values(value)}"
+            )
+        return sep.join(out)
+
+    # 값 패턴은 조각마다 적용한다. 조립이 끝난 URL 에 다시 돌리면 경계를 넘어 삼킨다.
+    return urlunparse(
+        parts._replace(
+            path=_redact_values(parts.path),
+            params=_values(parts.params, ";"),
+            query=_values(parts.query, "&"),
+        )
+    )
+
+
+def _redact_attr_url(value: str) -> str:
+    """URL 속성값 정화. 정화할 파라미터가 없으면 구조를 그대로 둔다.
+
+    이름 기준 정화가 필요한 것은 쿼리(?a=b)와 경로 파라미터(;a=b)뿐이다. 둘 다 없는
+    값까지 재조립하면 정화와 무관한 곳이 바뀐다(href="#" → href="").
+    """
+    if "?" in value or ";" in value:
+        return _redact_url(value)
+    return _redact_values(value)
+
+
+def _redact_html(html: str) -> str:
+    """덤프용 정화: 이름이 비밀인 meta/input 값을 지우고 값 패턴도 지운다.
+
+    _csrf_header / _csrf_parameter 의 content 는 토큰이 아니라 헤더 '이름'(예:
+    X-CSRF-TOKEN)이라 남긴다 — 계약이 바뀌었는지 보려면 그 값이 필요하다.
+    파싱이 실패해도 원문을 그대로 흘리지 않고 값 패턴 정화는 반드시 적용한다.
+    """
+    text = html or ""
+    try:
+        soup = BeautifulSoup(text, "lxml")
+    except Exception:  # noqa: BLE001 — 진단 덤프가 파서 문제로 실패하면 안 된다
+        return _redact_values(text)
+
+    for el in soup.find_all(["input", "meta"]):
+        name = (el.get("name") or el.get("id") or "").lower()
+        attr = "value" if el.name == "input" else "content"
+        if not el.get(attr) or not any(h in name for h in _SECRET_FIELD_HINTS):
+            continue
+        if el.name == "meta" and ("header" in name or "param" in name):
+            continue
+        el[attr] = _REDACTED
+
+    # 인라인 스크립트에 토큰이 박혀 오는 경우가 흔하다. 셀렉터 진단에는 쓰이지 않는다.
+    for el in soup.find_all("script"):
+        if not (el.get("src") or "").strip():
+            el.string = ""
+
+    # 값이 URL 인 속성(form@action, a@href, script@src …)도 URL 규칙을 태운다.
+    # 필드 값과 같은 이유다 — 속성 이름은 비밀이 아니라 마스킹 대상이 아니고,
+    # 값 패턴은 쿼리 파라미터 '이름'을 모른다. 외부 script@src 는 위에서 일부러
+    # 남기므로 특히 위험하다. 이 덤프는 debug/ 로 아티팩트에 올라간다.
+    for el in soup.find_all(True):
+        for attr in _URL_VALUED_ATTRS:
+            value = el.get(attr)
+            if isinstance(value, str) and value.strip():
+                el[attr] = _redact_attr_url(value)
+
+    return _redact_values(str(soup))
+
+
+def _redact_values(text: str) -> str:
+    out = text or ""
+    for pat in _SECRET_VALUE_PATTERNS:
+        out = pat.sub(_REDACTED, out)
+    return out
+
+
+def _bill_id_in_url(url: str) -> str:
+    """URL 쿼리의 billId(대소문자·표기 변형 포함). 없으면 빈 문자열."""
+    try:
+        query = urlparse(url or "").query
+    except ValueError:
+        return ""
+    for k, v in parse_qsl(query, keep_blank_values=True):
+        if k.strip().lower() in _BILL_ID_FIELDS:
+            return (v or "").strip()
+    return ""
+
+
+def _form_bill_id(soup: BeautifulSoup) -> str:
+    """상세 HTML form#form 의 billId hidden input 값. 없으면 빈 문자열."""
+    form = soup.select_one(_PAYLOAD_FORM_SELECTOR)
+    if form is None:
+        return ""
+    for name, value in _hidden_inputs(form).items():
+        if name.lower() in _BILL_ID_FIELDS:
+            return (value or "").strip()
+    return ""
+
+
+def _check_bill_identity(
+    soup: BeautifulSoup, post_id: str, *, requested_url: str, final_url: str
+) -> tuple[bool, str]:
+    """이 상세 응답이 정말 post_id 의 의안인지 확인한다 → (확인됨, 어긋난 사유).
+
+    왜 필요한가: Open API 의 LINK_URL 은 우리가 모르는 경로면 그대로 존중하는데, 그
+    값이 다른 의안을 가리키거나 redirect 가 걸리면 **A 의안 메일에 B 의안의 제안이유가
+    실린다.** billInfo.do 경로는 build_summary_request 가 form 의 billId 를 대조해
+    막지만, 상세 HTML 에 제안이유가 이미 들어 있는 inline 경로는 그 검사 전에 값을
+    채우고 끝나 버려 무방비였다.
+
+    근거는 셋이고 서로 보완한다:
+      form#form 의 billId  — 페이지가 스스로 밝히는 의안(가장 강한 근거)
+      요청한 URL 의 billId  — LINK_URL 이 다른 의안을 가리키는 경우를 잡는다
+      최종 응답 URL 의 billId — redirect 로 끌려간 경우를 잡는다
+
+    하나라도 어긋나면 확인 실패다(mismatch). 어긋난 것은 없지만 **근거가 하나도 없으면**
+    확인된 것이 아니다 — 그때도 inline 을 채택하지 않는다(fail-closed). 잘못된 요약을
+    자신 있게 싣는 것보다 제목·링크만 보내는 편이 낫다.
+    """
+    checks = (
+        ("form#form 의 billId", _form_bill_id(soup)),
+        ("요청 URL 의 billId", _bill_id_in_url(requested_url)),
+        ("최종 응답 URL 의 billId", _bill_id_in_url(final_url)),
+    )
+    confirmed = False
+    for label, found in checks:
+        if not found:
+            continue
+        if found != post_id:
+            return False, f"{label}({found!r}) 가 목록의 BILL_ID({post_id!r}) 와 다름"
+        confirmed = True
+    return confirmed, ""
+
+
+def _missing_shell(soup: BeautifulSoup) -> list[str]:
+    """정상 심사정보 응답이라면 반드시 있어야 할 구조 중 빠진 것들."""
+    return [s for s in _BILLINFO_SHELL_SELECTORS if soup.select_one(s) is None]
+
+
+def _probe_billinfo(soup: BeautifulSoup) -> tuple[SummaryProbe, str, str]:
+    """billInfo.do 응답 판정 — (판정, 본문, 사유) 를 돌려준다. fail-closed.
+
+    라이브 확인(Action #13)으로 드러난 실제 계약:
+    **제안이유가 등록되기 전에는 pre#prntSummary 도 #prntsummary-sect 도 아예 생성되지
+    않는다.** 그 응답도 HTTP 200 정상 심사정보 HTML 이고 의안번호·제안일자·제안자는
+    정상적으로 들어 있다. 그래서 '알려진 컨테이너가 있는데 비어 있을 때만 PENDING'
+    이라는 이전 가정은 실제와 달랐다(등록 대기가 전부 ERROR 로 잡혔다).
+
+    판정:
+      pre#prntSummary 있음 + 20자 이상            → FOUND    (AVAILABLE)
+      pre#prntSummary 있음 + 비어 있음 + 정상 shell → EMPTY  (PENDING)
+      pre#prntSummary 있음 + 비어 있음 + shell 없음 → MISSING (ERROR)
+      pre#prntSummary 있음 + 짧은 잔여 텍스트      → UNEXPECTED (ERROR)
+      pre 없음 + #prntsummary-sect 있음            → MISSING  (ERROR, 구조 변경)
+      pre 없음 + 제안이유 marker 있음              → MISSING  (ERROR, 마크업 변경)
+      pre 없음 + 정상 shell 전부 있음 + 위 둘 다 없음 → EMPTY (PENDING, 등록 전)
+      정상 shell 자체가 없음                        → MISSING  (ERROR)
+
+    PENDING 은 어느 경로로 오든 '정상 심사정보 응답'을 확인한 뒤에만 준다. 그렇지
+    않으면 빈 pre 만 남은 오류·중간 페이지가 등록 대기로 위장되어 덤프도 남지 않고,
+    그 의안은 제안이유를 못 받은 채 seen 으로 확정되어 영영 재조회되지 않는다.
+
+    FOUND 는 shell 을 요구하지 않는다 — 본문을 이미 확보한 상태이므로, 주변 마크업이
+    바뀌었다는 이유로 정상 수집을 실패로 뒤집을 이유가 없다.
+
+    제안일자·문서 유무·소관위원회 상태 같은 정황은 보지 않는다 — 등록 여부와 직접
+    관계가 없고, 그런 정황으로 PENDING 을 추정하면 고장을 '등록 대기'로 위장하게 된다.
+    """
+    el = soup.select_one(_BILLINFO_SUMMARY_SELECTOR)
+    if el is not None:
+        text = clean_text(el.get_text("\n"))
+        if len(text) >= _MIN_SUMMARY_CHARS:
+            return SummaryProbe.FOUND, text, ""
+        if not text:
+            missing_shell = _missing_shell(soup)
+            if missing_shell:
+                return (
+                    SummaryProbe.MISSING,
+                    "",
+                    f"{_BILLINFO_SUMMARY_SELECTOR} 가 비어 있는데 정상 심사정보 "
+                    f"응답도 아님(없는 구조: {', '.join(missing_shell)})",
+                )
+            return SummaryProbe.EMPTY, "", ""
+        return SummaryProbe.UNEXPECTED, text, "본문이 너무 짧음"
+
+    # pre#prntSummary 가 없다. 등록 전인지 구조가 바뀐 것인지 가려야 한다.
+    if soup.select_one(_SUMMARY_SECTION_SELECTOR) is not None:
+        return (
+            SummaryProbe.MISSING,
+            "",
+            f"{_SUMMARY_SECTION_SELECTOR} 는 있는데 "
+            f"{_BILLINFO_SUMMARY_SELECTOR} 가 없음(마크업 변경)",
+        )
+    if _SUMMARY_MARKER in soup.get_text(" "):
+        return (
+            SummaryProbe.MISSING,
+            "",
+            f"응답에 '{_SUMMARY_MARKER}' 표식은 있는데 "
+            f"{_BILLINFO_SUMMARY_SELECTOR} 가 없음(마크업 변경)",
+        )
+
+    missing_shell = _missing_shell(soup)
+    if missing_shell:
+        return (
+            SummaryProbe.MISSING,
+            "",
+            f"정상 심사정보 응답이 아님(없는 구조: {', '.join(missing_shell)})",
+        )
+
+    # 정상 shell + 제안이유 섹션 자체가 없음 = 아직 등록되지 않음.
+    return SummaryProbe.EMPTY, "", ""
+
+
+def _extract_summary(soup: BeautifulSoup) -> str:
+    """'제안이유 및 주요내용' 텍스트. 못 찾거나 사실상 비어 있으면 빈 문자열."""
+    probe, text = _probe_summary(soup)
+    return text if probe is SummaryProbe.FOUND else ""
+
+
+def _hidden_inputs(form) -> dict[str, str]:
+    """폼의 hidden input 전체(name → value). CSRF 토큰도 보통 여기 들어 있다."""
+    out: dict[str, str] = {}
+    for el in form.find_all("input"):
+        if (el.get("type") or "").strip().lower() != "hidden":
+            continue
+        name = (el.get("name") or "").strip()
+        if name:
+            out[name] = el.get("value") or ""
+    return out
+
+
+# form#form 안에서 의안 ID 를 담는 hidden input 이름(소문자 비교).
+_BILL_ID_FIELDS = ("billid", "bill_id")
+
+
+@dataclass(frozen=True)
+class SummaryRequest:
+    """제안이유를 받아오기 위해 보낼 요청(확정된 계약대로 조립된 것)."""
+
+    method: str              # 확정 계약상 항상 "post"
+    action: str              # billInfo.do 절대 URL
+    data: dict[str, str]     # form#form 의 named hidden input 전체
+    headers: dict[str, str]  # {"X-CSRF-TOKEN": meta[name="_csrf"] 값}
+
+    def shape(self) -> dict:
+        """값을 뺀 요청 '형태'. 캡처 도구가 저장소에 기록하는 용도.
+
+        토큰·세션값은 담지 않는다 — 이름만으로 회귀 검증이 가능하고, 값은 저장소에
+        남겨서는 안 되는 비밀이다.
+        """
+        return {
+            "method": self.method,
+            "action": self.action,
+            "data_keys": sorted(self.data),
+            "header_keys": sorted(self.headers),
+        }
+
 
 # 응답 레코드에서 값을 찾을 때 시도할 필드명 후보(명세서 출력값 기준 + 변형 대비)
 _ID_FIELDS = ("BILL_ID", "billId", "BILL_NO", "billNo")
@@ -49,7 +550,23 @@ class AssemblyBillScraper(BaseScraper):
         # AGE 는 계류의안 서비스의 요청인자가 아니므로 명시 설정된 경우에만 전송
         self.age = str(ex["age"]) if ex.get("age") not in (None, "") else ""
         self.page_size = int(ex.get("page_size", 100))
+        # LINK_URL 이 없는 레코드에만 쓰는 상세 URL 폴백. 사이트가 경로를 옮기면
+        # 코드 배포 없이 config 로 고칠 수 있게 덮어쓰기를 허용한다.
+        self.detail_url = str(ex.get("detail_url") or _DETAIL)
         self.api_key = os.environ.get("ASSEMBLY_API_KEY", "")
+
+        # 상세 수집 단계의 안전장치. 사이트나 billInfo.do 가 통째로 죽으면 신규 의안
+        # 하나하나가 (타임아웃 × 재시도) 를 각자 다시 겪는다. max_new_per_source 가
+        # 50 이므로 전면 장애 때 상세 단계만 수십 분을 먹고, 그만큼 다이제스트가
+        # 늦어지며 다음 15분 주기 실행까지 밀린다. 둘 중 하나라도 걸리면 남은 의안은
+        # **요청 없이** ERROR 로 떨어뜨린다(발송은 그대로 진행되고 실패로 집계된다).
+        self.detail_budget_sec = float(ex.get("detail_budget_sec", 120.0))
+        self.detail_max_consecutive_failures = int(
+            ex.get("detail_max_consecutive_failures", 5)
+        )
+        self._detail_deadline: float | None = None
+        self._consecutive_failures = 0
+        self._breaker_note = ""
 
     def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
         if not self.api_key:
@@ -114,9 +631,9 @@ class AssemblyBillScraper(BaseScraper):
             seen.add(bill_id)
             proposer = clean_text(self._first(row, _PROPOSER_FIELDS))
             title = f"{name} ({proposer})" if proposer else name
-            # 공식 상세 URL(LINK_URL)이 있으면 사용, 없으면 billDetail 로 구성
+            # LINK_URL 이 죽은 구 경로면 BILL_ID 로 현재 경로를 다시 만든다.
             link = clean_text(self._first(row, _URL_FIELDS))
-            url = link if link.startswith("http") else _DETAIL.format(bill_id=bill_id)
+            url = _canonical_detail_url(link, bill_id, self.detail_url)
             posts.append(
                 Post(
                     source_key=self.key,
@@ -168,6 +685,241 @@ class AssemblyBillScraper(BaseScraper):
                 return str(v)
         return ""
 
+    # --- 상세: 제안이유 및 주요내용 ---
     def enrich(self, post: Post) -> None:
-        # 의안은 제목·의안번호·제안자·상세링크가 핵심이라 별도 본문 수집은 생략.
-        return
+        """상세 페이지에서 '제안이유 및 주요내용'을 가져와 post.body 에 담는다.
+
+        본문을 못 채워도 그 사유를 post.proposal_status 로 남긴다 — '아직 등록 안 됨
+        (PENDING)'과 '수집 실패(ERROR)'는 다른 사건이고, 메일 문구도 집계도 달라진다.
+
+        어떤 실패도 밖으로 던지지 않는다 — 의안 한 건의 수집 실패가 다른 의안이나
+        메일 발송을 막아서는 안 된다.
+
+        전면 장애일 때는 요청을 아예 보내지 않고 ERROR 로 떨어뜨린다(_detail_blocked).
+        """
+        blocked = self._detail_blocked()
+        if blocked:
+            self._set_status(post, ProposalContentStatus.ERROR, blocked)
+            return
+
+        try:
+            self._fill_proposal_reason(post)
+        except Exception as e:  # noqa: BLE001
+            # 네트워크·HTTP 오류는 '등록 대기'가 아니다. 반드시 ERROR 로 센다.
+            self._set_status(
+                post, ProposalContentStatus.ERROR, f"{type(e).__name__}: {e}"
+            )
+            log.warning(
+                "[%s] 제안이유 수집 실패(%s) %s: %s",
+                self.key,
+                post.post_id,
+                post.url,
+                e,
+            )
+
+        # AVAILABLE·PENDING 은 '응답을 제대로 받았다'는 뜻이다 — 연속 실패를 끊는다.
+        # 등록 대기를 실패로 세면 갓 접수된 의안이 몰린 날 브레이커가 헛돈다.
+        if post.proposal_status is ProposalContentStatus.ERROR:
+            self._consecutive_failures += 1
+        else:
+            self._consecutive_failures = 0
+
+    def _detail_blocked(self) -> str:
+        """상세 수집을 더 시도하지 말아야 하면 그 사유, 계속해도 되면 빈 문자열.
+
+        첫 호출에 시간예산을 건다. 목록 수집까지의 시간은 세지 않는다 — 막고 싶은 것은
+        상세 단계가 혼자 폭주하는 것이다.
+        """
+        limit = self.detail_max_consecutive_failures
+        if limit > 0 and self._consecutive_failures >= limit:
+            if not self._breaker_note:
+                self._breaker_note = (
+                    f"상세 수집 연속 실패 {self._consecutive_failures}건 — "
+                    "전면 장애로 판단해 남은 의안은 요청 없이 ERROR 로 둡니다."
+                )
+                log.error("[%s] %s", self.key, self._breaker_note)
+            return self._breaker_note
+
+        if self.detail_budget_sec > 0:
+            now = time.monotonic()
+            if self._detail_deadline is None:
+                self._detail_deadline = now + self.detail_budget_sec
+            elif now >= self._detail_deadline:
+                if not self._breaker_note:
+                    self._breaker_note = (
+                        f"상세 수집 시간예산({self.detail_budget_sec:.0f}초) 소진 — "
+                        "남은 의안은 요청 없이 ERROR 로 둡니다."
+                    )
+                    log.error("[%s] %s", self.key, self._breaker_note)
+                return self._breaker_note
+        return ""
+
+    def _set_status(
+        self, post: Post, status: ProposalContentStatus, note: str = ""
+    ) -> None:
+        post.proposal_status = status
+        post.proposal_note = note
+
+    def _fill_proposal_reason(self, post: Post) -> None:
+        resp = self.fetcher.get(post.url, referer=self.list_url)
+        html = self.fetcher.text(resp)
+
+        # 0) 상세 페이지 자체가 유효한가. '해당 의안 정보가 존재하지 않습니다' 는
+        #    등록 대기가 아니라 우리가 잘못된 주소를 부른 것이다.
+        if _is_not_found_page(html):
+            self._set_status(
+                post,
+                ProposalContentStatus.ERROR,
+                "상세 페이지가 '의안 정보 없음'을 응답 — 상세 URL(detail_url) 확인 필요",
+            )
+            self._dump(post, html)
+            return
+
+        soup = BeautifulSoup(html, "lxml")
+
+        # 0-1) 받아온 페이지가 정말 이 의안의 것인가. LINK_URL 이 다른 의안을 가리키거나
+        #      redirect 로 끌려가면 남의 제안이유를 이 의안 것으로 싣게 된다.
+        same_bill, mismatch = _check_bill_identity(
+            soup,
+            post.post_id,
+            requested_url=post.url,
+            final_url=getattr(resp, "url", "") or "",
+        )
+        if mismatch:
+            self._fail(post, f"상세 페이지가 다른 의안의 것: {mismatch}", html)
+            return
+
+        # 1) 구형 페이지 지원: 상세 HTML 에 제안이유가 **실제로 실려 있으면** 쓴다.
+        #    비어 있다는 이유로 PENDING 으로 넘기지 않는다 — 현행 페이지는 초기 HTML 의
+        #    컨테이너가 비어 있는 것이 정상이고, 내용은 billInfo.do 가 준다.
+        #    단, 이 의안의 페이지임이 **확인됐을 때만** 채택한다. 여기서 채택하면
+        #    build_summary_request 의 billId 대조를 거치지 않고 그대로 발행된다.
+        inline_probe, inline_text = _probe_summary(soup)
+        if inline_probe is SummaryProbe.FOUND:
+            if not same_bill:
+                self._fail(
+                    post,
+                    "상세 HTML 에 제안이유가 있으나 이 의안의 페이지인지 확인할 수 없음"
+                    "(form#form·요청 URL·최종 URL 어디에도 billId 가 없음)",
+                    html,
+                )
+                return
+            post.body = inline_text
+            self._set_status(post, ProposalContentStatus.AVAILABLE, "상세 HTML 에 포함")
+            return
+
+        # 2) 확정된 계약대로 billInfo.do 요청을 만든다.
+        #    만들 수 없으면(폼·CSRF·billId 문제) **요청을 보내지 않고** ERROR 다.
+        try:
+            req = self.build_summary_request(soup, post)
+        except SummaryRequestError as e:
+            self._fail(post, str(e), html)
+            return
+
+        # 3) 전송. 네트워크·HTTP 오류는 enrich 가 ERROR 로 받는다(2xx 만 여기 도달).
+        resp = self.fetcher.post(
+            req.action, data=req.data, referer=post.url, headers=req.headers
+        )
+        body_html = self.fetcher.text(resp)
+        if _is_not_found_page(body_html):
+            self._fail(post, "billInfo.do 가 '의안 정보 없음'을 응답", body_html)
+            return
+
+        # 4) 확정된 계약대로 판정한다(fail-closed).
+        probe, text, reason = _probe_billinfo(BeautifulSoup(body_html, "lxml"))
+        if probe is SummaryProbe.FOUND:
+            post.body = text
+            self._set_status(post, ProposalContentStatus.AVAILABLE, "billInfo.do 응답")
+            return
+        if probe is SummaryProbe.EMPTY:
+            # 정상 심사정보 응답인데 제안이유 섹션이 아직 없거나 비어 있다
+            # = 원문이 아직 등록되지 않음(장애가 아니다).
+            self._set_status(
+                post,
+                ProposalContentStatus.PENDING,
+                "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+            )
+            return
+
+        # 구조가 바뀌었거나 읽을 수 없는 응답 → PENDING 으로 넘기면 고장이 묻힌다.
+        note = f"billInfo.do 응답이 예상과 다름: {reason}"
+        if probe is SummaryProbe.UNEXPECTED and text:
+            note += f" ({text[:80]})"
+        self._fail(post, note, body_html)
+
+    def _fail(self, post: Post, note: str, dump: str) -> None:
+        """ERROR 로 판정하고 진단용 덤프를 남긴다."""
+        self._set_status(post, ProposalContentStatus.ERROR, note)
+        log.info("[%s] 제안이유 미확보(%s): %s", self.key, post.post_id, note)
+        self._dump(post, dump)
+
+    def _dump(self, post: Post, content: str) -> None:
+        self._dump_debug(
+            f"detail_{_UNSAFE_NAME.sub('_', post.post_id)}", _redact_html(content)
+        )
+
+    def build_summary_request(
+        self, soup: BeautifulSoup, post: Post
+    ) -> SummaryRequest:
+        """확정된 계약대로 billInfo.do POST 요청을 만든다(전송은 하지 않는다).
+
+        2026-08 Playwright 캡처로 확정된 계약:
+            POST https://likms.assembly.go.kr/bill/bi/bill/detail/billInfo.do
+            payload : 상세 HTML form#form 의 named hidden input 전체(URL-encoded)
+            header  : X-CSRF-TOKEN = meta[name="_csrf"] 의 content
+                      Referer     = 해당 상세 URL
+            쿠키    : 상세 GET 과 **같은 세션**(Fetcher 가 세션을 공유한다)
+            응답    : HTML, 본문은 pre#prntSummary
+
+        form#form 은 payload '원천'일 뿐이다. 그 폼의 빈 action 과 기본 GET 을 그대로
+        replay 하면 안 된다 — JavaScript 가 폼을 serialize 한 뒤 별도 endpoint 로
+        POST 하기 때문이다(그렇게 replay 했다가 billId 가 중복되어 HTTP 400 을 받았다).
+
+        전송과 분리해 둔 이유는 캡처 도구가 '실제로 보낼 요청'의 형태를 기록해야 하기
+        때문이다. 도구가 조립 규칙을 따로 구현하면 본 코드와 어긋난다.
+
+        요청을 만들 수 없으면 SummaryRequestError — 호출자는 **전송하지 않고** ERROR 로
+        처리한다. 근거가 어긋난 요청을 보내는 것보다 보내지 않는 편이 안전하다.
+        """
+        form = soup.select_one(_PAYLOAD_FORM_SELECTOR)
+        if form is None:
+            raise SummaryRequestError(
+                f"상세 HTML 에 {_PAYLOAD_FORM_SELECTOR} 가 없음(페이지 구조 변경)"
+            )
+
+        data = _hidden_inputs(form)
+        if not data:
+            raise SummaryRequestError(
+                f"{_PAYLOAD_FORM_SELECTOR} 에 name 있는 hidden input 이 없음"
+            )
+
+        # 폼의 billId 가 이 의안의 것인지 확인한다. 없거나 다르면 남의 의안을 조회하게
+        # 되므로 절대 보내지 않는다(A 의안 메일에 B 의안 본문이 실리는 최악의 오류).
+        form_bill_id = ""
+        for name, value in data.items():
+            if name.lower() in _BILL_ID_FIELDS:
+                form_bill_id = (value or "").strip()
+                break
+        if not form_bill_id:
+            raise SummaryRequestError(
+                f"{_PAYLOAD_FORM_SELECTOR} 에 billId 가 없음"
+            )
+        if form_bill_id != post.post_id:
+            raise SummaryRequestError(
+                "form#form 의 billId 가 목록의 BILL_ID 와 다름 "
+                f"(form={form_bill_id!r} 목록={post.post_id!r})"
+            )
+
+        meta = soup.select_one(_CSRF_META_SELECTOR)
+        token = (meta.get("content") or "").strip() if meta is not None else ""
+        if not token:
+            raise SummaryRequestError(
+                f'{_CSRF_META_SELECTOR} 토큰이 없음 — 세션/페이지 구조 확인 필요'
+            )
+
+        return SummaryRequest(
+            method="post",
+            action=_BILLINFO_ENDPOINT,
+            data=data,
+            headers={_CSRF_HEADER: token},
+        )

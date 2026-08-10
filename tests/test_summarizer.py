@@ -932,13 +932,14 @@ def test_time_budget_stops_summarizing():
 def test_cap_is_spread_across_sources_not_config_order():
     # 앞쪽 소스가 상한을 다 먹으면 뒤쪽 소스는 글이 더 최신이어도 전부 원문 발췌로
     # 나간다. 상한은 소스별로 고르게 배분되어야 한다.
+    # (의안은 별도 배치 경로를 타므로 여기서는 일반 소스 둘로 확인한다.)
     first = [
         _post(source_key="fsc_press", source_name="금융위 · 보도자료",
               post_id=f"a{i}", url=f"https://example.com/a{i}")
         for i in range(10)
     ]
     later = [
-        _post(source_key="assembly_bill", source_name="의안정보시스템 · 계류의안",
+        _post(source_key="fss_press", source_name="금감원 · 보도자료",
               post_id=f"b{i}", url=f"https://example.com/b{i}")
         for i in range(3)
     ]
@@ -946,8 +947,8 @@ def test_cap_is_spread_across_sources_not_config_order():
     s._generate = lambda prompt, deadline=None: _envelope('{"summary": ["요약함"]}')
 
     s.summarize_all({
-        "금융위 · 보도자료": first,          # config 앞쪽 소스
-        "의안정보시스템 · 계류의안": later,   # 뒤쪽 소스
+        "금융위 · 보도자료": first,      # config 앞쪽 소스
+        "금감원 · 보도자료": later,      # 뒤쪽 소스
     })
 
     assert sum(1 for p in first if p.summary) + sum(1 for p in later if p.summary) == 6

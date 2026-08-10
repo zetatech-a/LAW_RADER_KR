@@ -1,0 +1,1501 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<title>의안검색|의안상세</title>
+<meta content="IE=Edge" http-equiv="X-UA-Compatible"/>
+<meta content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, target-densitydpi=medium-dpi" name="viewport"/>
+<meta content="telephone=no" name="format-detection"/>
+<meta content="ⓒ국회사무처. All right reserved." name="copyright"/>
+<!-- Favicon -->
+<link href="/bill/static/img/bi/common/favicon.ico" rel="shortcut icon"/>
+<link href="/bill/static/img/bi/common/favicon.ico" rel="icon"/>
+<link href="/bill/static/img/bi/common/favicon-152.png" rel="apple-touch-icon" sizes="152x152"/>
+<link href="/bill/static/img/bi/common/favicon-144.png" rel="apple-touch-icon" sizes="144x144"/>
+<link href="/bill/static/img/bi/common/favicon-120.png" rel="apple-touch-icon" sizes="120x120"/>
+<link href="/bill/static/img/bi/common/favicon-114.png" rel="apple-touch-icon" sizes="114x114"/>
+<link href="/bill/static/img/bi/common/favicon-180.png" rel="apple-touch-icon" sizes="180x180"/>
+<link href="/bill/static/img/bi/common/favicon-72.png" rel="apple-touch-icon" sizes="72x72"/>
+<link href="/bill/static/img/bi/common/favicon-57.png" rel="apple-touch-icon"/>
+<link href="/bill/static/img/bi/common/favicon-32.png" rel="icon" sizes="32x32"/>
+<meta content="#FFFFFF" name="msapplication-TileColor"/>
+<meta content="/bill/static/img/bi/common/favicon-144.png" name="msapplication-TileImage"/>
+<link href="/bill/static/img/bi/common/favicon-192.png" rel="icon" sizes="192x192"/>
+<!-- Kakao Talk -->
+<meta content="의안정보 시스템" property="og:title"/>
+<meta content="/bill/static/img/bi/kakaoImg.png" property="og:image"/>
+<meta content="800" property="og:image:width"/>
+<meta content="400" property="og:image:height"/>
+<meta content="https://likms.assembly.go.kr/bill" property="og:url"/>
+<meta content="" property="og:site_name"/>
+<meta content="website" property="og:type"/>
+<meta content="국회의 의정활동 정보를 제공합니다." property="og:description"/>
+<!-- Security CSRF Meta Tags -->
+<meta content="REDACTED-FOR-FIXTURE" name="_csrf"/>
+<!-- CSS -->
+<link href="/bill/static/manifest.txt?ver=1.1.0" rel="manifest"/>
+<link href="/bill/static/css/bi/default.css?ver=1.8.0" rel="stylesheet" type="text/css"/>
+<link href="/bill/static/css/bi/style.css?ver=1.8.0" rel="stylesheet" type="text/css"/>
+<link href="/bill/static/css/bi/style2.css?ver=1.8.0" rel="stylesheet" type="text/css"/>
+<link href="/bill/static/css/bi/mobile.css?ver=1.8.0" rel="stylesheet" type="text/css"/>
+<link href="/bill/static/css/bi/mobile2.css?ver=1.8.0" rel="stylesheet" type="text/css"/>
+<!-- 캐시버전을 관리하기 위한 JS 변환 -->
+<!--<th:insert th:replace="include/include-cacheControl :: cacheControl" />-->
+<script type="text/javascript"></script>
+<!-- 공통 CSS -->
+<link href="/bill/static/assets/jquery/ui/jquery-ui.min.css?ver=1.1.0" rel="stylesheet" type="text/css"/>
+<!-- 공통 JavaScript -->
+<script src="/bill/static/assets/axios/axios.min.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/assets/jquery/jquery.min.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/assets/jquery/ui/jquery-ui.min.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/assets/jquery/jquery.serializeObject.min.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/assets/jquery/jquery.form.min.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/assets/etc/lodash.min.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/assets/etc/moment-with-locales.min.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/assets/etc/moment-lunar.min.js?ver=1.1.0" type="text/javascript"></script>
+<script type="text/javascript"></script>
+<!-- swiper -->
+<link href="/bill/static/assets/jquery/swiper/swiper-bundle.min.css?ver=1.1.0" rel="stylesheet" type="text/css"/>
+<script src="/bill/static/assets/jquery/swiper/swiper-bundle.min.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/js/common/common.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/js/common/commonHelpUtil.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/js/common/commonStrUtil.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/js/common/commonSheetUtil.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/js/common/commonChartUtil.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/js/common/commonCalendarUtil.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/assets/jquery/jquery.fileDownload.js?ver=1.1.0" type="text/javascript"></script>
+<!-- bxslider -->
+<link href="/bill/static/assets/jquery/bxslider/jquery.bxslider.css?ver=1.1.0" rel="stylesheet" type="text/css"/>
+<script src="/bill/static/assets/jquery/bxslider/jquery.bxslider.js?ver=1.1.0" type="text/javascript"></script>
+<!-- JS -->
+<script src="/bill/static/js/bi/common.js?ver=1.9.8" type="text/javascript"></script>
+<script src="/bill/static/js/common/commonStrUtil.js?ver=1.9.8" type="text/javascript"></script>
+<script src="/bill/static/js/bi/biInit.js?ver=1.9.8" type="text/javascript"></script>
+<script src="/bill/static/js/bi/navigation.js?ver=1.9.8" type="text/javascript"></script>
+<script src="/bill/static/assets/etc/clipboard.min.js?ver=1.1.0" type="text/javascript"></script>
+<script src="/bill/static/assets/jquery/sns/kakao.js?ver=1.1.0" type="text/javascript"></script>
+<script></script>
+<!-- Flatpickr 라이브러리 -->
+<link href="/bill/static/assets/flatpickr/flatpickr.min.css?ver=1.1.0" rel="stylesheet"/>
+<script src="/bill/static/assets/flatpickr/flatpickr.min.js?ver=1.1.0"></script>
+<script src="/bill/static/assets/flatpickr/l10n/ko.js?ver=1.1.0"></script>
+<!-- eDotXPress(전자점자) HTML 라이브러리 -->
+<script src="/bill/EDotXPressHtml/js/edotxpress-html.min.js?ver=1.1.0"></script>
+<script src="/bill/EDotXPressHtml/js/edotxpress-common.js?ver=1.1.0"></script>
+<script src="/bill/EDotXPressHtml/js/edotxpress-config-likmsassembly.js?ver=1.1.0"></script>
+<script src="/bill/static/assets/canvas/html2canvas.min.js" type="text/javascript"></script>
+<script src="/bill/static/assets/charts/highcharts.js" type="text/javascript"></script>
+<script src="/bill/static/assets/charts/highcharts-more.js" type="text/javascript"></script>
+<!--  <script type="text/javascript" th:src="@{/static/assets/charts/highcharts-3d.js}"></script>-->
+<script src="/bill/static/assets/charts/modules/exporting.js" type="text/javascript"></script>
+<script src="/bill/static/assets/charts/modules/offline-exporting.js" type="text/javascript"></script>
+<script src="/bill/static/assets/charts/modules/data.js" type="text/javascript"></script>
+<script src="/bill/static/assets/charts/modules/accessibility.js" type="text/javascript"></script>
+<script src="/bill/static/assets/charts/modules/heatmap.js" type="text/javascript"></script>
+<script src="/bill/static/assets/charts/modules/treemap.js" type="text/javascript"></script>
+<script async="" src="https://www.googletagmanager.com/gtag/js?id=G-B4CWLHF746"></script>
+<script></script>
+</head>
+<body>
+<!-- /* 공통 header 영역 */ -->
+<p class="skip-navigation">
+<a href="#content"> 본문 내용 바로가기 </a>
+</p>
+<!-- 탑배너 -->
+<!-- //탑배너 -->
+<!-- 검색창 -->
+<!-- //
+        통합 검색 Layer
+    // -->
+<div class="layer_search" style="display:none;">
+<div>
+<div class="layer_search_txt">
+<strong>찾으시는 검색어를 입력해주세요</strong>
+</div>
+<form action="/portal/signl/search/search.do" id="glnbSearchForm" method="post" name="glnbSearchForm">
+<div class="layer_search_box">
+<strong><label class="all-search__label" for="all-search__input">통합검색</label></strong>
+<div>
+<input id="all-search__input" name="query" title="검색어입력" type="text"/>
+<input name="collection" type="hidden" value="ALL"/>
+<button id="goSearch" onclick="glnbSearch()" type="button">검색</button>
+</div>
+</div>
+</form>
+<a href="javascript:void(0);" id="btn_search_close">창닫기</a>
+</div>
+</div>
+<!-- //검색창 -->
+<!-- mobile gnb -->
+<!-- //
+        Mobile Gnb
+    // -->
+<div class="mobile_gnb" style="display:none;">
+<strong>전체메뉴</strong>
+<div class="m_logo">
+<h1>대한민국국회</h1>
+<span class="m_slogan">내일을 여는 국민의 국회</span>
+</div>
+<div class="layer_sns_m">
+<ul>
+<li><a class="icon_glnb_facebook" href="https://www.facebook.com/NationalAssemblyROK" target="_blank" title="새창열림_페이스북">페이스북</a></li>
+<li><a class="icon_glnb_youtube" href="https://www.youtube.com/channel/UCsWa6xl7KxOolVhROUJ4Ghw" target="_blank" title="새창열림_유투브">유투브</a></li>
+<li><a class="icon_glnb_twitter" href="https://twitter.com/news_NA" target="_blank" title="새창열림_트위터">트위터</a></li>
+<li><a class="icon_glnb_insta" href="https://www.instagram.com/theassembly_kr/" target="_blank" title="새창열림_인스타그램">인스타그램</a></li>
+</ul>
+</div>
+<div class="mobile_gnb_inner">
+<div class="mobile_gnb_menu">
+<!-- Level 1 -->
+<!-- 25.05.23_예결산정보 모바일은 메뉴 보이게 처리 -->
+<div class="topMenuDiv" data-menuno="2600001">
+<a href="javascript:void(0);">의안검색</a>
+<!-- Level 2 -->
+<ul class="top_menu_lv1">
+<li class="child" data-menuno="2600044">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/bill/sch/detailedSchPage.do?detailedTab=billDtl"><span>기본검색</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+<li class="child" data-menuno="2600008">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/bill/sch/detailedSchPage.do?detailedTab=billDocu"><span>문서검색</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+<li class="child" data-menuno="2600045">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/bill/sch/sentenceSchPage.do"><span>지능형검색</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+</ul>
+</div>
+<div class="topMenuDiv" data-menuno="2600002">
+<a href="javascript:void(0);">의안현황</a>
+<!-- Level 2 -->
+<ul class="top_menu_lv1">
+<li class="child" data-menuno="2600011">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/bill/state/mooringBillPage.do"><span>계류의안</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+<li class="child" data-menuno="2600009">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="javascript:void(0);"><span>처리의안</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+<li class="child" data-menuno="2600058">
+<a href="/bill/bi/bill/state/finishBillPage.do?mainProcYn=N">
+<span>처리의안(전체)</span>
+</a>
+</li>
+<li class="child" data-menuno="2600059">
+<a href="/bill/bi/bill/state/finishBillPage.do?mainProcYn=Y">
+<span>본회의 처리의안</span>
+</a>
+</li>
+</ul>
+</li>
+<li class="child" data-menuno="2600010">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="javascript:void(0);"><span>표결정보</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+<li class="child" data-menuno="2600046">
+<a href="/bill/bi/bill/state/voteInfoSchPage.do">
+<span>의안별 표결정보</span>
+</a>
+</li>
+<li class="child" data-menuno="2600047">
+<a href="/bill/bi/bill/state/voteInfoMemPage.do">
+<span>의원별 표결정보</span>
+</a>
+</li>
+</ul>
+</li>
+<li class="child" data-menuno="2600012">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/bill/state/suggestBillPage.do"><span>위원회안(대안)</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+<li class="child" data-menuno="2600034">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/bill/state/beforeProposePage.do"><span>본회의 부의안건</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+</ul>
+</div>
+<div class="topMenuDiv" data-menuno="2600003">
+<a href="javascript:void(0);">의안통계</a>
+<!-- Level 2 -->
+<ul class="top_menu_lv1">
+<li class="child" data-menuno="2600014">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/stats/visual/visualMstPage.do"><span>한눈에 보는 통계</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+<li class="child" data-menuno="2600015">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="javascript:void(0);"><span>일반통계</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+<li class="child" data-menuno="2600057">
+<a href="/bill/bi/stats/gnStatsPage.do?procGbnCd=P">
+<span>처리의안통계</span>
+</a>
+</li>
+<li class="child" data-menuno="2600056">
+<a href="/bill/bi/stats/gnStatsPage.do?procGbnCd=G">
+<span>계류의안통계</span>
+</a>
+</li>
+</ul>
+</li>
+</ul>
+</div>
+<div class="topMenuDiv" data-menuno="2600040">
+<a href="javascript:void(0);">연차보고서</a>
+<!-- Level 2 -->
+<ul class="top_menu_lv1">
+<li class="child" data-menuno="2600043">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/annRpt/annRptPage.do"><span>연차보고서</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+</ul>
+</div>
+<div class="topMenuDiv" data-menuno="2600005">
+<a href="javascript:void(0);">청원</a>
+<!-- Level 2 -->
+<ul class="top_menu_lv1">
+<li class="child" data-menuno="2600023">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/petit/petitSchPage.do"><span>청원검색</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+<li class="child" data-menuno="2600024">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="javascript:void(0);"><span>청원현황</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+<li class="child" data-menuno="2600036">
+<a href="/bill/bi/petit/petitStatePage.do?procGbnCd=G">
+<span>계류청원</span>
+</a>
+</li>
+<li class="child" data-menuno="2600035">
+<a href="/bill/bi/petit/petitStatePage.do?procGbnCd=P">
+<span>처리청원</span>
+</a>
+</li>
+</ul>
+</li>
+<li class="child" data-menuno="2600025">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="javascript:void(0);"><span>청원통계</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+<li class="child" data-menuno="2600052">
+<a href="/bill/bi/petit/petitVisualMstPage.do">
+<span>한눈에 보는 통계</span>
+</a>
+</li>
+<li class="child" data-menuno="2600053">
+<a href="/bill/bi/petit/petitStatPage.do">
+<span>일반통계</span>
+</a>
+</li>
+</ul>
+</li>
+<li class="child" data-menuno="2600026">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/petit/petitContentPage.do"><span>청원안내</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+</ul>
+</div>
+<div class="topMenuDiv" data-menuno="2600004">
+<a href="javascript:void(0);">예결산정보</a>
+<!-- Level 2 -->
+<ul class="top_menu_lv1">
+<li class="child" data-menuno="2600017">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="javascript:void(0);"><span>예산정보</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+<li class="child" data-menuno="2600080">
+<a href="/bill/bi/nafs/bdgPage.do?bdgCd=B&amp;baDtlGbnCd=01_G24C04">
+<span>예산안현황</span>
+</a>
+</li>
+<li class="child" data-menuno="2600084">
+<a href="/bill/bi/nafs/bdgPage.do?bdgCd=B&amp;baDtlGbnCd=01_G24C07">
+<span>참고정보</span>
+</a>
+</li>
+<li class="child" data-menuno="2600085">
+<a href="/bill/bi/nafs/bdgPage.do?bdgCd=B&amp;baDtlGbnCd=01_G24C05">
+<span>확정예산</span>
+</a>
+</li>
+</ul>
+</li>
+<li class="child" data-menuno="2600018">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="javascript:void(0);"><span>결산정보</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+<li class="child" data-menuno="2600098">
+<a href="/bill/bi/nafs/bdgPage.do?bdgCd=S&amp;baDtlGbnCd=02_G24C04">
+<span>결산현황</span>
+</a>
+</li>
+<li class="child" data-menuno="2600099">
+<a href="/bill/bi/nafs/bdgPage.do?bdgCd=S&amp;baDtlGbnCd=02_G24C07">
+<span>참고정보</span>
+</a>
+</li>
+<li class="child" data-menuno="2600100">
+<a href="/bill/bi/nafs/bdgPage.do?bdgCd=S&amp;baDtlGbnCd=02_G24C08">
+<span>시정요구 및 조치결과</span>
+</a>
+</li>
+</ul>
+</li>
+<li class="child" data-menuno="2600071">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="javascript:void(0);"><span>예결산통계</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+<li class="child" data-menuno="2600072">
+<a href="/bill/bi/nafs/stats/inscHstPage.do">
+<span>예결산 심사연혁</span>
+</a>
+</li>
+<li class="child" data-menuno="2600020">
+<a href="/bill/bi/nafs/stats/nafsStatsPage.do">
+<span>예결산통계</span>
+</a>
+</li>
+</ul>
+</li>
+<li class="child" data-menuno="2600021">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/nafs/nafsInfoPage.do"><span>예결산안내</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+<li class="child" data-menuno="2600022">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/nafs/relSttu/relSttuPage.do"><span>관련법령</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+</ul>
+</div>
+<div class="topMenuDiv" data-menuno="2600006">
+<a href="javascript:void(0);">소개 및 알림</a>
+<!-- Level 2 -->
+<ul class="top_menu_lv1">
+<li class="child" data-menuno="2600027">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/intro/billItroPage.do"><span>의안 안내</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+<li class="child" data-menuno="2600028">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/intro/serviceIntroPage.do"><span>서비스 소개</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+<li class="child" data-menuno="2600029">
+<!-- 마이페이지 회원정보수정/회원탈퇴 화면 이동 -->
+<a href="/bill/bi/bod/nacms/BILL3001/bodListPage.do"><span>공지사항</span></a>
+<!-- Level 3 -->
+<ul class="top_menu_lv2">
+</ul>
+</li>
+</ul>
+</div>
+<script></script>
+</div>
+<div class="mobile_gnb_btn on">
+<ul>
+<li><a class="on" href="https://www.assembly.go.kr/portal/pop/popInfoService.do" target="new">국회정보길라잡이</a></li>
+<li><a class="on" href="https://www.assembly.go.kr/portal/cnts/cntsCont/dataA.do?cntsDivCd=NAAS&amp;menuNo=600137" target="new">국회의원 검색</a></li>
+</ul>
+</div>
+<div class="mobile_gnb_login">
+<a href="/bill/bi/user/ssoLoginPage.do">로그인</a>
+</div>
+</div>
+<a class="btn_m_x" href="javascript:;">닫기</a>
+</div>
+<!-- //mobile gnb -->
+<div class="utilmenu">
+<div class="gnb-box">
+<ul class="left">
+<li><a href="https://www.assembly.go.kr/portal/na/agenda/agendaSchl.do?menuNo=600015" target="_blank" title="국회일정 새창열림">제22대 제438회국회(임시회) </a></li>
+<li><a href="https://www.assembly.go.kr/portal/pop/popInfoService.do" id="gnb_assembly_info" target="_blank" title="국회정보길라잡이 새창열림">국회정보길라잡이</a></li>
+<li><a href="https://www.assembly.go.kr/portal/cnts/cntsCont/dataA.do?cntsDivCd=NAAS&amp;menuNo=600137" target="_blank" title="새창열림 대한민국국회">국회의원 검색</a></li>
+</ul>
+<ul class="right">
+<!--                <th:block th:if="${session.sessionUsrVo != null and session.sessionUsrVo.sessionWorknetYn == 'Y'}">-->
+<!--                    <li><a href="https://ai.assembly.go.kr/legis/" class="customized_btn" target="_blank">법률안서비스</a></li>-->
+<!--                </th:block>-->
+<li><a href="https://www.assembly.go.kr/" target="_blank">대한민국국회</a></li>
+<li><a href="/bill/bi/user/ssoLoginPage.do">로그인</a></li>
+<li class="m_none">
+<div class="">
+<strong>글자크기</strong>
+<a class="gnb_plus" href="javascript:;" onclick="Navigation.top.zoomOut();">화면확대</a>
+<a class="gnb_minus" href="javascript:;" onclick="Navigation.top.zoomIn();">화면축소</a>
+</div>
+</li>
+<li class="m_none">
+<ol class="glnb_nsns_icon">
+<li><a class="icon_glnb_facebook" href="" id="link_glnb_facebook" target="_blank" title="새창열림_페이스북">페이스북</a></li>
+<li><a class="icon_glnb_insta" href="" id="link_glnb_insta" target="_blank" title="새창열림_인스타그램">인스타그램</a></li>
+<li><a class="icon_glnb_youtube" href="" id="link_glnb_youtube" target="_blank" title="새창열림_유튜브">유튜브</a></li>
+<li><a class="icon_glnb_twitter" href="" id="link_glnb_twitter" target="_blank" title="새창열림_트위터">트위터</a></li>
+</ol>
+</li>
+<li><a href="/bill/bi/intro/siteMapPage.do" target="_top">사이트맵</a></li>
+</ul>
+</div>
+</div>
+<!-- 메뉴바 -->
+<div class="full_bg">
+<div class="lnb">
+<div class="logoarea">
+<h1 class="logo">
+<a href="/bill/">의안정보시스템</a>
+</h1>
+</div>
+<div class="menu">
+<ul class="menu_mst">
+<!-- 25.05.16_예결산정보 메뉴 숨김 처리 -->
+<li>
+<a href="/bill/bi/bill/sch/detailedSchPage.do?detailedTab=billDtl">의안검색</a>
+<!-- /* 하위 메뉴 */ -->
+<ul class="menu_sub" style="display: none;">
+<li>
+<a href="/bill/bi/bill/sch/detailedSchPage.do?detailedTab=billDtl">기본검색</a>
+</li>
+<li>
+<a href="/bill/bi/bill/sch/detailedSchPage.do?detailedTab=billDocu">문서검색</a>
+</li>
+<li>
+<a href="/bill/bi/bill/sch/sentenceSchPage.do">지능형검색</a>
+</li>
+</ul>
+</li>
+<li>
+<a href="/bill/bi/bill/state/mooringBillPage.do">의안현황</a>
+<!-- /* 하위 메뉴 */ -->
+<ul class="menu_sub" style="display: none;">
+<li>
+<a href="/bill/bi/bill/state/mooringBillPage.do">계류의안</a>
+</li>
+<li>
+<a href="/bill/bi/bill/state/finishBillPage.do?mainProcYn=N">처리의안</a>
+</li>
+<li>
+<a href="/bill/bi/bill/state/voteInfoSchPage.do">표결정보</a>
+</li>
+<li>
+<a href="/bill/bi/bill/state/suggestBillPage.do">위원회안(대안)</a>
+</li>
+<li>
+<a href="/bill/bi/bill/state/beforeProposePage.do">본회의 부의안건</a>
+</li>
+</ul>
+</li>
+<li>
+<a href="/bill/bi/stats/visual/visualMstPage.do">의안통계</a>
+<!-- /* 하위 메뉴 */ -->
+<ul class="menu_sub" style="display: none;">
+<li>
+<a href="/bill/bi/stats/visual/visualMstPage.do">한눈에 보는 통계</a>
+</li>
+<li>
+<a href="/bill/bi/stats/gnStatsPage.do?procGbnCd=P">일반통계</a>
+</li>
+</ul>
+</li>
+<li>
+<a href="/bill/bi/annRpt/annRptPage.do">연차보고서</a>
+<!-- /* 하위 메뉴 */ -->
+<ul class="menu_sub" style="display: none;">
+<li>
+<a href="/bill/bi/annRpt/annRptPage.do">연차보고서</a>
+</li>
+</ul>
+</li>
+<li>
+<a href="/bill/bi/petit/petitSchPage.do">청원</a>
+<!-- /* 하위 메뉴 */ -->
+<ul class="menu_sub" style="display: none;">
+<li>
+<a href="/bill/bi/petit/petitSchPage.do">청원검색</a>
+</li>
+<li>
+<a href="/bill/bi/petit/petitStatePage.do?procGbnCd=G">청원현황</a>
+</li>
+<li>
+<a href="/bill/bi/petit/petitVisualMstPage.do">청원통계</a>
+</li>
+<li>
+<a href="/bill/bi/petit/petitContentPage.do">청원안내</a>
+</li>
+</ul>
+</li>
+<li>
+<a href="/bill/bi/intro/billItroPage.do">소개 및 알림</a>
+<!-- /* 하위 메뉴 */ -->
+<ul class="menu_sub" style="display: none;">
+<li>
+<a href="/bill/bi/intro/billItroPage.do">의안 안내</a>
+</li>
+<li>
+<a href="/bill/bi/intro/serviceIntroPage.do">서비스 소개</a>
+</li>
+<li>
+<a href="/bill/bi/bod/nacms/BILL3001/bodListPage.do">공지사항</a>
+</li>
+</ul>
+</li>
+</ul>
+</div>
+<ul class="lnb_util">
+<li><a class="lnb_search" href="/bill/bi/globalSch/searchPage.do" id="lnb_search">검색</a></li>
+<li><a class="lnb_list m_block" href="javascript:;" id="m_menu_open">전체메뉴</a></li>
+</ul>
+</div>
+</div>
+<div class="lnb_bg" id="lnb_bg" style="display: none;">
+<div>
+<strong>국민을 지키는 국회 미래로 나아가는 국회</strong>
+</div>
+</div>
+<script></script>
+<!-- navigation with key image area -->
+<div class="nassub_top nsub_top nsub_bg10" id="nassub_top_show" style="display:none">
+<div class="openDiv">
+<div class="nsub_h2">
+<h2>의안검색</h2>
+</div>
+<div class="nsub_other">
+<div class="location_step" data-brl-use="NO">
+<ul>
+<li class="locationMemu home">
+<a href="/bill/">홈</a>
+</li>
+<!-- Level 1 menus -->
+<!-- Level 2 menus without submenu -->
+<li class="locationMemu">
+<a href="javascript:void(0);" onclick="fn_toggleSubmenuList(this);">
+<span>의안상세</span>
+</a>
+<div class="sub_location" style="display: none;">
+<a href="/bill/bi/bill/sch/detailedSchPage.do?detailedTab=billDtl">기본검색</a><a href="/bill/bi/bill/sch/detailedSchPage.do?detailedTab=billDocu">문서검색</a><a href="/bill/bi/bill/sch/sentenceSchPage.do">지능형검색</a>
+</div>
+</li>
+<!-- Level 2 menus with submenu -->
+</ul>
+</div>
+<ul class="api_box">
+<li><a class="btn_print" data-brl-use="NO" href="javascript:void(0);" title="인쇄하기 새창열림">인쇄하기</a></li>
+<li><a class="btn_share" data-brl-use="NO" href="javascript:void(0);" title="SNS 공유하기">공유</a></li>
+<!-- SNS layer -->
+<div class="layer_sns" data-brl-use="NO">
+<ul>
+<li><a class="sns_kakaostory" href="#" onclick="gfn_sendSns('kakaostory','의안정보시스템');" title="새창열림_카카오스토리">카카오스토리</a></li>
+<li><a class="sns_facebook" href="#" onclick="gfn_sendSns('facebook','의안정보시스템');" title="새창열림_페이스북">페이스북</a></li>
+<li><a class="sns_twitter" href="#" onclick="gfn_sendSns('twitter','의안정보시스템');" title="새창열림_트위터">트위터</a></li>
+<li><a class="sns_blog" href="#" onclick="gfn_sendSns('naverblog','의안정보시스템');" title="새창열림_네이버 블로그">네이버블로그</a></li>
+<li><a class="sns_kakaotalk" href="#" onclick="gfn_sendSns('kakaotalk','의안정보시스템');" title="새창열림_카카오톡">카카오톡</a></li>
+<li><a class="sns_url" href="#">URL</a></li>
+</ul>
+<a class="btn_sns_x" href="javascript:void(0);">창닫기</a>
+</div>
+<!-- //SNS layer -->
+<li><a class="btn_satis m_none" data-brl-use="NO" href="javascript:void(0);" title="만족도조사">만족도조사</a></li>
+<!-- 만족도조사 layer -->
+<div class="layer_satis" data-brl-use="NO">
+<form id="form_layerOpen">
+<input name="siteId" type="hidden" value="portal"/>
+<div class="contents popup__satis">
+<div class="title_h">
+<h3 class="h_satis">열람하신 페이지에서 제공하는 정보에 만족하십니까? <br/>의견을 주시면 빠른 시일 내에 반영하겠습니다.</h3>
+</div>
+<div class="board01">
+<div class="contentsBox">
+<ul>
+<li>
+<label><input checked="checked" id="satis_rdo__5" name="stsfdgIdex" type="radio" value="5"/>매우만족</label>
+</li>
+<li>
+<label><input id="satis_rdo__4" name="stsfdgIdex" type="radio" value="4"/>만족</label>
+</li>
+<li>
+<label><input id="satis_rdo__3" name="stsfdgIdex" type="radio" value="3"/>보통</label>
+</li>
+<li>
+<label><input id="satis_rdo__2" name="stsfdgIdex" type="radio" value="2"/>불만족</label>
+</li>
+<li>
+<label><input id="satis_rdo__1" name="stsfdgIdex" type="radio" value="1"/>매우불만족</label>
+</li>
+</ul>
+<textarea cols="5" id="satis_txa__cont" name="opinionCn" rows="3" style="resize: vertical;" title="만족도 조사 입력"></textarea>
+<p>
+<button class="btn_bl" id="satis_btn__confirm_opendiv" type="button">확인</button>
+</p>
+</div>
+</div>
+</div>
+<a class="btn_satis_x" href="javascript:void(0);" id="satis_btn__close">창닫기</a>
+</form>
+</div>
+<!-- //만족도조사 layer -->
+<li><a class="btn_book_view" href="javascript:openBrlViewer('의안상세', '', brlConfArray)" title="점자뷰어 새창열림">점자뷰어보기</a></li>
+<li><a class="btn_book_down" href="javascript:exportBrl('brl', '의안상세', '', brlConfArray)" title="전자점자 다운로드">전자점자 다운로드</a></li>
+<li>
+<a class="btn_openclose" href="javascript:void(0);" onclick="fn_toggleTopIntro(false)" title="인트로 영역 접기">인트로 영역 접기</a>
+</li>
+</ul>
+</div>
+</div>
+</div>
+<!-- navigation without key image area -->
+<div class="nsub_other" id="nassub_top_hide" style="display:block">
+<div>
+<div class="location_step" data-brl-use="NO">
+<ul>
+<li class="locationMemu home">
+<a href="/bill/">홈</a>
+</li>
+<!-- Level 1 menus -->
+<!-- Level 2 menus without submenu -->
+<li class="locationMemu">
+<a href="javascript:void(0);" onclick="fn_toggleSubmenuList(this);">
+<span>의안상세</span>
+</a>
+<div class="sub_location" style="display: none;">
+<a href="/bill/bi/bill/sch/detailedSchPage.do?detailedTab=billDtl">기본검색</a><a href="/bill/bi/bill/sch/detailedSchPage.do?detailedTab=billDocu">문서검색</a><a href="/bill/bi/bill/sch/sentenceSchPage.do">지능형검색</a>
+</div>
+</li>
+<!-- Level 2 menus with submenu -->
+</ul>
+</div>
+<ul class="api_box">
+<li><a class="btn_print" data-brl-use="NO" href="javascript:void(0);" title="인쇄하기 새창열림">인쇄하기</a></li>
+<li><a class="btn_share" data-brl-use="NO" href="javascript:void(0);" title="SNS 공유하기">공유</a></li>
+<!-- SNS layer -->
+<div class="layer_sns" data-brl-use="NO">
+<ul>
+<li><a class="sns_kakaostory" href="#" onclick="gfn_sendSns('kakaostory','의안정보시스템');" title="새창열림_카카오스토리">카카오스토리</a></li>
+<li><a class="sns_facebook" href="#" onclick="gfn_sendSns('facebook','의안정보시스템');" title="새창열림_페이스북">페이스북</a></li>
+<li><a class="sns_twitter" href="#" onclick="gfn_sendSns('twitter','의안정보시스템');" title="새창열림_트위터">트위터</a></li>
+<li><a class="sns_blog" href="#" onclick="gfn_sendSns('naverblog','의안정보시스템');" title="새창열림_네이버 블로그">네이버블로그</a></li>
+<li><a class="sns_kakaotalk" href="#" onclick="gfn_sendSns('kakaotalk','의안정보시스템');" title="새창열림_카카오톡">카카오톡</a></li>
+<li><a class="sns_url" href="#">URL</a></li>
+</ul>
+<a class="btn_sns_x" href="javascript:void(0);">창닫기</a>
+</div>
+<!-- //SNS layer -->
+<li><a class="btn_satis m_none" data-brl-use="NO" href="javascript:void(0);" title="만족도조사">만족도조사</a></li>
+<!-- 만족도조사 layer -->
+<div class="layer_satis" data-brl-use="NO">
+<form id="form_layer">
+<input name="siteId" type="hidden" value="portal"/>
+<div class="contents popup__satis">
+<div class="title_h">
+<h3 class="h_satis">열람하신 페이지에서 제공하는 정보에 만족하십니까? <br/>의견을 주시면 빠른 시일 내에 반영하겠습니다.</h3>
+</div>
+<div class="board01">
+<div class="contentsBox">
+<ul>
+<li>
+<label><input checked="checked" id="satis_rdo__5" name="stsfdgIdex" type="radio" value="5"/>매우만족</label>
+</li>
+<li>
+<label><input id="satis_rdo__4" name="stsfdgIdex" type="radio" value="4"/>만족</label>
+</li>
+<li>
+<label><input id="satis_rdo__3" name="stsfdgIdex" type="radio" value="3"/>보통</label>
+</li>
+<li>
+<label><input id="satis_rdo__2" name="stsfdgIdex" type="radio" value="2"/>불만족</label>
+</li>
+<li>
+<label><input id="satis_rdo__1" name="stsfdgIdex" type="radio" value="1"/>매우불만족</label>
+</li>
+</ul>
+<textarea cols="5" id="satis_txa__cont" name="opinionCn" rows="3" style="resize: vertical;" title="만족도 조사 입력"></textarea>
+<p>
+<button class="btn_bl" id="satis_btn__confirm" type="button">확인</button>
+</p>
+</div>
+</div>
+</div>
+<a class="btn_satis_x" href="javascript:void(0);" id="satis_btn__close">창닫기</a>
+</form>
+</div>
+<!-- //만족도조사 layer -->
+<li><a class="btn_book_view" href="javascript:openBrlViewer('의안상세', '', brlConfArray)" title="점자뷰어 새창열림">점자뷰어보기</a></li>
+<li><a class="btn_book_down" href="javascript:exportBrl('brl', '의안상세', '', brlConfArray)" title="전자점자 다운로드">전자점자 다운로드</a></li>
+<li>
+<a class="btn_opencopen" href="javascript:void(0);" onclick="fn_toggleTopIntro(true)" title="인트로 영역 열기">인트로 영역 열기</a>
+</li>
+</ul>
+</div>
+</div>
+<script type="text/javascript"></script>
+<!-- /* 본문 내용 */ -->
+<div class="container" id="container">
+<!-- /* 각각의 페이지에서 body 내용을 채우는 영역 */ -->
+<div class="content menu_content" id="content">
+<!-- page title -->
+<div class="page_title">
+<div>
+<h3 class="detailh3" title="[2220475] 조세특례제한법 일부개정법률안(권영세의원 등 10인)">[2220475] 조세특례제한법 일부개정법률안(권영세의원 등 10인)</h3>
+</div>
+<!--                <button type="button" class="btn_bl" onclick="app.Elmt.historyBack()">목록</button>-->
+</div>
+<!-- //page title -->
+<div class="content">
+<form id="form" name="form">
+<input id="billId" name="billId" type="hidden" value="PRC_O2O6N0J7J3I0I1G5F0G5N0O0N1N3L2"/>
+<input id="billNo" name="billNo" type="hidden" value="2220475"/>
+<input id="billKindCd" name="billKindCd" type="hidden" value="법률안"/>
+<input id="currCmtName" name="currCmtName" type="hidden" value="위원회 심사"/>
+<input id="reexamYn" name="reexamYn" type="hidden" value="N"/>
+<input id="billGbnCd" name="billGbnCd" type="hidden" value=""/>
+<input id="tmprAnYn" name="tmprAnYn" type="hidden" value="N"/>
+<input id="headMemo" name="headMemo" type="hidden" value="Y"/>
+<input id="headMemoInfo" name="headMemoInfo" type="hidden" value="비용추계요구서 제출됨."/>
+<input id="withdrawCnt" name="withdrawCnt" type="hidden" value="0"/>
+<input id="intrsBillCnt" name="intrsBillCnt" type="hidden" value="0"/>
+<input id="stageMemo" name="stageMemo" type="hidden" value="N"/>
+<div class="law_meta meta_human">
+<div class="law_meta_inner" id="meta-info-sect" style="display:block;">
+<div class="law_meta_img dtl_human">
+<!-- 대표 여러명일때 -->
+<!-- 대표 1명일때 -->
+<a class="meta_man" href="https://www.assembly.go.kr/members/22nd/KWONYOUNGSE" target="_blank">
+<img alt="권영세 의원" onerror="this.src='/bill/static/img/bi/no-img_mem.png'" src="https://www.assembly.go.kr/static/portal/img/openassm/new/thumb/REDACTED-FOR-FIXTURE.jpg"/>
+</a>
+<div class="law_meta_name">
+<strong>대표발의의원</strong>
+<span id="proposerName">권영세의원</span>
+</div>
+</div>
+<div class="law_meta_obj w253p">
+<div class="law_meta_table">
+<strong>소관위원회</strong>
+<div>
+                                        미확정
+                                    </div>
+<strong>제안일자</strong>
+<div>
+                                        2026-08-06
+                                    </div>
+</div>
+<div class="law_meta_table">
+<strong>의결일자</strong>
+<div>
+</div>
+<strong>의결결과</strong>
+<div>
+</div>
+</div>
+</div>
+<div class="law_meta_link">
+<a data-login-url="/bill/bi/user/ssoLoginPage.do" data-login-yn="N" href="javascript:;" id="btn_intrstBill" onclick="app.Elmt.memSrvBill(this)" title="관심법률안 등록">관심법률안 등록</a>
+<!--                                <a href="javascript:;" th:if="${billDetail.billGbnCd == '대안' || billDetail.refBillId != null}"-->
+<!--                                   th:data-bill-id="${billDetail.billId}" th:data-ref-id="${billDetail.refBillId}" th:data-bill-name="${billDetail.billName}" th:data-bill-no="${billDetail.billNo}"-->
+<!--                                   th:onclick="|app.Elmt.discardPopup(this)|" th:text="${refIdCount > 0 ? '대안반영폐기 의안 (' + refIdCount + '건)' : '대안'}">대안</a>-->
+</div>
+</div>
+</div>
+</form>
+</div>
+<div>
+<!-- 탭 -->
+<div class="tab v_tab" id="tab-btn-sect">
+<div class="mobile_tab">
+<a href="javascript:">심사정보</a>
+</div>
+<ul>
+<li>
+<a class="on" data-tabnm="billInfo" href="javascript:" onclick="app.Tab.tabClick(this)">심사정보</a>
+</li>
+</ul>
+</div>
+</div>
+<div id="tab_sect">
+<div id="tab_billInfo_sect" style="display: none;"></div>
+<div id="tab_anBillInfo_sect" style="display: none;"></div>
+<div id="tab_voteInfo_sect" style="display: none;"></div>
+</div>
+<!-- 목록 검색유지 폼 -->
+<form id="historyForm" name="historyForm">
+<input name="page" type="hidden" value="1"/>
+<input name="rows" type="hidden" value="10"/>
+<input name="currMenuNo" type="hidden" value="2600044"/>
+<!-- 의안검색 검색조건 -->
+<input name="billNo" type="hidden" value=""/>
+<input name="billNm" type="hidden" value=""/>
+<input name="nmReSchText" type="hidden" value=""/>
+<input name="nmReSchChk" type="hidden" value=""/>
+<input name="reasonPropose" type="hidden" value=""/>
+<input name="ageFrom" type="hidden" value=""/>
+<input name="ageTo" type="hidden" value=""/>
+<input name="ageSch" type="hidden" value=""/>
+<input name="billKind" type="hidden" value=""/>
+<input name="proposerKind" type="hidden" value=""/>
+<input name="ageCmtId" type="hidden" value=""/>
+<input name="representKindCd" type="hidden" value=""/>
+<input name="representId" type="hidden" value=""/>
+<input name="represent" type="hidden" value=""/>
+<input name="isPopSelect" type="hidden" value=""/>
+<input name="allOpenId" type="hidden" value=""/>
+<input name="allNm" type="hidden" value=""/>
+<input name="repreOpenId" type="hidden" value=""/>
+<input name="repreNm" type="hidden" value=""/>
+<input name="oneOpenId" type="hidden" value=""/>
+<input name="oneNm" type="hidden" value=""/>
+<input name="jointOpenId" type="hidden" value=""/>
+<input name="jointNm" type="hidden" value=""/>
+<input name="procGbnCd" type="hidden" value=""/>
+<input name="cmtResultCd" type="hidden" value=""/>
+<input name="mainResultCd" type="hidden" value=""/>
+<input name="mainUpdateYn" type="hidden" value=""/>
+<input name="expAddiYn" type="hidden" value=""/>
+<input name="budgetSubbillCd" type="hidden" value=""/>
+<input name="fromPropSess" type="hidden" value=""/>
+<input name="toPropSess" type="hidden" value=""/>
+<input name="fromPropDt" type="hidden" value=""/>
+<input name="toPropDt" type="hidden" value=""/>
+<input name="fromSubmitDt" type="hidden" value=""/>
+<input name="toSubmitDt" type="hidden" value=""/>
+<input name="fromDispSe" type="hidden" value=""/>
+<input name="toDispSe" type="hidden" value=""/>
+<input name="procFrom" type="hidden" value=""/>
+<input name="procTo" type="hidden" value=""/>
+<input name="stateDtlDivCd" type="hidden" value=""/>
+<input name="anbillDivCd" type="hidden" value=""/>
+<input name="mainProcYn" type="hidden" value=""/>
+<input name="isHistoryBack" type="hidden" value="Y"/>
+<input name="reexamYn" type="hidden" value=""/>
+<input name="jntPrpslYn" type="hidden" value=""/>
+<input name="billSentence" type="hidden" value=""/>
+<input name="billKeyword" type="hidden" value=""/>
+<input name="fromPropSessAge" type="hidden" value=""/>
+<input name="toPropSessAge" type="hidden" value=""/>
+<input name="fromdispSeAge" type="hidden" value=""/>
+<input name="todispSeAge" type="hidden" value=""/>
+<!-- // 의안검색 검색조건 -->
+<!-- 청원검색 검색조건 -->
+<input name="petitKindCd" type="hidden" value=""/>
+<input name="petitTitle" type="hidden" value=""/>
+<input name="petitSmry" type="hidden" value=""/>
+<input name="intdMemInfo" type="hidden" value=""/>
+<input name="intdMemId" type="hidden" value=""/>
+<input name="petrInfo" type="hidden" value=""/>
+<!-- // 청원검색 검색조건 -->
+<!-- 마이페이지 검색조건 -->
+<input name="billName" type="hidden" value=""/>
+<input name="proposer" type="hidden" value=""/>
+<input name="committeeCd" type="hidden" value=""/>
+<!-- //마이페이지 검색조건 -->
+<!-- 정렬조건 -->
+<input name="listOrd" type="hidden" value=""/>
+<input name="ordCd" type="hidden" value=""/>
+<!-- //정렬조건 -->
+</form>
+<!-- // 목록 검색유지 폼 -->
+</div>
+</div>
+<!-- /* 공통 Footer 영역  */ -->
+<footer>
+<div class="modal_pop footpop" style="display: none;">
+<div class="poplayer_footer">
+<div>
+<h2>개인정보 처리방침</h2>
+<div class="poplayer_footer_form" id="footer_indvdlPrcsPolcy" tabindex="0">
+<div class="personalInformation poplayer_form_pd">
+<p>ㆍ국회사무처는 「개인정보 보호법」에 따라 정보주체의 개인정보 및 권익을 보호하고, 개인정보와 관련한 정보주체의 고충을 원활하게 처리할 수 있도록 다음과 같은 개인정보 처리방침을 두고 있습니다.</p>
+<h3 class="mt40">제1조(개인정보의 처리 목적)</h3>
+<p class="mt20">① 국회사무처는 대국민 서비스 제공, 민원처리, 소관업무 수행 등의 목적에 필요한 범위에서 최소한의 개인정보를 처리하고 있습니다. 이용 목적이 변경되는 경우에는 「개인정보 보호법」제18조에 따라 별도의 동의를 받는 등 필요한 조치를 이행할 예정입니다.</p>
+<p class="mt20">② 국회홈페이지는 다음 목적을 위해 개인 정보를 처리합니다.</p>
+<div class="mt10 ml10">1. 국회홈페이지 회원 가입 및 관리<br/>
+                    회원 가입의사 확인, 회원제 서비스 또는 제한적 본인 확인제에 따른 본인확인, 개인식별, 부정이용방지, 만 14세 미만 아동 개인정보 수집 시 법정대리인 동의여부 확인, 추후 법정 대리인 본인 확인, 분쟁 조정을 위한 기록 보존, 고지사항 전달 등을 목적으로 개인정보를 처리합니다.</div>
+<div class="mt10 ml10">2. 민원사무 처리<br/>
+                    민원인의 신원 확인, 민원사항 확인, 처리결과 통보 등을 목적으로 개인정보를 처리합니다.</div>
+<div class="mt10 ml10">3. 대국민 서비스 제공 및 개선<br/>
+                    대국민 서비스 및 콘텐츠 제공, 맞춤서비스 제공, 홍보 행사 관련 정보 및 참여 기회 제공, 접속 빈도 파악 및 회원의 서비스 이용에 대한 통계 분석 등을 목적으로 개인정보를 처리합니다.</div>
+<p class="mt20">③ 국회홈페이지 회원가입정보는 통합회원관리를 통해 아래의 국회 관련 홈페이지에서 개인정보를 처리합니다.</p>
+<table class="privacy">
+<caption>국회 관련 홈페이지 안내</caption><colgroup><col style="width:30%"/><col style="width:70%"/></colgroup>
+<thead>
+<tr>
+<th scope="col">국회 관련 홈페이지</th>
+<th scope="col">처리 목적</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="align_center">국회사무처 홈페이지</td>
+<td class="tal">총장과의 대화, 자유게시판에서의 민원사항 확인 및 통계분석 등</td>
+</tr>
+<tr>
+<td class="align_center">위원회 홈페이지</td>
+<td class="tal">자유게시판에서의 민원사항 확인 및 통계분석 등</td>
+</tr>
+<tr>
+<td class="align_center">대한민국 어린이 국회 홈페이지</td>
+<td class="tal">연구회원 및 지도교사 관리</td>
+</tr>
+<tr>
+<td class="align_center">국회 방문자센터 홈페이지</td>
+<td class="tal">참관신청처리 및 관리</td>
+</tr>
+<tr>
+<td class="align_center">국회방송 홈페이지</td>
+<td class="tal">시청자소감, 의견및제안, 문의에서의 민원사항 확인 및 통계분석 등</td>
+</tr>
+<tr>
+<td class="align_center">국회의정연수원 홈페이지</td>
+<td class="tal">교육, 연수 신청 처리 및 관리</td>
+</tr>
+<tr>
+<td class="align_center">맞춤입법콘텐츠검색시스템</td>
+<td class="tal">서비스 이용자 관리</td>
+</tr>
+<tr>
+<td class="align_center">국회뉴스ON</td>
+<td class="tal">이벤트 신청, 댓글작성 등</td>
+</tr>
+<tr>
+<td class="align_center">국회 문화행사 홈페이지</td>
+<td class="tal">문화행사 예약 신청처리 및 관리</td>
+</tr>
+<tr>
+<td class="align_center">국회 입법예고시스템</td>
+<td class="tal">의견 제출</td>
+</tr>
+<tr>
+<td class="align_center">국민동의청원</td>
+<td class="tal">청원업무처리, 서비스 제공 등</td>
+</tr>
+<tr>
+<td class="align_center">열린국회정보</td>
+<td class="tal">정보공개청구 업무처리, 서비스 제공 등</td>
+</tr>
+</tbody>
+</table>
+<h3 class="mt40">제2조(개인정보의 처리 및 보유 기간, 처리하는 개인정보 항목)</h3>
+<p class="mt20">① 국회사무처에서 처리하는 개인정보는 수집·이용 목적으로 명시한 범위 내에서 처리하며, 개인정보 보호법 및 관련 법령에서 정하는 보유기간을 준용하여 이행하고 있습니다.</p>
+<p class="mt20">② 국회홈페이지에서 처리하는 개인정보의 처리 항목 및 보유기간은 다음과 같습니다.</p>
+<div class="mt10 ml10">1. 국회홈페이지 회원 정보</div>
+<table class="privacy">
+<caption>국회홈페이지 회원 개인정보의 처리 항목 및 보유기간</caption><colgroup><col style="width:15%"/><col style="width:15%"/><col style="width:70%"/></colgroup>
+<tbody>
+<tr>
+<th colspan="2" scope="row">수집근거</th>
+<td class="tal">정보주체의 동의</td>
+</tr>
+<tr>
+<th colspan="2" scope="row">보유기간</th>
+<td class="tal">회원 탈퇴 시까지</td>
+</tr>
+<tr class="tc">
+<th rowspan="2" scope="row">수집항목</th>
+<th scope="row">필수항목</th>
+<td class="tal">이름, 생년월일, 이메일, 휴대폰번호, 직업군, 아이디, 비밀번호, 본인인증기관으로부터의 인증결과값(CI값)</td>
+</tr>
+<tr>
+<th scope="row">선택항목</th>
+<td class="tal">전화번호, 주소</td>
+</tr>
+</tbody>
+</table>
+<div class="mt10 ml10">2. 국회홈페이지 국회민원 및 국민제안 관리</div>
+<table class="privacy">
+<caption>국회홈페이지 국회민원 및 국민제안 정보의 처리 항목 및 보유기간</caption><colgroup><col style="width:15%"/><col style="width:15%"/><col style="width:70%"/></colgroup>
+<tbody>
+<tr>
+<th colspan="2" scope="row">수집근거</th>
+<td class="tal">「민원사무처리에 관한 법률」</td>
+</tr>
+<tr>
+<th colspan="2" scope="row">보유기간</th>
+<td class="tal">10년</td>
+</tr>
+<tr class="tc">
+<th rowspan="2" scope="row">수집항목</th>
+<th scope="row">필수항목</th>
+<td class="tal">이름, 전화번호, 휴대폰번호, 주소, 이메일, 본인인증기관으로부터의 인증결과값(CI값)</td>
+</tr>
+<tr>
+<th scope="row">선택항목</th>
+<td class="tal">없음</td>
+</tr>
+</tbody>
+</table>
+<div class="mt10" style="display: flex; align-items: center;"><div style="margin-right: 5px;">※ 상세한 국회사무처의 개인정보파일 등록사항 공개는</div><div id="goPerInfo" style="color: blue; margin-right: 5px; cursor: pointer;">국회홈페이지(www.assembly.go.kr) ▷ 개인정보파일목록</div><div>메뉴를 활용해 주시기 바랍니다.</div></div>
+<p class="mt20">③ 국회홈페이지 접속 시에는 이용자의 브라우저 종류 및 운영체제(OS), 인터넷 프로토콜(IP) 주소, 방문일시, 국회홈페이지를 방문할 때 거친 웹 사이트의 주소 등이 자동 수집됩니다. 이와 같이 자동 수집되는 정보는 관련 법령에 따라 처리되고, 홈페이지의 개선과 보완을 위한 통계 분석에 활용됩니다.</p>
+<h3 class="mt40">제3조(개인정보의 제3자 제공)</h3>
+<p class="mt20">국회사무처는 원칙적으로 정보주체의 개인정보를 제1조(개인정보 처리 목적)에서 명시한 범위 안에서만 처리하며, 다음 각 호의 어느 하나에 해당하는 경우를 제외하고는 정보주체의 사전 동의 없이 본래의 목적을 초과하여 처리하거나 제3자에게 제공하지 않습니다.</p>
+<div class="mt10 ml10">1. 정보주체로부터 별도의 동의를 받는 경우</div>
+<div class="mt10 ml10">2. 법률에 특별한 규정이 있는 경우</div>
+<div class="mt10 ml10">3. 정보주체 또는 그 법정대리인이 의사표시를 할 수 없는 상태에 있거나 주소불명 등으로 사전 동의를 받을 수 없는 경우로서 명백히 정보주체 또는 제3자의 급박한 생명, 신체, 재산의 이익을 위하여 필요하다고 인정되는 경우</div>
+<div class="mt10 ml10">4. 통계작성 및 학술연구 등의 목적을 위하여 필요한 경우로서 특정 개인을 알아볼 수 없는 형태로 개인정보를 제공하는 경우</div>
+<div class="mt10 ml10">5. 개인정보를 목적 외의 용도로 이용하거나 이를 제3자에게 제공하지 아니하면 다른 법률에서 정하는 소관 업무를 수행할 수 없는 경우로서 보호위원회의 심의·의결을 거친 경우</div>
+<div class="mt10 ml10">6. 조약, 그 밖의 국제협정의 이행을 위하여 외국정부 또는 국제기구에 제공하기 위하여 필요한 경우</div>
+<div class="mt10 ml10">7. 범죄의 수사와 공소의 제기 및 유지를 위하여 필요한 경우</div>
+<div class="mt10 ml10">8. 법원의 재판업무 수행을 위하여 필요한 경우</div>
+<div class="mt10 ml10">9. 형(形)의 감호, 보호처분의 집행을 위하여 필요한 경우</div>
+<h3 class="mt40">제4조(개인정보의 처리 위탁)</h3>
+<p class="mt20">① 국회사무처는 원활한 업무처리를 위하여 다음과 같이 개인정보 처리업무를 위탁하고 있습니다.</p>
+<div class="mt10 ml10">- 수탁자 : 대신정보통신 주식회사<br/>
+<!-- &nbsp;&nbsp;- 수탁기간 : &lsquo;15.3.2.~&rsquo;17.12.31.<br /> -->- 수탁내용 : 국회 정보시스템 유지관리<br/>
+                     </div>
+<p class="mt20">② 국회사무처는 위탁계약 시 「개인정보 보호법」제26조에 따라 위탁업무 수행목적 외 개인정보 처리금지, 기술적·관리적 보호조치 및 책임부담 등을 명확히 규정된 문서에 따라 처리하고 있습니다. 위탁업무의 내용이나 수탁자 변경될 경우에는 지체 없이 개인정보처리방침을 통하여 고지하겠습니다.</p>
+<h3 class="mt40">제5조(정보주체의 권리·의무 및 행사방법)</h3>
+<p class="mt20">① 정보주체는 국회사무처에 언제든지 「개인정보 보호법」 제32조에 따라 등록 대상이 되는 개인정보파일에 수록된 자신의 개인정보에 대해 다음 각 호의 개인정보 보호 관련 권리를 행사할 수 있습니다.</p>
+<div class="mt10 ml10">1. 개인정보 열람 요구<br/>
+                    2. 오류 등이 있을 경우 개인정보 정정 요구<br/>
+                    3. 개인정보 삭제 요구<br/>
+                    4. 개인정보 처리 정지 요구</div>
+<p class="mt20">② 제1항에 따른 권리 행사는 서면, 전자우편, 모사전송(FAX) 등을 통하여 할 수 있으며, 국회사무처는 이에 대해 지체 없이 조치하겠습니다.</p>
+<p class="mt20">③ 정보주체가 개인정보의 오류 등에 대한 정정 또는 삭제를 요구한 경우에는 국회사무처는 정정 또는 삭제를 완료할 때까지 해당 개인정보를 이용하거나 제공하지 않습니다.</p>
+<p class="mt20">④ 제1항에 따른 권리행사는 정보주체의 법정대리인이나 위임을 받은 자 등 대리인을 통하여 할 수 있습니다. 이 경우 위임장을 제출하여야 합니다.</p>
+<p class="mt20">⑤ 개인정보 열람 및 처리정지 요구는 「개인정보 보호법」 제35조제4항 또는 제37조제2항에 따라 정보주체의 권리가 제한 될 수 있습니다.</p>
+<p class="mt20">⑥ 개인정보의 정정 및 삭제 요구는 다른 법령에서 그 개인정보가 수집 대상으로 명시되어 있는 경우에는 그 삭제를 요구할 수 없습니다.</p>
+<p class="mt20">⑦ 국회사무처는 정보주체 권리에 따른 열람의 요구, 정정·삭제의 요구, 처리정지의 요구 시 열람 등의 요구를 한 자가 본인이거나 정당한 대리인인지를 확인할 수 있습니다.</p>
+<h3 class="mt40">제6조(개인정보 파기 절차 및 방법)</h3>
+<p class="mt20">국회사무처는 원칙적으로 개인정보의 보유기간 경과, 처리목적이 달성 등 개인정보가 불필요하게 되었을 때에는 지체 없이 다음의 절차 및 방법에 따라 해당 개인정보를 파기합니다. 다만, 다른 법령에 따라 보존하여야 하는 경우에는 관련 법령에 따라 처리하고 있습니다.</p>
+<div class="mt10 ml10">1. 파기절차 : 목적이 달성된 개인정보는 즉시 파기되거나 내부 방침및 기타 관련 법령에 따라 일정기간 저장된 후 파기됩니다. 목적 달성 후 일정기간 보관되는 개인정보는 법령에 의한 경우가 아니고서는 다른 목적으로 이용되지 않습니다.</div>
+<div class="mt10 ml10">2. 파기방법 : 전자적 파일형태로 저장된 개인정보는 기록을 재생할 수 없는 기술적 방법을 사용하여 삭제합니다.</div>
+<h3 class="mt40">제7조(개인정보의 안전성 확보조치)</h3>
+<p class="mt20">국회사무처는 「개인정보 보호법」제29조(안전조치의무)에 따라 다음과 같이 개인정보의 안전성 확보에 필요한 기술적·관리적·물리적 조치를 하고 있습니다.</p>
+<div class="mt10 ml10">1. 내부관리계획의 수립 및 시행<br/>
+                    개인정보의 안전한 처리를 위하여 내부관리계획을 수립하여 시행하고 있습니다.</div>
+<div class="mt10 ml10">2. 개인정보 취급 직원의 최소화 및 교육<br/>
+                    개인정보를 취급하는 직원은 반드시 필요한 인원에 한하여 지정·관리하고 있으며, 취급직원을 대상으로 안전한 관리를 위한 교육을 실시하고 있습니다.</div>
+<div class="mt10 ml10">3. 개인정보의 암호화<br/>
+                    개인정보는 암호화 등을 통해 안전하게 저장 및 관리되고 있으며,중요한 데이터는 저장 및 전송 시 암호화하여 사용하는 등의 별도 보안기능을 사용하고 있습니다.</div>
+<div class="mt10 ml10">4. 접속 기록의 보관 개인정보처리시스템에 접속한 기록(웹 로그, 요약정보 등)을 최소 6개월 이상 보관·관리하고 있습니다.</div>
+<div class="mt10 ml10">5. 개인정보에 대한 접근 제한 개인정보를 처리하는 개인정보처리시스템에 대한 접근권한의 부여·말소를 통하여 개인정보에 대한 접근 통제를 위한 필요한 조치를 하고 있으며, 침입차단시스템을 이용하여 외부로부터 무단 접근을 통제하고 있습니다.</div>
+<div class="mt10 ml10">6. 보안프로그램 설치 및 주기적 점검·갱신 해킹이나 컴퓨터 바이러스 등에 의한 개인정보 유출 및 훼손을 막기 위하여 보안프로그램을 설치하고 주기적으로 갱신·점검하고 있습니다.</div>
+<div class="mt10 ml10">7. 비인가자에 대한 출입 통제 개인정보를 보관하고 있는 개인정보처리시스템의 물리적 보관 장소를 별도로 두고 이에 대해 출입통제 절차를 수립·운영하고 있습니다.</div>
+<h3 class="mt40">제8조(권익침해 구제방법)</h3>
+<p class="mt20">① 정보주체는 개인정보 침해로 인한 피해를 구제 받기 위하여 다음의 기관에 대해 개인정보 침해에 대한 피해구제, 분쟁해결이나 상담 등을 문의할 수 있습니다.</p>
+<div class="mt10 ml10">1. 개인정보침해 신고센터(한국인터넷진흥원 운영)<br/>
+                    ㆍ소관업무 : 개인정보 침해사실 신고, 상담신청<br/>
+                    ㆍ홈페이지 : privacy.kisa.or.kr<br/>
+                    ㆍ전화 : (국번없이) 118<br/>
+                    ㆍ주소 : (58324) 전라남도 나주시 진흥길 9 (빛가람동 301-2) 3층 개인정보침해 신고센터</div>
+<div class="mt10 ml10">2. 개인정보분쟁조정위원회<br/>
+                    ㆍ소관업무 : 개인정보 분쟁조정신청, 집단분쟁조정(민사적 해결)<br/>
+                    ㆍ홈페이지 : www.kopico.go.kr<br/>
+                    ㆍ전화 : (국번없이)1833-6972<br/>
+                    ㆍ주소 : (03171) 서울특별시 종로구 세종대로 209 정부서울청사 4층</div>
+<div class="mt10 ml10">3. 대검찰청 사이버수사과<br/>
+                    ㆍ홈페이지 : www.spo.go.kr(REDACTED-FOR-FIXTURE)<br/>
+                    ㆍ전화 : (국번없이) 1301</div>
+<div class="mt10 ml10">4. 경찰청 사이버안전국<br/>
+                    ㆍ홈페이지 : cyberbureau.police.go.kr<br/>
+                    ㆍ전화 : (국번없이) 182</div>
+<p class="mt20">② 개인정보의 열람, 정정·삭제, 처리정지 등에 대한 정보주체의 요구에 대하여 공공기관의 장이 행한 처분 또는 부작위로 인하여 권리 또는 이익을 침해 받은 자는 「행정심판법」이 정하는 바에 따라 행정심판을 청구할 수 있습니다.</p>
+<h3 class="mt40">제9조(홈페이지 개인정보 보호책임자)</h3>
+<p class="mt20">국회사무처는 홈페이지 개인정보를 보호하고 개인정보와 관련한 업무를 수행하기 위하여 다음과 같이 개인정보 보호책임자 등을 지정하고 있습니다.</p>
+<div class="mt10 ml10">1. 홈페이지 개인정보 보호책임자 : 국회사무처 기획조정실장</div>
+<div class="mt10 ml10">2. 홈페이지 담당부서 : 디지털운영담당관실(02-6788-3055)</div>
+<h3 class="mt40">제10조(개인정보 자동 수집 장치의 설치·운영 및 그 거부에 관한 사항)</h3>
+<p class="mt20">① 국회사무처는 이용자에게 개별적인 맞춤서비스를 제공하기 위해 이용정보를 저장하고 수시로 불러오는 쿠키(cookie)를 사용합니다. <br/>
+<br/>
+                    ② 쿠키(cookie)는 웹사이트를 운영하는데 이용되는 서버가 이용자의 컴퓨터 브라우저에게 보내는 소량의 정보이며 이용자의 PC 컴퓨터 내의 하드디스크에 저장되기도 합니다.<br/>
+                    - 쿠키(cookie)의 사용목적 : 이용자가 방문한 각 서비스와 웹 사이트들에 대한 방문 및 이용형태, 인기 검색어, 보안접속 여부 등을<br/>
+                      파악하여 이용자에게 최적화된 정보 제공을 위해 사용됩니다.<br/>
+                    - 쿠키(cookie)의 설치·운영 및 거부 : 웹브라우저 상단의 도구&gt;인터넷옵션&gt;개인정보 메뉴의 옵션 설정을 통해 쿠키(cookie) 저장을<br/>
+                      거부할 수 있습니다.<br/>
+                    - 쿠키(cookie) 저장을 거부할 경우 맞춤형 서비스 이용에 어려움이 발생할 수 있습니다.</p>
+<h3 class="mt40">제11조(개인정보 처리방침 변경)</h3>
+<p class="mt20">이 개인정보처리방침은 2020.2.17. 부터 적용되고, 이 전의 개인정보 처리방침은 아래에서 확인할 수 있습니다. 국회사무처는 개인정보<br/>
+                    처리방침을 개정하는 경우 웹사이트에 공지하여 알려드리겠습니다.</p>
+<div class="txt01 mt10" style="line-height:1.4;">- 2017년 3월29일 ~ 2020년 2월 16일 <a class="ft_button" href="https://assembly.go.kr/portal/conts/contsFileDown.do?fileName=indivfile1&amp;fileOutName=개인정보처리방침(국회)_20200216&amp;fileExt=hwp">다운로드</a><br/>
+                        - 2015년 10월13일 ~ 2017년 3월 28일 <a class="ft_button" href="https://assembly.go.kr/portal/conts/contsFileDown.do?fileName=indivfile2&amp;fileOutName=개인정보처리방침(국회)_20170329&amp;fileExt=hwp">다운로드</a><br/>
+                        - 2015년 3월3일 ~ 2015년 10월 12일 <a class="ft_button" href="https://assembly.go.kr/portal/conts/contsFileDown.do?fileName=indivfile3&amp;fileOutName=개인정보처리방침(국회)_20151012&amp;fileExt=hwp">다운로드</a><br/>
+                        - 2014년 8월7일 ~ 2015년 3월 2일 <a class="ft_button" href="https://assembly.go.kr/portal/conts/contsFileDown.do?fileName=indivfile4&amp;fileOutName=개인정보처리방침(국회)_20150302&amp;fileExt=hwp">다운로드</a><br/>
+                        - ~ 2014년 8월 6일 <a class="ft_button" href="https://assembly.go.kr/portal/conts/contsFileDown.do?fileName=indivfile5&amp;fileOutName=국회_개인정보처리방침(20140806이전)&amp;fileExt=hwp">다운로드</a>
+</div>
+</div>
+</div>
+<div class="btn-set tac">
+<a class="b-basic" href="javascript:;" onclick="$('#footer_indvdl_prcs_polcy').focus();">확인</a>
+</div>
+<a class="btn_modal_x" href="javascript:;" onclick="$('#footer_indvdl_prcs_polcy').focus();">창닫기</a>
+</div>
+</div>
+</div>
+<div class="modal_pop footpop" style="display: none;">
+<div class="poplayer_footer">
+<div>
+<h2>홈페이지 이용약관</h2>
+<div class="poplayer_footer_form" id="footer_hmpgUseStplat" tabindex="0">
+<div class="personalInformation poplayer_form_pd"><!--<p class="txt01 mt40">대한민국국회 홈페이지 이용약관</p>-->
+<h3 class="title01 tac">제1장 총칙</h3>
+<p class="grayText txt01 mt40">제1조(목적)</p>
+<p class="txt01 mt10">대한민국국회 홈페이지 이용약관(이하 "본 약관"이라 한다)은 대한민국국회(이하 "국회"라 한다) 홈페이지 및 국회 홈페이지의 제반 온라인 서비스(이하 "서비스"라 한다) 이용과 관련하여 국회와 이용자의 권리·의무·책임사항과 기타 필요한 사항을 규정함을 목적으로 합니다.</p>
+<p class="grayText txt01 mt40">제2조(정의)</p>
+<p class="txt01 mt10">본 약관에서 사용하는 용어의 정의는 다음과 같습니다.</p>
+<p class="txt01 mt10">1. "이용자"란 국회 홈페이지에 접속하여 본 약관에 따라 국회가 제공하는 서비스를 이용하는 회원 및 비회원을 말합니다.</p>
+<p class="txt01 mt10">2. "회원"이란 국회 홈페이지의 가입 신청 절차에 따라 회원 등록을 한 자로서 국회 홈페이지의 정보 및 서비스를 계속적으로 이용할 수 있는 자를 말합니다.</p>
+<p class="txt01 mt10">3. "본인확인"이란 국회 홈페이지가 제공하는 서비스 이용을 위하여 공공/일반 I-PIN 인증 또는 휴대폰 번호 인증 등으로 본인임을 확인하는 것을 말합니다.</p>
+<p class="grayText txt01 mt40">제3조(약관의 효력과 개정)</p>
+<p class="txt01 mt10">① 본 약관은 국회 홈페이지 서비스 화면에 공지함으로써 이용자에게 공시하고, 본 약관에 동의한 이용자가 회원에 가입함으로써 효력이 발생하며, 국회 홈페이지의 서비스 제공 행위 및 이용자의 서비스 사용 행위에 본 약관이 우선적으로 적용됩니다.</p>
+<p class="txt01 mt10">② 국회는 필요한 경우 이 약관의 내용을 변경할 수 있으며, 변경된 약관은 국회 홈페이지 서비스 화면에 공지함으로써 이용자가 직접 확인할 수 있도록 합니다.</p>
+<p class="txt01 mt10">③ 회원은 개정된 약관에 동의하지 않을 경우 회원 탈퇴할 수 있으며, 명시적으로 거부의 의사표시를 하지 아니하고 계속 사용하는 경우에는 약관 변경에 동의한 것으로 간주됩니다.</p>
+<p class="txt01 mt10">④ 본 약관에 명시되지 않은 사항에 대해서는 「전기통신사업법」, 「정보통신망 이용촉진 및 정보보호 등에 관한 법률」, 「개인정보 보호법」 등 관련 법령의 규정에 따릅니다.</p>
+<h3 class="title01 mt35 tac">제2장 서비스 제공 및 이용</h3>
+<p class="grayText txt01 mt40">제4조(회원 가입)</p>
+<p class="txt01 mt10">① 국회 홈페이지 회원에 가입하고자 하는 이용자는 국회 홈페이지의 회원 가입 신청 절차에 따라 본인확인을 거쳐 본 이용약관 및 개인정보처리방침 등에 "동의" 여부를 표시하고, 개인정보를 기재함으로써 회원에 가입합니다.</p>
+<p class="grayText txt01 mt40">제5조(회원 탈퇴 및 자격 상실)</p>
+<p class="txt01 mt10">① 회원은 언제든지 회원 탈퇴를 할 수 있으며 국 회는 지체 없이 회원 탈퇴를 처리하고, 해당 개인정보를 파기합니다.</p>
+<p class="txt01 mt10">② 국회 홈페이지가 제12조제2항 및 제13조제1항에 따라 이용자의 회원 자격을 상실시키기로 결정한 경우에는 회원 등록을 말소합니다. 이 경우 회원 등록 말소 전에 회원에게 이를 통지하고, 소명할 기회를 부여합니다.</p>
+<p class="grayText txt01 mt40">제6조(서비스의 제공 및 변경)</p>
+<p class="txt01 mt10">① 국회 홈페이지는 이용자에게 다음과 같은 서비스를 제공합니다.</p>
+<p class="txt01 mt10">1. 국회의 의정활동 관련 콘텐츠, 맞춤서비스, 홍보행사 정보 및 참여기회 제공 등의 대국민 정보 서비스</p>
+<p class="txt01 mt10">2. 온라인 상의 민원 처리 서비스</p>
+<p class="txt01 mt10">② 국회 홈페이지는 서비스의 내용이 변경되는 경우, 그 내용 및 제공 일자를 제8조제2항에서 정한 방법으로 이용자에게 통지하고, 제1항에 정한 서비스를 변경하여 제공할 수 있습니다.</p>
+<p class="grayText txt01 mt40">제7조(서비스의 중단)</p>
+<p class="txt01 mt10">① 국회 홈페이지는 정보시스템, 서버, 정보기기, 네트워크의 점검·교체 및 장애발생 등의 사유가 발생한 경우에는 서비스의 제공을 일시적으로 중단할 수 있습니다. 또한, 운영상 상당한 이유가 있는 경우 현재 제공되는 서비스를 새로운 서비스로 교체 또는 중단할 수 있습니다.</p>
+<p class="txt01 mt10">② 제1항에 의한 서비스 중단의 경우에는 국회는 제8조제2항에서 정한 방법으로 이용자에게 통지합니다. 다만, 국회가 통제할 수 없는 사유로 인한 서비스의 중단(시스템 관리자의 고의·과실이 없는 정보시스템, 서버, 정보기기, 네트워크의 장애발생 등)으로 인하여 사전 통지가 불가능한 경우에는 그러하지 아니합니다.</p>
+<p class="grayText txt01 mt40">제8조(이용자에 대한 통지)</p>
+<p class="txt01 mt10">① 국회가 특정 이용자에 대한 통지를 하는 경우 이용자가 회원 가입 시에 기재한 메일주소로 할 수 있습니다.</p>
+<p class="txt01 mt10">② 국회가 불특정다수 이용자에 대한 통지를 하는 경우 국회 홈페이지 게시판 및 서비스 화면에 게시함으로써 개별 통지에 갈음할 수 있습니다.</p>
+<p class="grayText txt01 mt40">제9조(개인정보보호)</p>
+<p class="txt01 mt10">① 국회는 「개인정보 보호법」등 관련 법령, 국회 개인정보 보호에 관한 규정 및 국회의 개인정보처리방침이 정하는 바에 따라 이용자의 개인정보를 보호하기 위하여 노력합니다. 다만, 국회가 운영하는 홈페이지에 포함된 링크 또는 배너를 클릭하여 다른 사이트로 옮겨갈 경우에는 해당 사이트의 개인정보보호방침에 따릅니다.</p>
+<p class="txt01 mt10">② 국회 홈페이지는 회원 정보를 다음과 같이 처리합니다.</p>
+<p class="txt01 mt10">1. 개인정보의 수집 및 이용 : 국회 홈페이지는 회원가입 시, 대국민 서비스 제공·민원처리·소관업무 수행 등의 목적에 필요한 범위 내에서 이용자 본인의 동의(14세 미만인 경우 법정 대리인의 동의)를 받아 최소한의 개인정보를 수집합니다. 또한, 민감정보·고유식별정보의 수집이 필요한 경우에는 각각을 구분하여 별도의 동의를 받아 처리합니다.</p>
+<p class="txt01 mt10">2. 개인정보의 목적 외 이용 및 제3자 제공 : 국회 홈페이지는 수집된 회원의 개인정보를 제2항제1호의 목적 범위 내에서 이용하며, 이용자 본인의 동의 없이 본래의 목적을 초과하여 처리하거나 제3자에게 제공하지 않습니다.</p>
+<p class="txt01 mt10">③ 회원은 개인정보 관리화면을 통하여 언제든지 본인의 개인정보를 열람·수정·삭제할 수 있습니다.</p>
+<p class="txt01 mt10">④ 회원은 회원 가입 신청 시 기재한 사항에 변경이 발생한 경우, 변경사항을 수정하여 기재하여야 합니다. 회원이 변경사항을 수정 기재하지 않아 발생한 불이익에 대하여 국회는 책임지지 않습니다.</p>
+<p class="grayText txt01 mt40">제10조(국회의 의무)</p>
+<p class="txt01 mt10">① 국회는 관련 법령과 본 약관이 정하는 바에 따라 지속적이고, 안정적으로 서비스를 제공하기 위해서 노력합니다.</p>
+<p class="txt01 mt10">② 국회는 이용자가 안전하게 인터넷 서비스를 이용할 수 있도록 개인정보의 안전성 확보에 필요한 기술적·관리적 및 물리적 보안 조치를 취합니다.</p>
+<p class="grayText txt01 mt40">제11조(이용자의 ID 및 비밀번호에 대한 의무)</p>
+<p class="txt01 mt10">① 이용자의 ID와 비밀번호에 관한 관리책임은 이용자에게 있습니다. 다만, 국회가 개인정보보호법 등 관계 법령에 의하여 책임을 지는 경우는 제외합니다.</p>
+<p class="txt01 mt10">② 이용자는 자신의 ID 및 비밀번호를 제3자에게 이용하게 해서는 안 되며, 작업 종료 시에는 반드시 로그아웃하고, 웹브라우저의 창을 닫아야 합니다.</p>
+<p class="txt01 mt10">③ 이용자는 자신의 ID 및 비밀번호가 도용되거나 제3자가 사용하고 있음을 인지한 경우에는 바로 국회에 통보하고 국회의 안내가 있는 경우에는 그에 따라야 합니다.</p>
+<p class="grayText txt01 mt40">제12조(이용자의 의무)</p>
+<p class="txt01 mt10">①이용자는 다음 각 호의 행위를 하여서는 안 됩니다.</p>
+<p class="txt01 mt10">1. 신청 또는 변경 시 허위 내용을 등록하는 행위</p>
+<p class="txt01 mt10">2. 타인의 명의를 도용하여 부정사용하는 행위</p>
+<p class="txt01 mt10">3. 국회의 직원이나 국회 서비스의 관리자를 가장하거나 사칭하는 행위</p>
+<p class="txt01 mt10">4. 국회 홈페이지에 게시된 정보를 변경하는 행위</p>
+<p class="txt01 mt10">5. 다른 이용자에 대한 개인정보를 수집·저장·공개하는 행위</p>
+<p class="txt01 mt10">6. 외설 또는 폭력적·위협적인 메시지·화상·음성·기타 공서양속에 반하는 정보를 메일로 송신하거나 공개 또는 게시하는 행위</p>
+<p class="txt01 mt10">7. 사생활 침해 또는 명예훼손 등 타인의 권리를 침해하는 정보를 유통시키는 행위</p>
+<p class="txt01 mt10">8. 국회 또는 타인의 지적재산권을 침해하거나 업무를 방해하는 행위</p>
+<p class="txt01 mt10">9. 컴퓨터 소프트웨어·하드웨어·네트워크 등의 정상적인 가동을 방해, 파괴할 목적으로 고안된 소프트웨어 바이러스·기타 다른 컴퓨터 코드·파일·프로그램을 포함하고 있는 자료를 게시하거나 전자우편으로 발송하는 행위</p>
+<p class="txt01 mt10">10. 불특정 다수를 대상으로 하여 광고 또는 선전을 게시하거나 스팸메일을 전송하는 등의 행위</p>
+<p class="txt01 mt10">11. 국회 홈페이지의 이용 약관을 위반하는 행위</p>
+<p class="txt01 mt10">12. 기타 관련 법령에 의하여 그 전송 또는 게시가 금지되는 정보를 전송 또는 게시하는 행위</p>
+<p class="txt01 mt10">② 제1항에 해당하는 행위를 한 이용자가 있을 경우 국회는 이용자의 회원자격을 적정한 방법으로 제한, 정지 또는 상실시킬 수 있습니다.</p>
+<p class="txt01 mt10">③ 이용자는 그 귀책사유로 인하여 국회나 다른 이용자가 입은 손해를 배상할 책임이 있습니다.</p>
+<p class="grayText txt01 mt40">제13조(공개 게시물의 삭제 등)</p>
+<p class="txt01 mt10">① 이용자가 게재한 공개 게시물의 내용이 다음 각 호에 해당하는 경우 국회 홈페이지는 이용자에게 사전 통지 없이 해당 공개 게시물을 삭제할 수 있고, 해당 이용자의 회원 자격을 제한, 정지 또는 상실시킬 수 있습니다.</p>
+<p class="txt01 mt10">1. 음란한 부호·문언·음향·화상 또는 영상을 배포·판매·임대하거나 공공연하게 전 시하는 내용</p>
+<p class="txt01 mt10">2. 사람을 비방할 목적으로 공공연하게 사실이나 거짓의 사실을 드러내어 타인의 명예를 훼손하는 내용</p>
+<p class="txt01 mt10">3. 공포심이나 불안감을 유발하는 부호·문언·음향·화상 또는 영상을 반복적으로 상대방에게 도달하도록 하는 내용</p>
+<p class="txt01 mt10">4. 정당한 사유 없이 정보통신시스템, 데이터 또는 프로그램 등을 훼손·멸실·변경·위조하거나 그 운용을 방해하는 내용</p>
+<p class="txt01 mt10">5. 「청소년 보호법」에 따른 청소년유해매체물을 게재 또는 광고하는 내용</p>
+<p class="txt01 mt10">6. 법령에 따라 금지되는 사행행위에 해당하는 내용</p>
+<p class="txt01 mt10">7. 법령에 따라 분류되는 비밀 등 국가기밀을 누설하는 내용</p>
+<p class="txt01 mt10">8.「국가보안법」에서 금지하는 행위를 수행하는 내용</p>
+<p class="txt01 mt10">9. 그 밖에 범죄를 목적으로 하거나 교사 또는 방조하는 내용</p>
+<p class="txt01 mt10">10. 종교적 분쟁 등을 야기하는 내용으로서, 이러한 분쟁으로 인하여 국회의 업무가 방해되거나 방해되리라고 판단되는 경우</p>
+<p class="txt01 mt10">11. 기타 관련 법령에 위배된다고 판단되는 내용</p>
+<p class="txt01 mt10">② 공개게시물의 내용으로 인하여 사생활 침해나 명예훼손 등 타인의 권리가 침해된 경우 그 침해를 받은 자는 국회에게 침해사실을 소명하여 그 정보의 삭제를 요청할 수 있습니다.</p>
+<p class="txt01 mt10">③ 국회는 제2항에 따른 요청을 받으면 지체 없이 삭제·임시조치 등의 필요한 조치를 하고, 즉시 신청인 및 정보 게시자에게 알리는 한편, 필요한 조치를 취한 사실을 해당 게시판에 공시하는 등의 방법으로 이용자가 알 수 있도록 합니다.</p>
+<p class="txt01 mt10">④ 국회는 제2항에 따른 정보의 삭제요청에도 불구하고, 권리의 침해 여부를 판단하기 어렵거나 이해당사자 간에 다툼이 예상되는 경우에는 해당 정보에 대한 접근을 임시적으로 차단하는 조치(이하 "임시조치"라 한다)를 할 수 있습니다. 이 경우 임시조치의 기간은 30일 이내로 합니다.</p>
+<p class="grayText txt01 mt40">제14조(저작권의 귀속 및 공공저작물의 자유이용)</p>
+<p class="txt01 mt10">① 국회가 창작·작성한 저작물에 대한 저작권 및 기타 지적재산권은 국회사무처에 귀속합니다.</p>
+<p class="txt01 mt10">② 저작권법 제24조의2(공공저작물의 자유이용)에 따라 국회에서 제공하는 자료 중에서 국회사무처가 저작재산권의 전부를 보유한 저작물의 경우에는 이용허락 없이 자유이용이 가능합니다. 자유이용이 가능한 자료는 "공공저작물 자유이용허락 표시 기준"에 따라 "공공누리, KOGL 제1유형"을 부착하여 개방하고 있습니다.</p>
+<p class="txt01 mt10">③ 이용자는 공공누리 표시가 부착된 공공저작물을 상업적 활용 여부에 관계없이 무료로 자유롭게 이용하고 2차적 저작물 작성 등 변형하여 이용할 수 있습니다. 다만, 이용자는 저작물의 출처를 반드시 표시해야할 의무가 있으며, 개인정보보호법 등 다른 법령에 따라 이용이 제한되는 정보의 경우에는 공공저작물의 이용이 제한됩니다.</p>
+<h3 class="title01 mt35 tac">제3장 손해배상 등</h3>
+<p class="grayText txt01 mt40">제15조(손해배상)</p>
+<p class="txt01 mt10">국회는 무료로 제공되는 서비스와 관련하여 회원에게 어떠한 손해가 발생하더라도 동 손해가 국회의 중대한 과실에 의한 경우를 제외하고는 이에 대하여 책임을 부담하지 않습니다.</p>
+<p class="grayText txt01 mt40">제16조(면책조항)</p>
+<p class="txt01 mt10">① 국회는 천재지변 또는 이에 준하는 불가항력으로 인하여 서비스를 제공할 수 없는 경우에는 서비스 제공에 관한 책임이 면제됩니다.</p>
+<p class="txt01 mt10">② 국회는 회원의 귀책사유로 인한 서비스 이용의 장애에 대하여 책임을 지지 않습니다.</p>
+<p class="txt01 mt10">③ 국회는 회원이 서비스를 이용하여 기대하는 이익이나 서비스를 통하여 얻은 자료로 인한 손해에 관하여 책임을 지지 않습니다.</p>
+<p class="txt01 mt10">④ 국회는 회원이 서비스에 게재한 정보, 자료, 사실의 신뢰도, 정확성 등의 내용에 관하여는 책임을 지지 않습니다.</p>
+<p class="grayText txt01 mt40">제17조(재판관할)</p>
+<p class="txt01 mt10">① 서비스 이용과 관련하여 국회와 회원 사이에 분쟁이 발생한 경우, 국회와 회원은 발생한 분쟁을 원만하게 해결하기 위하여 필요한 모든 노력을 하여야 합니다.</p>
+<p class="txt01 mt10">② 제1항의 규정에도 불구하고 서비스 이용으로 발생한 분쟁에 대하여 소송이 제기될 경우 국회 소재지를 관할하는 법원을 관할법원으로 합니다.</p>
+<h3 class="title01 mt35 tac">&lt;부 칙&gt;</h3>
+<p>본 약관은 2014. 10. 22. 부터 적용합니다.</p>
+<p>* 본 약관에 대한 저작권은 대한민국 국회에 귀속하며 무단 복제·배포·전송·기타 저작권 침해행위를 엄금합니다.</p>
+</div>
+</div>
+<div class="btn-set tac">
+<a class="b-basic" href="javascript:;" onclick="$('#footer_hmpg_use_stplat').focus();">확인</a>
+</div>
+<a class="btn_modal_x" href="javascript:;" onclick="$('#footer_hmpg_use_stplat').focus();">창닫기</a>
+</div>
+</div>
+</div>
+<div class="modal_pop footpop" style="display: none;">
+<!DOCTYPE html>
+
+<div class="poplayer_footer">
+<div>
+<h2>저작권정책</h2>
+<div class="poplayer_footer_form" id="footer_cpyrhtPolicy" tabindex="0">
+<div class="personalInformation poplayer_form_pd">
+<p>국회가 창작, 작성한 저작물에 대한 저작권 및 기타 지적 재산권은 국회사무처에 귀속됩니다.<br/>
+                         </p>
+<p>저작권법 제24조의2(공공저작물의 자유이용)에 따라 대한민국 국회 홈페이지에서 제공하는 자료 중에서 국회사무처가 저작재산권의 전부를 보유한 저작물의 경우에는 별도의 이용허락 없이 자유이용이 가능합니다.</p>
+<div class="imgCont01 mt15"><img alt="공공누리 공공저작물 자유이용허락(제1유형 - 출처표시조건)" src="/bill/static/img/bi/KOGL_Type1.gif"/>
+<ul class="depth3">
+<li>단, 자유이용이 가능한 자료는 "공공저작물 자유이용허락 표시 기준(공공누리, KOGL) 제1유형"을 부착하여 개방하고 있으므로 공공누리 표시가 부착된 저작물인지를 확인한 이후에 자유롭게 이용하시기 바랍니다. 자유이용의 경우, 이용자께서는 반드시 저작물의 출처를 구체적으로 표시하여야 합니다.</li>
+</ul>
+</div>
+<p class="mt15">공공누리가 부착되지 않은 자료들을 사용하고자 할 경우에는 담당자와 사전에 협의한 이후에 이용하여 주시기 바랍니다.<br/>REDACTED-FOR-FIXTURE 또는 전화(02-6788-3055)</p>
+</div>
+</div>
+<div class="btn-set tac">
+<a class="b-basic" href="javascript:;" id="footer_cpyrhtPolicy" onclick="$('#footer_cpyrht_policy').focus();">확인</a>
+</div>
+<a class="btn_modal_x" href="javascript:;" onclick="$('#footer_cpyrht_policy').focus();">창닫기</a>
+</div>
+</div>
+</div>
+<div class="footer">
+<section>
+<div class="logo_footer">
+<img alt="의안정보 시스템" src="/bill/static/img/bi/logo_footer.png"/>
+</div>
+<div class="footer_menu">
+<ul id="ft_menu">
+<li><a class="person" href="javascript:;" id="footer_indvdl_prcs_polcy">개인정보처리방침</a></li>
+<li><a class="line" href="javascript:;" id="footer_hmpg_use_stplat">이용약관</a></li>
+<li><a class="line" href="javascript:;" id="footer_cpyrht_policy">저작권 정책</a></li>
+<li><a class="line" href="/bill/bi/intro/siteMapPage.do" id="footer_directions" target="_top">사이트맵</a></li>
+</ul>
+<address>
+<span>서울특별시 영등포구 의사당대로 1 (여의도동) 07233</span>
+<span class="f_bullet">대표전화 : 02-6788-2030</span>
+<!--                    <span class="f_bullet">홈페이지 문의 : <a href="mailto:REDACTED-FOR-FIXTURE" class="mailto">REDACTED-FOR-FIXTURE</a></span>-->
+</address>
+<div class="copyright">Copyrightⓒ National Assembly. All rights reserved. <br/>대한민국국회 홈페이지의 모든
+                        정보에 대한 권한은
+                        국회에 있습니다.
+                    </div>
+<ul class="foot_homepage">
+<li>
+<select id="footer_jrsd_hmpg_cd" name="footer_jrsd_hmpg_cd" title="소관기관 홈페이지 선택">
+<option value=""># 소관기관 홈페이지</option>
+</select>
+<button class="btn_bl" id="btn_jrsd_hmpg_cd" title="새창열림">GO</button>
+</li>
+<li>
+<select id="footer_cmmit_hmpg_cd" name="footer_cmmit_hmpg_cd" title="위원회 홈페이지 선택">
+<option value=""># 위원회 홈페이지</option>
+</select>
+<button class="btn_bl" id="btn_cmmit_hmpg_cd" title="새창열림">GO</button>
+</li>
+<li>
+<select id="footer_hmpg_cd" name="footer_hmpg_cd" title="홈페이지 선택">
+<option value=""># 홈페이지</option>
+</select>
+<button class="btn_bl" id="btn_hmpg_cd" title="새창열림">GO</button>
+</li>
+<li>
+<select id="footer_na_info_sys_cd" name="footer_na_info_sys_cd" title="국회정보시스템 선택">
+<option value=""># 국회정보시스템</option>
+</select>
+<button class="btn_bl" id="btn_na_info_sys_cd" title="새창열림">GO</button>
+</li>
+</ul>
+<div class="ft_menu_etc">
+<ul>
+<li><a class="wa" href="javascript:void(0);" id="footer_web_acces" title="새창열림_한국웹접근성인증평가원">웹접근성인증마크</a></li>
+<li><a class="site_open" href="javascript:void(0);" id="footer_kogl" title="새창열림_공공누리">OPEN</a>
+</li>
+<li><a class="fsns_rss" href="javascript:void(0);" id="footer_rss" title="새창열림_RSS">RSS</a></li>
+</ul>
+</div>
+</div>
+</section>
+</div>
+<form id="global-hidden-form" method="post">
+<input name="_csrf" type="hidden" value="REDACTED-FOR-FIXTURE"/>
+<!-- left menu를 사용하지 않는 목록 화면의 상세화면 이동을 위해 lnb.html에서 footer.html로 이동 -->
+<!-- left menu 및 location 정보 처리를 위해 현재 화면(목록)의 menuNo 추가 -->
+<!-- Edited by giinie on 2025-03-31 -->
+<input id="menu__currMenuNo" type="hidden" value="2600078"/>
+<input id="menu__currUpperMenuNo" type="hidden" value="2600001"/>
+<input id="glb__isNavMobile" type="hidden" value="N"/>
+</form>
+<!-- 로딩바 -->
+<div class="loading-overlay" id="glb-loading" style="display:none;">
+<div class="loading-container">
+<div class="load_imge"></div>
+<div class="loading-spinner"></div>
+<p class="loading-text">조회중입니다. 잠시만 기다려 주십시오...</p>
+</div>
+</div>
+<!-- 엑셀다운로드 건수 초과 레이어 팝업-->
+<div class="npop_download">
+<div>
+<div>
+<span></span>
+<ul>
+<li><a class="btn_bk" href="javascript:void(0);" id="dwld">다운로드</a></li>
+<li><a class="btn_bl" href="javascript:void(0);" id="cancel">취소</a></li>
+<li><a class="btn_base" href="javascript:void(0);" id="goBidwld">일괄다운로드</a></li>
+</ul>
+</div>
+</div>
+</div>
+<!-- 퀵메뉴1 -->
+<!-- 내가 본 콘텐츠 layer -->
+<div class="mymemo_box">
+<div class="mmtop">
+<h2>내가 본 콘텐츠</h2>
+<a href="javascript:;" onclick="document.getElementsByClassName('mymemo_box')[0].style.display = 'none';
+                            document.querySelector('.btn-memo-go')?.classList.remove('on');">닫기</a>
+</div>
+<div class="mmcont" id="footer_myContentList_swiper">
+<div class="swiper-wrapper" id="footer_myContentList"></div>
+</div>
+<div class="number_btn">
+<a class="nb_prev" href="javascript:;">이전</a>
+<div class="nb_txt" id="footer_myContentList_pager">
+<span class="nb_current">1</span> /
+                <span class="nb_total">0</span>
+</div>
+<a class="nb_next" href="javascript:;">다음</a>
+</div>
+</div>
+<div class="quick_and_nav nav_fullPageMenu01 quick_sub" id="quickMenu">
+<div class="fullpage-nav-area">
+<div>
+<div class="number_search">
+<label for="footer_billNo__txt">의안번호 검색</label>
+<div>
+<input id="footer_billNo__txt" maxlength="7" placeholder="의안번호" type="text"/><button onclick="footer_moveToBillDetailPageByBillNo()">의안번호 검색</button>
+</div>
+</div>
+<div class="btn_mymemo">
+<button id="footer_mymemo_btn">내가 본 콘텐츠</button>
+</div>
+<div class="btn_ildown">
+<button data-url="/bill/bi/dwld/docBndlDwldPage.do" id="btn_bndlDwld" type="button">일괄다운로드</button>
+</div>
+<div class="dropdown">
+<button class="dropbtn on" onclick="footer_quickFunction()">Quick 메뉴</button>
+<div class="dropdown-content show" id="QuickDropdown">
+<ul>
+<li><a data-popnm="quickCommitteePop" data-url="https://committee.na.go.kr" href="javascript:void(0);" title="새창열림">위원회</a></li>
+<li><a data-popnm="quickRecordPop" data-url="https://record.assembly.go.kr/" href="javascript:void(0);" title="새창열림">회의록</a></li>
+<li><a data-popnm="quickPalPop" data-url="https://pal.assembly.go.kr/napal/main/main.do" href="javascript:void(0);" title="새창열림">입법예고</a></li>
+<li><a data-popnm="quickLawPop" data-url="https://likms.assembly.go.kr/law" href="javascript:void(0);" title="새창열림">법률정보</a></li>
+<li><a data-popnm="quickPetitPop" data-url="https://petitions.assembly.go.kr/paHome" href="javascript:void(0);" title="새창열림">전자청원</a></li>
+</ul>
+<p class="top"><a href="javascript:;">TOP</a></p>
+</div>
+</div>
+<!--  메인 Parallax nav-->
+<ul class="main-nav-list" style="display: none">
+<li class="active" data-menuanchor="fp_anchor1"><a data-id="1" href="#fp_anchor1">메인</a></li>
+<li data-menuanchor="fp_anchor2"><a data-id="2" href="#fp_anchor2">이슈 키워드</a></li>
+<li data-menuanchor="fp_anchor3"><a data-id="3" href="#fp_anchor3">표결현황</a></li>
+<li data-menuanchor="fp_anchor4"><a data-id="4" href="#fp_anchor4">의안통계</a></li>
+</ul>
+<!-- // 메인 Parallax nav-->
+</div>
+</div>
+</div>
+<!-- //퀵메뉴 -->
+<!--    <th:block th:if="${session.isNavMobile == null or session.isNavMobile ne 'Y'}">-->
+<!--        <a href="javascript:;" class="btn-memo-go"></a>-->
+<!--        <a href="javascript:;" class="btn-quick-go">Quick<br>메뉴</a>-->
+<!--        <a href="javascript:;" class="btn-top-go">TOP</a>-->
+<!--    </th:block>-->
+<!--    <a href="javascript:;" class="btn-memo-go" style="display: none;"></a>-->
+<a class="btn-memo-go" href="javascript:;">
+<span>내가 본<br/>콘텐츠</span>
+</a>
+<a class="btn-quick-go" href="javascript:;">Quick<br/>메뉴</a>
+<a class="btn-top-go" href="javascript:;">TOP</a>
+<!-- 모바일 퀵메뉴-->
+<div class="mobile_quickmenu">
+<div class="mobile_quickmenu_box">
+<div>
+<strong>Quick 메뉴</strong>
+<ul>
+<li><a href="https://committee.na.go.kr" target="new">위원회</a></li>
+<li><a href="https://record.assembly.go.kr/" target="new">회의록</a></li>
+<li><a href="https://pal.assembly.go.kr/napal/main/main.do" target="new">입법예고</a></li>
+<li><a href="https://likms.assembly.go.kr/law" target="new">법률정보</a></li>
+<li><a href="https://petitions.assembly.go.kr/paHome" target="new">전자청원</a></li>
+</ul>
+</div>
+</div>
+<a class="mobile_quick_x" href="javascript:;">닫기</a>
+</div>
+<script></script>
+<script></script>
+</footer>
+<iframe height="0" id="global-process-iframe" name="global-process-iframe" src="" style="width:100%; display:none;" title="프로그램 처리 영역"></iframe>
+<!-- 모달팝업(s) -->
+<div id="popupModal">
+<div id="popupModalWrapper">
+<!-- 팝업 내용을 로드할 iframe -->
+<iframe frameborder="0" id="popupModalIframe"></iframe>
+<div style="text-align:right; padding-top:10px;">
+</div>
+</div>
+</div>
+<script></script>
+<!-- 모달팝업(e) -->
+<!-- 페이지별 추가 스크립트 삽입 -->
+<div>
+<link href="/bill/static/assets/jquery/swiper/swiper-bundle.min.css?ver=1.0.0" rel="stylesheet"/>
+<script src="/bill/static/assets/jquery/swiper/swiper-bundle.min.js?ver=1.0.0"></script>
+<script src="/bill/static/js/bi/bill/billDetail.js?ver=1.0.0"></script>
+</div>
+</body></html>
