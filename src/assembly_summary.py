@@ -170,8 +170,9 @@ def summarize_assembly_bills(
 
         kind = result.failure_kind or LLMErrorKind.TRANSIENT
         if kind in _STOP_CALLING_KINDS:
-            # 자격증명·한도·모델 부재·잘못된 요청: 다음 배치도 같은 자격증명으로 같은
-            # 서비스를 부르므로 결과가 달라지지 않는다. 즉시 브레이커를 연다.
+            # 자격증명·한도·모델 부재·잘못된 요청·내부 오류: 다음 배치도 같은 자격증명으로
+            # 같은 서비스를 부르거나 같은 버그를 밟으므로 결과가 달라지지 않는다.
+            # 즉시 브레이커를 연다.
             log.warning(
                 "의안 배치 호출이 %s 로 실패 — 남은 %d개 배치는 호출하지 않고 "
                 "발췌로 발송합니다.",

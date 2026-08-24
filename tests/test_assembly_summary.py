@@ -9,6 +9,7 @@ import sys
 from copy import deepcopy
 
 import pytest
+import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -637,7 +638,7 @@ def test_network_error_does_not_trigger_split():
     class _Boom:
         def post(self, *a, **k):
             calls["n"] += 1
-            raise ConnectionError("연결 실패")
+            raise requests.ConnectionError("연결 실패")
 
     s.session = _Boom()
     assert s.summarize_all({_SOURCE: posts}) == 0
@@ -836,7 +837,7 @@ def test_network_failure_probes_next_batch_then_trips_breaker():
     class _Boom:
         def post(self, *a, **k):
             calls["n"] += 1
-            raise ConnectionError("연결 실패")
+            raise requests.ConnectionError("연결 실패")
 
     s.session = _Boom()
     assert s.summarize_all({_SOURCE: posts}) == 0
@@ -975,7 +976,7 @@ def test_split_stops_second_half_after_call_failure():
         seq["n"] = n
         if n == 1:
             return _envelope("{쓰레기")          # 분할 유발
-        raise RuntimeError("HTTP 401: invalid api key")
+        raise LLMCallError("HTTP 401", kind=LLMErrorKind.AUTH, status=401)
 
     cfg = _cfg(batch=AssemblyBatchConfig(batch_size=4, retry_missing_once=False))
     ok, rec = _run(posts, cfg, reply=_broken_then_dead)
@@ -995,7 +996,7 @@ def test_general_posts_still_summarized_after_assembly_call_failure():
     def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
         calls["n"] += 1
         if "bill_id:" in prompt:
-            raise RuntimeError("HTTP 403: forbidden")
+            raise LLMCallError("HTTP 403", kind=LLMErrorKind.AUTH, status=403)
         return _envelope("첫째 문장임\n둘째 문장임\n셋째 문장임")
 
     s._generate = _generate

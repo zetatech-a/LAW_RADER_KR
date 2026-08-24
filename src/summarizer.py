@@ -69,8 +69,10 @@ class LLMErrorKind(Enum):
     RATE_LIMIT = "rate_limit"                # 429 — 한도 초과
     MODEL_UNAVAILABLE = "model_unavailable"  # 404 등 — 그 모델을 쓸 수 없음
     TRANSIENT = "transient"                  # 408/5xx/네트워크 — 잠시 후 되살아남
-    BAD_REQUEST = "bad_request"              # 400 — payload/설정/프로그래밍 오류
+    BAD_REQUEST = "bad_request"              # 400 — 우리가 보낸 요청이 잘못됨
     CONTENT = "content"                      # 응답 내용 문제(차단·잘림·스키마 위반)
+    INTERNAL = "internal"                    # HTTP/네트워크/내용으로 설명되지 않는
+                                             # 우리 코드의 예상치 못한 예외
 
 
 class LLMError(RuntimeError):
@@ -94,16 +96,23 @@ class LLMCallError(LLMError):
 # 재시도해도 같은 답이 오는 실패. 여기에 없는 것만 bounded retry 대상이다.
 _RETRYABLE_KINDS = frozenset({LLMErrorKind.RATE_LIMIT, LLMErrorKind.TRANSIENT})
 
-# 다음 글/배치를 불러도 똑같이 실패하는 종류. 하나라도 나오면 남은 호출을 그만둔다
-# (한도·시간예산만 태우고 결과는 같다). TRANSIENT 는 여기 없다 — 잠깐 흔들린 서버는
-# 다음 호출에서 살아날 수 있으므로 연속 실패 카운터로 따로 판단한다.
-# CONTENT 도 여기 없다 — 그 글/배치의 응답 내용 문제라 다른 대상은 통과할 수 있다.
+# 다음 글/배치를 불러도 똑같이 실패하는 종류. 하나라도 나오면 이번 실행에서는 남은
+# LLM 호출을 그만둔다(한도·시간예산만 태우고 결과는 같다). 메일은 그대로 나간다 —
+# 요약이 빈 글은 notifier 가 기존 원문 발췌로 되돌린다.
+#
+# TRANSIENT 는 여기 없다 — 잠깐 흔들린 서버는 다음 호출에서 살아날 수 있으므로 연속
+# 실패 카운터로 따로 판단한다. CONTENT 도 여기 없다 — 그 글/배치의 응답 내용 문제라
+# 다른 대상은 통과할 수 있다.
+#
+# INTERNAL 이 여기 있는 이유: 우리 코드의 버그는 다음 글·다음 배치에서도 똑같이
+# 터진다. 서버 장애가 아니므로 재시도할 것도 없고, 반복해도 실패만 쌓인다.
 _STOP_CALLING_KINDS = frozenset(
     {
         LLMErrorKind.AUTH,
         LLMErrorKind.RATE_LIMIT,
         LLMErrorKind.MODEL_UNAVAILABLE,
         LLMErrorKind.BAD_REQUEST,
+        LLMErrorKind.INTERNAL,
     }
 )
 
@@ -141,14 +150,18 @@ def classify_status(status: int) -> LLMErrorKind:
 def classify_error(exc: BaseException) -> LLMErrorKind:
     """예외를 실패 의미로 옮긴다(상위 계층이 다음 호출 여부를 정할 때 쓴다).
 
-    분류를 모르는 예외는 TRANSIENT 로 본다 — 알 수 없는 실패 하나로 남은 작업을
-    통째로 포기하는 것보다, 한 번 더 시도해 보고 연속 실패로 판정하는 편이 낫다.
+    핵심은 '서버가 흔들렸다'와 '우리 코드가 틀렸다'를 섞지 않는 것이다. ValueError·
+    TypeError·KeyError 같은 예상치 못한 예외를 TRANSIENT 로 세면, 같은 버그를 남은
+    모든 글과 배치에서 다시 밟으면서 백오프까지 자게 된다. 그래서 INTERNAL 로 따로
+    분류해 즉시 멈춘다(메일은 원문 발췌로 계속 나간다).
     """
     if isinstance(exc, LLMError):
         return exc.kind
-    # 네트워크 예외(연결 실패·타임아웃·중간에 끊긴 응답)는 물론, 분류를 모르는 예외도
-    # 여기로 온다. 둘 다 '다시 해 보면 될 수도 있다'로 다루는 것이 안전하다.
-    return LLMErrorKind.TRANSIENT
+    # requests 예외는 물론 OS 레벨 소켓 오류(builtin ConnectionError·TimeoutError 는
+    # OSError 하위다)도 네트워크 장애다 — 우리 코드의 버그가 아니므로 TRANSIENT.
+    if isinstance(exc, (requests.RequestException, OSError)):
+        return LLMErrorKind.TRANSIENT
+    return LLMErrorKind.INTERNAL
 
 
 _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가입니다.
@@ -289,6 +302,21 @@ class SummaryUnavailable(LLMError):
     kind = LLMErrorKind.CONTENT
 
 
+class RequestDeadlineExceeded(SummaryUnavailable):
+    """요청이 자체 wall-clock 마감을 넘겨 caller 가 기다리기를 포기함.
+
+    _post_within 이 데몬 워커를 두고 빠져나올 때만 쓴다. 응답 '내용'의 문제가 아니라
+    호출 계층의 일시 장애이므로, HTTP 5xx·네트워크 오류와 **같은** bounded retry 정책을
+    탄다(_generate_with 의 단일 재시도 루프).
+
+    SummaryUnavailable 을 그대로 상속한다 — 기존 호출부·테스트가 이 타임아웃을
+    SummaryUnavailable 로 잡고 있고, 그 계약을 깰 이유가 없다. 부모와 달리 kind 는
+    TRANSIENT 다: 파싱 단계의 CONTENT 실패(차단·잘림·스키마 위반)와 섞이면 안 된다.
+    """
+
+    kind = LLMErrorKind.TRANSIENT
+
+
 def _unfence(text: str) -> str:
     """마크다운 코드펜스(```json … ```)를 벗긴다.
 
@@ -357,6 +385,9 @@ class Summarizer:
         self._active_model: str | None = None
         # 사용 불가로 확인된 모델(404 등). 이후 게시글에서 다시 시도하지 않는다.
         self._unavailable: set[str] = set()
+        # 이번 summarize_all() 실행에서 확정된 종료성 실패(AUTH 등). summarize_all 이
+        # 매 호출 시작 시 None 으로 되돌리므로 실행 사이에 끌려가지 않는다.
+        self._terminal_failure: LLMErrorKind | None = None
         # thinkingConfig 를 받지 않는 모델. 400 을 한 번 겪으면 그 모델에는 빼고 보낸다
         # (모델별로 따로 기억한다). 애초에 Gemini 2.5 계열에만 보내므로 평상시엔 빈 집합.
         self._thinking_unsupported: set[str] = set()
@@ -373,7 +404,26 @@ class Summarizer:
         따로 모아 배치로 요약한다. 반환값은 두 경로에서 요약에 성공한 글 수의 합.
         실패는 로그만 남기고 넘어간다(빈 summary → 메일에서 기존 발췌로 표시).
         """
+        # 이번 invocation 에서만 유효한 상태로 시작한다. 인스턴스에 남겨 두면 지난
+        # 실행의 401 이 이번 실행의 정상 키까지 막는다(sticky terminal 금지).
+        self._terminal_failure = None
+
         ok = self._summarize_general(posts_by_source)
+
+        # 일반 경로에서 '다시 불러도 같은 결과'인 실패가 확정됐다면, 같은 자격증명·
+        # 같은 설정으로 도는 의안 배치도 부를 이유가 없다. 남은 의안은 제안이유
+        # 발췌로 나가고 메일은 그대로 발송된다.
+        #
+        # TRANSIENT·CONTENT 는 여기 걸리지 않는다 — 서버가 회복됐을 수도 있고,
+        # 응답 내용 문제는 그 글에 달린 것이라 의안 배치는 통과할 수 있다.
+        if self._terminal_failure is not None:
+            log.warning(
+                "일반 요약에서 %s 실패가 확정되어 의안 배치 요약을 건너뜁니다 — "
+                "의안은 제안이유 발췌로 발송됩니다.",
+                self._terminal_failure.value,
+            )
+            return ok
+
         try:
             # 지연 임포트: assembly_summary 는 이 모듈을 임포트한다(순환 방지).
             from .assembly_summary import summarize_assembly_bills
@@ -460,9 +510,13 @@ class Summarizer:
                     "[%s] 요약 실패(%s) %s: %s", post.source_key, kind.value, post.url, e
                 )
                 if kind in _STOP_CALLING_KINDS:
-                    # 자격증명·한도·모델 부재·잘못된 요청은 다음 글에서도 똑같이 실패한다.
-                    # 연속 실패 카운터를 채울 때까지 기다릴 이유가 없다(그만큼 한도와
-                    # 시간예산만 태운다). 남은 글은 원문 발췌로 나간다.
+                    # 자격증명·한도·모델 부재·잘못된 요청·내부 오류는 다음 글에서도
+                    # 똑같이 실패한다. 연속 실패 카운터를 채울 때까지 기다릴 이유가
+                    # 없다(그만큼 한도와 시간예산만 태운다). 남은 글은 원문 발췌로 나간다.
+                    #
+                    # summarize_all 이 이 값을 보고 의안 배치까지 건너뛴다 — 같은
+                    # 자격증명으로 같은 서비스를 다시 부를 이유가 없기 때문이다.
+                    self._terminal_failure = kind
                     log.warning(
                         "%s 실패로 남은 %d건은 호출하지 않고 원문 발췌로 발송합니다.",
                         kind.value,
@@ -678,16 +732,20 @@ class Summarizer:
             self._last_call = time.monotonic()
             try:
                 resp = self._post_within(url, headers, payload, budget)
-            except requests.RequestException as e:
-                # 연결 실패·읽기 타임아웃 등 네트워크 계층 장애. 예전에는 재시도 없이
-                # 그대로 올라가 첫 흔들림에 그 글/배치를 포기했다. 일시 장애이므로
-                # 같은 bounded retry 정책을 적용하되, 소진되면 원래 예외형을 그대로
-                # 올려 보낸다(상위의 재시도·분류 판정이 기존과 같게 유지된다).
+            except (requests.RequestException, RequestDeadlineExceeded) as e:
+                # 호출 계층의 일시 장애 두 가지를 **같은** 정책으로 다룬다:
+                #   - 네트워크 예외(연결 실패·읽기 타임아웃 등)
+                #   - 우리 자신의 wall-clock 마감 초과(RequestDeadlineExceeded)
+                # 뒤엣것은 TRANSIENT 로 분류해 두고도 이 except 에 걸리지 않아 재시도를
+                # 전혀 타지 못했다(코드리뷰 지적). 두 경우 모두 max_retries·백오프·
+                # 시간예산 판정을 공유하고, 소진되면 원래 예외형 그대로 올려 보낸다
+                # (상위의 분류·폴백이 기존과 같게 유지된다). 다른 모델로 넘어가지 않는다.
                 last_error = f"{type(e).__name__}: {e}"
                 last_kind = LLMErrorKind.TRANSIENT
                 last_status = None
+                reason = "timeout" if isinstance(e, RequestDeadlineExceeded) else "network"
                 if not self._sleep_before_retry(
-                    attempt, deadline, model, LLMErrorKind.TRANSIENT, "network"
+                    attempt, deadline, model, LLMErrorKind.TRANSIENT, reason
                 ):
                     raise
                 attempt += 1
@@ -821,10 +879,10 @@ class Summarizer:
         worker.join(timeout=budget)
         if worker.is_alive():
             # 소켓은 살아 있을 수 있지만 우리는 더 기다리지 않는다(메일 지연 방지).
-            # 응답 내용의 문제가 아니라 '늦었다'는 뜻이다 — 일시 장애로 분류한다.
-            raise SummaryUnavailable(
-                f"요청이 시간예산({budget:.1f}초)을 초과함",
-                kind=LLMErrorKind.TRANSIENT,
+            # 응답 내용의 문제가 아니라 '늦었다'는 뜻이다 — 호출 계층의 일시 장애이므로
+            # _generate_with 의 재시도 정책을 그대로 탄다.
+            raise RequestDeadlineExceeded(
+                f"요청이 시간예산({budget:.1f}초)을 초과함"
             )
         if "error" in box:
             raise box["error"]

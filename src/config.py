@@ -47,7 +47,8 @@ _DEFAULT_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash-lite")
 # `MODEL` 을 workflow 가 GEMINI_MODEL 로 넘겨주므로, 운영자가 코드를 고치지 않고
 # 모델을 바꿀 수 있다. MODEL 도 함께 보는 이유는 로컬 실행/기존 설정 호환성이다.
 #
-# 값 자체는 절대 코드에 하드코딩하지 않는다 — 여기서는 '어느 변수를 보는지'만 정한다.
+# 여기서는 '어느 변수를 보는지'만 정한다. 모델명 자체는 아래 resolve_model 의 순서에
+# 따라 환경변수 → config.yaml → _DEFAULT_MODEL 중 하나에서 온다.
 _MODEL_ENV_VARS = ("GEMINI_MODEL", "MODEL")
 
 

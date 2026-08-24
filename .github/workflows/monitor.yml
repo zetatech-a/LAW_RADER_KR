@@ -75,7 +75,10 @@ jobs:
           # Variables 의 repository Variable `MODEL` 이 그대로 primary 모델이 된다.
           # 비어 있으면 config.yaml 의 llm.model 로 자동으로 되돌아간다
           # (precedence: GEMINI_MODEL > MODEL > config.yaml > 코드 기본값).
-          # 모델명은 코드에 하드코딩하지 않는다 — 이 Variable 이 유일한 출처다.
+          # 이 Variable 은 '유일한 출처'가 아니라 운영 환경의 **override** 다 —
+          # config.yaml 의 llm.model 과 코드 기본값, 404 용 fallback_models 는
+          # 그대로 남아 있어 Variable 을 지워도 요약이 멈추지 않는다.
+          # 다만 워크플로 자체에는 모델명을 적지 않는다(운영 중 교체는 Variable 로).
           GEMINI_MODEL: ${{ vars.MODEL }}
         run: python -m src.main
 
