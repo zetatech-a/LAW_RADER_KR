@@ -168,9 +168,11 @@ def run(argv=None) -> int:
                 assembly_scraper = scraper
             baselined = state.is_baselined(src.key)
             if baselined:
-                # 운영: seen 과 대조해 신규만, 경계까지 최대 max_pages 페이지 훑음.
+                # 운영: 이미 아는 것과 대조해 신규만, 경계까지 최대 max_pages 페이지 훑음.
                 result = scraper.collect(
-                    cfg.fetch.list_limit, state.seen_ids(src.key), cfg.fetch.max_pages
+                    cfg.fetch.list_limit,
+                    _known_ids(state, src.key, assembly_queue),
+                    cfg.fetch.max_pages,
                 )
             else:
                 # 최초 기준선: 얕게(baseline_pages) 기록. 이미 있는 글을 신규로 오인하지
@@ -277,11 +279,22 @@ def run(argv=None) -> int:
     # 누락, SMTP 인증 실패) 있고, 그 상황일수록 수집 진단이 필요하기 때문이다.
     _log_detail_summary(detail, assembly_detail)
 
-    # 선택된 소스가 있는데 하나도 수집에 성공하지 못하면 실패로 종료한다.
+    # 선택된 소스가 있는데 하나도 목록 수집에 성공하지 못했는가.
     # (전면 장애를 초록불로 숨기지 않기 위함. 부분 실패는 그대로 격리·진행)
-    if selected > 0 and succeeded == 0:
-        log.error("선택된 소스 %d개가 모두 실패 — 실패 종료. 오류: %s", selected, "; ".join(errors))
-        return 1
+    #
+    # **여기서 곧바로 종료하지 않는다.** 목록(열린국회 Open API)과 상세 재조회
+    # (의안정보시스템 LIKMS)는 서로 다른 서비스이고, 재조회는 저장된 스냅샷만으로
+    # 기존 enrich() 를 부르므로 목록에 의존하지 않는다. 즉시 return 하면 목록 쪽
+    # 장애나 설정 오류가 지속되는 동안 due 상태인 큐가 **영구히** 처리되지 않는다.
+    # 그래서 '전면 실패'를 control flow 가 아니라 실행의 최종 상태로 기억하고,
+    # 할 수 있는 운영 작업은 계속 수행한 뒤 마지막 반환값에 반영한다.
+    collection_failed_globally = selected > 0 and succeeded == 0
+    if collection_failed_globally:
+        log.error(
+            "선택된 소스 %d개가 모두 목록 수집 실패 — 실행 결과는 실패로 보고합니다. 오류: %s",
+            selected,
+            "; ".join(errors),
+        )
 
     # ── 기존 의안 상세 재조회 큐: 이번 실행에서 처리할 대상 선정 ────────────────
     #
@@ -314,6 +327,12 @@ def run(argv=None) -> int:
                 "%d건을 건너뜁니다.",
                 len(assembly_queue),
             )
+
+    if collection_failed_globally and not selection.selected:
+        # 목록이 전멸했고 이번에 처리할 상세 재조회도 없다 — 더 할 수 있는 일이 없으므로
+        # 예전과 똑같이 즉시 실패 종료한다(SMTP·Gemini 를 불필요하게 부르지 않는다).
+        log.error("처리할 상세 재조회도 없어 실패 종료합니다.")
+        return 1
 
     # 어차피 못 보낼 메일이면 LLM 을 호출하기 전에 멈춘다. 발송 실패는 신규를 seen 으로
     # 확정하지 않으므로, 발송이 막힌 채 방치되면 매 실행이 같은 글을 다시 요약하며
@@ -386,7 +405,8 @@ def run(argv=None) -> int:
     if args.dry_run:
         _print_dry_run(posts_by_source, detail_updates)
         log.info("--dry-run: 메일 미발송, state 미저장")
-        return 0
+        # dry-run 이라고 목록 전면 장애를 0 으로 덮어쓰지 않는다.
+        return 1 if collection_failed_globally else 0
 
     log.info(
         "다이제스트 — new=%d detail_updates=%d", total, len(retry.recovered)
@@ -422,14 +442,42 @@ def run(argv=None) -> int:
     _queue_new_pending(state, posts_by_source)
     _record_retry_metadata(state, retry)
     # 복구되어 이번 다이제스트에 실린 항목만 큐에서 지운다.
-    for p in retry.recovered:
-        state.unqueue_detail(ASSEMBLY_SOURCE_KEY, p.post_id)
+    #
+    # **seen 갱신이 큐 제거보다 먼저다.** 큐에서만 빠지고 seen 에도 없으면(오래 대기하다
+    # seen 상한 MAX_PER_SOURCE 에서 밀려난 경우) 그 의안이 목록에 남아 있는 한 다음
+    # 실행에서 '신규'로 다시 잡혀 최초 알림이 중복된다. mark_seen 은 기존 중복 제거·
+    # 상한 규칙을 그대로 쓰며, 재등록이므로 목록 앞쪽으로 올라간다.
+    recovered_ids = [p.post_id for p in retry.recovered]
+    if recovered_ids:
+        state.mark_seen(ASSEMBLY_SOURCE_KEY, recovered_ids)
+        for post_id in recovered_ids:
+            state.unqueue_detail(ASSEMBLY_SOURCE_KEY, post_id)
     state.save()
     log.info("state 저장 완료")
 
     if errors:
         log.warning("일부 소스 오류: %s", "; ".join(errors))
-    return 0
+    # 상세 재조회·업데이트 발송이 성공했더라도 목록 전면 장애는 그대로 실패로 보고한다
+    # (Actions 를 초록불로 만들어 list 쪽 장애를 숨기지 않는다).
+    return 1 if collection_failed_globally else 0
+
+
+def _known_ids(state: State, source_key: str, assembly_queue: list) -> set[str]:
+    """목록 수집에 넘길 '이미 아는' ID 집합.
+
+    의안만 재조회 큐의 BILL_ID 를 함께 넘긴다. 큐에 있다는 것은 **최초 알림을 이미
+    보냈다**는 뜻이므로 신규가 아니다. 그런데 seen 은 MAX_PER_SOURCE(5000) 상한이 있고
+    큐는 의도적으로 자동 만료하지 않으므로, 오래 대기한 의안이 상한에서 밀려난 뒤에도
+    계류의안 목록에 남아 있으면 신규로 오인되어 최초 알림이 중복된다(같은 실행에서
+    큐가 만든 상세 업데이트와 겹칠 수도 있다).
+
+    다른 소스의 신규 판정 의미는 건드리지 않는다. State.seen_ids() 자체가 모든 소스에서
+    큐를 암묵적으로 합치게 만들지도 않는다 — 큐는 의안 전용 개념이다.
+    """
+    known = state.seen_ids(source_key)
+    if source_key == ASSEMBLY_SOURCE_KEY and assembly_queue:
+        known = known | {item.bill_id for item in assembly_queue}
+    return known
 
 
 def _llm_input(

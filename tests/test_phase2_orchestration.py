@@ -34,17 +34,28 @@ JUST_NOW = None                   # queue_detail 기본값(현재 시각) → in
 class _FakeScraper:
     SUPPORTS_ENRICH = True
 
-    def __init__(self, key, name, new_posts=(), statuses=None, limits=None):
+    def __init__(self, key, name, new_posts=(), statuses=None, limits=None,
+                 collect_error=None, scanned_zero=False):
         self.key = key
         self.name = name
         self.new_posts = list(new_posts)
         self.statuses = dict(statuses or {})
         self.enrich_calls = []
+        self.collect_error = collect_error
+        self.scanned_zero = scanned_zero
+        # collect() 에 실제로 넘어온 '이미 아는 ID' 집합(신규 판정의 입력).
+        self.collect_known = None
         # 실제 스크래퍼처럼 config 에서 읽어 둔 재조회 상한을 노출한다.
         if limits is not None:
             self.detail_retry_interval_sec, self.detail_retry_max_per_run = limits
 
     def collect(self, limit, seen_ids, max_pages):
+        self.collect_known = set(seen_ids)
+        if self.collect_error is not None:
+            raise self.collect_error
+        if self.scanned_zero:
+            # HTTP 는 성공했지만 파서가 0건(마크업/AJAX 변경) — 목록 수집 실패로 센다.
+            return CollectResult(posts=[], reached_boundary=True, scanned=0)
         posts = [p for p in self.new_posts if p.post_id not in seen_ids]
         # scanned>0 이어야 '목록 수집 성공'으로 세어져 all-failed 가드에 걸리지 않는다.
         return CollectResult(posts=posts, reached_boundary=True, scanned=max(len(posts), 1))
@@ -168,6 +179,9 @@ def _run(
     summarize_error=None,
     fill_summaries=False,
     limits=None,
+    collect_error=None,
+    scanned_zero=False,
+    build_error=None,
 ):
     from src import main as main_mod
 
@@ -182,8 +196,13 @@ def _run(
         monkeypatch.setenv("MAIL_TO", "to@example.com")
 
     def _factory(src, fetcher):
+        if build_error is not None:
+            raise build_error
         posts = new_assembly if src.key == ASSEMBLY_SOURCE_KEY else new_press
-        sc = _FakeScraper(src.key, src.name, posts, statuses, limits=limits)
+        sc = _FakeScraper(
+            src.key, src.name, posts, statuses, limits=limits,
+            collect_error=collect_error, scanned_zero=scanned_zero,
+        )
         ctx.builds.append(src.key)
         ctx.scrapers[src.key] = sc
         return sc
@@ -765,3 +784,259 @@ def test_overflow_items_are_not_queued(tmp_path, monkeypatch):
     assert len(ctx.seen) == 61                   # seed + 60건 전부 seen 처리(기존 동작)
     overflow = {b.post_id for b in bills[50:]}
     assert overflow.isdisjoint(set(ctx.queue))
+
+
+# ==========================================================================
+# A. 목록 전면 실패가 due 상세 재조회를 막으면 안 된다 (PR #25 Codex P1)
+#
+# 목록(열린국회 Open API)과 상세 재조회(LIKMS)는 서로 다른 서비스다. 목록이 죽었다고
+# 즉시 종료하면, 그 장애가 지속되는 동안 due 상태인 큐가 **영구히** 처리되지 않는다.
+# 반대로 재조회가 성공했다고 목록 전면 장애를 초록불로 숨겨서도 안 된다.
+# ==========================================================================
+def test_A1_collect_exception_still_runs_due_retry(tmp_path, monkeypatch):
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)])
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        collect_error=RuntimeError("Open API 요청 실패: ConnectTimeout"),
+        statuses={"PRC_Q": (S.AVAILABLE, "제안이유 본문")},
+    )
+    # 목록이 죽어도 저장된 스냅샷으로 상세를 다시 조회하고 사용자에게 전달한다.
+    assert ctx.enriched == ["PRC_Q"]
+    assert len(ctx.digests) == 1
+    assert [p.post_id for p in ctx.updates] == ["PRC_Q"]
+    assert ctx.queue == {}
+    assert "PRC_Q" in ctx.seen                    # 복구분 seen refresh
+    # 그러나 목록 전면 장애는 실행 결과에 그대로 남는다.
+    assert ctx.rc == 1
+
+
+def test_A2_zero_rows_still_runs_due_retry(tmp_path, monkeypatch):
+    """예외 경로와 별개로 'HTTP 200 이지만 파싱 0건' 경로도 검증한다."""
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)])
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path, scanned_zero=True,
+        statuses={"PRC_Q": (S.AVAILABLE, "제안이유 본문")},
+    )
+    assert ctx.enriched == ["PRC_Q"]
+    assert [p.post_id for p in ctx.updates] == ["PRC_Q"]
+    assert ctx.queue == {}
+    assert ctx.rc == 1
+
+
+def test_A3_list_failure_without_due_queue_exits_early(tmp_path, monkeypatch):
+    """할 수 있는 일이 없으면 예전처럼 즉시 실패 종료 — SMTP·Gemini 를 부르지 않는다."""
+    path = _seed_state(tmp_path)
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        collect_error=RuntimeError("Open API 요청 실패"),
+    )
+    assert ctx.rc == 1
+    assert ctx.verify_calls == 0
+    assert ctx.summarize_inputs == []
+    assert ctx.digests == []
+
+
+def test_A4_list_failure_with_not_due_queue_does_not_enrich(tmp_path, monkeypatch):
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", JUST_NOW)])
+    before = path.read_text(encoding="utf-8")
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        collect_error=RuntimeError("Open API 요청 실패"),
+        statuses={"PRC_Q": (S.AVAILABLE, "본문")},
+    )
+    assert ctx.rc == 1
+    assert ctx.enriched == []                     # 간격이 안 지났으면 요청하지 않는다
+    assert ctx.verify_calls == 0
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_A5_build_scraper_failure_keeps_queue(tmp_path, monkeypatch):
+    """스크래퍼 자체를 만들지 못하면 재조회할 수단이 없다 — 큐는 그대로 둔다."""
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)])
+    before = path.read_text(encoding="utf-8")
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        build_error=ValueError("알 수 없는 소스 type"),
+        statuses={"PRC_Q": (S.AVAILABLE, "본문")},
+    )
+    assert ctx.rc == 1
+    assert ctx.scrapers == {}
+    assert ctx.digests == []
+    assert path.read_text(encoding="utf-8") == before
+    assert set(State(path).pending_detail(ASSEMBLY_SOURCE_KEY)) == {"PRC_Q"}
+
+
+def test_A6_dry_run_preserves_list_failure_status(tmp_path, monkeypatch):
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)])
+    before = path.read_text(encoding="utf-8")
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        collect_error=RuntimeError("Open API 요청 실패"),
+        statuses={"PRC_Q": (S.AVAILABLE, "본문")},
+        argv_extra=["--dry-run"],
+    )
+    # dry-run 이라고 목록 전면 장애를 0 으로 덮어쓰지 않는다.
+    assert ctx.rc == 1
+    assert ctx.enriched == ["PRC_Q"]              # 결과를 보여주기 위한 조회는 허용
+    assert ctx.verify_calls == 0                  # SMTP 없음
+    assert ctx.digests == []
+    assert path.read_text(encoding="utf-8") == before   # state 불변
+
+
+def test_partial_list_failure_still_returns_zero(tmp_path, monkeypatch):
+    """일부 소스만 실패하는 기존 격리 동작은 그대로다(rc 0)."""
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)])
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        statuses={"PRC_Q": (S.AVAILABLE, "본문")},
+    )
+    assert ctx.rc == 0
+
+
+# ==========================================================================
+# B. 큐에 있는 BILL_ID 는 신규로 다시 분류되면 안 된다 (PR #25 Codex P2)
+#
+# seen 은 MAX_PER_SOURCE(5000) 상한이 있고 pending_detail 은 자동 만료하지 않는다.
+# 오래 대기한 의안이 상한에서 밀려나면 목록에 남아 있는 한 신규로 오인된다.
+# ==========================================================================
+def test_B1_queue_keys_are_included_in_known_ids(tmp_path, monkeypatch):
+    path = tmp_path / "seen.json"
+    st = State(path)
+    st.mark_seen(ASSEMBLY_SOURCE_KEY, [], baselined=True)   # seen 은 비었지만 운영 중
+    b = _bill("PRC_Q")
+    st.queue_detail(ASSEMBLY_SOURCE_KEY, "PRC_Q", title=b.title, url=b.url,
+                    date=b.date, status="pending", now=OLD)
+    st.save()
+
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        new_assembly=[_bill("PRC_Q")],        # 목록에는 여전히 존재
+        statuses={"PRC_Q": (S.PENDING, "")},
+    )
+    assert ctx.rc == 0
+    # collect 에 넘어간 '이미 아는 ID' 에 큐 키가 포함된다.
+    assert ctx.assembly.collect_known == {"PRC_Q"}
+    assert ctx.news == []                    # 신규로 재분류되지 않는다
+    assert ctx.digests == []                 # 최초 알림 중복 없음
+    assert set(ctx.queue) == {"PRC_Q"}       # 큐는 유지
+
+
+def test_B2_queued_id_survives_seen_cap_eviction(tmp_path, monkeypatch):
+    """seen 상한에서 밀려난 큐 항목도 Assembly 신규 판정에서는 '이미 아는' 것이다."""
+    from src.state import MAX_PER_SOURCE
+
+    path = tmp_path / "seen.json"
+    st = State(path)
+    b = _bill("PRC_OLD")
+    st.queue_detail(ASSEMBLY_SOURCE_KEY, "PRC_OLD", title=b.title, url=b.url,
+                    date=b.date, status="pending", now=OLD)
+    # PRC_OLD 를 먼저 seen 에 넣은 뒤, 상한을 채우고도 남는 신규를 앞에 쌓아 밀어낸다.
+    st.mark_seen(ASSEMBLY_SOURCE_KEY, ["PRC_OLD"], baselined=True)
+    st.mark_seen(ASSEMBLY_SOURCE_KEY, [f"NEW_{i:05d}" for i in range(MAX_PER_SOURCE)])
+    st.save()
+
+    reloaded = State(path)
+    assert "PRC_OLD" not in reloaded.seen_ids(ASSEMBLY_SOURCE_KEY)   # 실제로 밀려났다
+    assert "PRC_OLD" in reloaded.pending_detail(ASSEMBLY_SOURCE_KEY)
+
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        new_assembly=[_bill("PRC_OLD")],      # 계류의안 목록에는 아직 남아 있다
+        statuses={"PRC_OLD": (S.PENDING, "")},
+    )
+    assert ctx.rc == 0
+    assert "PRC_OLD" in ctx.assembly.collect_known
+    assert ctx.news == []
+    assert ctx.digests == []                  # 최초 알림이 중복되지 않는다
+
+
+def test_B2_seen_cap_is_unchanged(tmp_path):
+    """상한 자체를 제거·확대해서 문제를 덮지 않았는지 못박는다."""
+    from src.state import MAX_PER_SOURCE
+
+    assert MAX_PER_SOURCE == 5000
+    st = State(tmp_path / "seen.json")
+    st.mark_seen(ASSEMBLY_SOURCE_KEY, [f"ID_{i}" for i in range(MAX_PER_SOURCE + 10)])
+    assert len(st.seen_ids(ASSEMBLY_SOURCE_KEY)) == MAX_PER_SOURCE
+
+
+def test_B3_recovery_refreshes_seen_before_unqueue(tmp_path, monkeypatch):
+    path = tmp_path / "seen.json"
+    st = State(path)
+    st.mark_seen(ASSEMBLY_SOURCE_KEY, [], baselined=True)
+    b = _bill("PRC_Q")
+    st.queue_detail(ASSEMBLY_SOURCE_KEY, "PRC_Q", title=b.title, url=b.url,
+                    date=b.date, status="pending", now=OLD)
+    st.save()
+    assert "PRC_Q" not in State(path).seen_ids(ASSEMBLY_SOURCE_KEY)
+
+    ctx = _run(tmp_path, monkeypatch, state_path=path,
+               statuses={"PRC_Q": (S.AVAILABLE, "본문")})
+    assert ctx.rc == 0
+    assert [p.post_id for p in ctx.updates] == ["PRC_Q"]
+    # 전달 완료 → seen 에 있고 큐에는 없다.
+    assert "PRC_Q" in ctx.seen
+    assert "PRC_Q" not in ctx.queue
+
+
+def test_B4_no_duplicate_on_the_next_run_after_recovery(tmp_path, monkeypatch):
+    """B3 의 종료 state 를 그대로 다음 실행에 넣어도 신규·업데이트가 다시 나가지 않는다."""
+    path = tmp_path / "seen.json"
+    st = State(path)
+    st.mark_seen(ASSEMBLY_SOURCE_KEY, [], baselined=True)
+    b = _bill("PRC_Q")
+    st.queue_detail(ASSEMBLY_SOURCE_KEY, "PRC_Q", title=b.title, url=b.url,
+                    date=b.date, status="pending", now=OLD)
+    st.save()
+
+    first = _run(tmp_path, monkeypatch, state_path=path,
+                 statuses={"PRC_Q": (S.AVAILABLE, "본문")})
+    assert len(first.digests) == 1
+
+    second = _run(
+        tmp_path, monkeypatch, state_path=path,
+        new_assembly=[_bill("PRC_Q")],        # 목록에 여전히 존재
+        statuses={"PRC_Q": (S.AVAILABLE, "본문")},
+    )
+    assert second.rc == 0
+    assert second.news == []                  # 신규 알림 0회
+    assert second.updates == []               # 상세 업데이트 0회
+    assert second.digests == []
+    assert second.enriched == []              # 큐에 없으므로 조회도 없다
+
+
+def test_B5_mail_failure_keeps_duplicate_protection(tmp_path, monkeypatch):
+    """업데이트 메일이 실패하면 seen refresh 를 확정하지 않되, 큐 키가 중복을 막는다."""
+    path = tmp_path / "seen.json"
+    st = State(path)
+    st.mark_seen(ASSEMBLY_SOURCE_KEY, [], baselined=True)
+    b = _bill("PRC_Q")
+    st.queue_detail(ASSEMBLY_SOURCE_KEY, "PRC_Q", title=b.title, url=b.url,
+                    date=b.date, status="pending", now=OLD)
+    st.save()
+
+    failed = _run(tmp_path, monkeypatch, state_path=path,
+                  statuses={"PRC_Q": (S.AVAILABLE, "본문")},
+                  send_error=RuntimeError("smtp refused"))
+    assert failed.rc == 1
+    assert set(failed.queue) == {"PRC_Q"}          # 큐 유지
+    assert "PRC_Q" not in failed.seen              # 성공하지 않은 transaction 은 확정 안 함
+
+    # 그럼에도 다음 실행에서 신규로 중복 발송되지 않는다(큐 키가 known 에 포함).
+    again = _run(
+        tmp_path, monkeypatch, state_path=path,
+        new_assembly=[_bill("PRC_Q")],
+        statuses={"PRC_Q": (S.PENDING, "")},
+    )
+    assert "PRC_Q" in again.assembly.collect_known
+    assert again.news == []
+    assert again.digests == []
+
+
+def test_other_sources_newness_semantics_unchanged(tmp_path, monkeypatch):
+    """큐 합치기는 의안 전용이다 — 다른 소스에는 seen 만 넘어간다."""
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)],
+                       press_seen=["old1", "old2"])
+    ctx = _run(tmp_path, monkeypatch, state_path=path, only=PRESS_KEY)
+    assert ctx.scrapers[PRESS_KEY].collect_known == {"old1", "old2"}
+    assert "PRC_Q" not in ctx.scrapers[PRESS_KEY].collect_known
