@@ -9,6 +9,7 @@ import sys
 from copy import deepcopy
 
 import pytest
+import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,7 +17,18 @@ from src.assembly_summary import BATCH_SCHEMA, summarize_assembly_bills
 from src.config import AssemblyBatchConfig, LLMConfig, load_config
 from src.models import Post
 from src.notifier import build_html, build_text
-from src.summarizer import _SCHEMA, Summarizer, summarize_posts
+from src.summarizer import (
+    _SCHEMA,
+    LLMCallError,
+    LLMErrorKind,
+    Summarizer,
+    summarize_posts,
+)
+
+
+def _transient_error() -> LLMCallError:
+    """재시도를 모두 소진한 503(일시 장애) 실패."""
+    return LLMCallError("HTTP 503: overloaded", kind=LLMErrorKind.TRANSIENT, status=503)
 
 _SOURCE = "의안정보시스템 · 계류의안"
 _REASON = "현행법은 가상자산 이용자 예치금 보호 의무를 명확히 규정하지 아니함. " * 3
@@ -626,7 +638,7 @@ def test_network_error_does_not_trigger_split():
     class _Boom:
         def post(self, *a, **k):
             calls["n"] += 1
-            raise ConnectionError("연결 실패")
+            raise requests.ConnectionError("연결 실패")
 
     s.session = _Boom()
     assert s.summarize_all({_SOURCE: posts}) == 0
@@ -773,13 +785,15 @@ def _multi_batch_posts(n=6, batch_size=2):
     return [_bill(i) for i in range(n)], AssemblyBatchConfig(batch_size=batch_size)
 
 
-@pytest.mark.parametrize("status", [401, 403, 500])
-def test_non_recoverable_failure_stops_remaining_batches(status):
-    """401/403/5xx 는 다음 배치도 똑같이 실패한다 — 남은 배치를 부르지 않는다.
+@pytest.mark.parametrize("status", [401, 403, 429, 400])
+def test_terminal_failure_stops_remaining_batches_immediately(status):
+    """인증·한도·잘못된 요청은 다음 배치도 똑같이 실패한다 — 즉시 멈춘다.
 
     회귀: 예전에는 배치마다 실패를 삼키고 계속 호출해서, 자격증명이 죽은 실행이
-    (배치 수 × 타임아웃)만큼 시간예산을 태우고 메일을 그만큼 늦췄다. 일반 요약
-    경로의 연속 실패 서킷 브레이커와 같은 취지다.
+    (배치 수 × 타임아웃)만큼 시간예산을 태우고 메일을 그만큼 늦췄다.
+
+    429(한도)를 503(일시 장애)과 같이 다루지 않는다 — 한도가 막힌 실행에서 남은
+    배치를 계속 두드리면 할당량만 더 태운다.
     """
     posts, batch = _multi_batch_posts()
     s = Summarizer(_cfg(batch=batch))
@@ -794,7 +808,28 @@ def test_non_recoverable_failure_stops_remaining_batches(status):
     assert all(p.summary == [] for p in posts)
 
 
-def test_network_failure_stops_remaining_batches():
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_transient_failure_probes_next_batch_then_trips_breaker(status):
+    """시나리오 B — 일시 장애는 다음 배치를 한 번 더 두드린 뒤에야 브레이커를 연다.
+
+    정책 변경: 예전에는 첫 배치의 5xx 하나로 남은 배치를 전부 취소했다(실제 장애).
+    이제는 연속 transient 실패가 max_consecutive_transient_failures(기본 2)에
+    도달할 때까지 다음 배치를 시도한다.
+    """
+    posts, batch = _multi_batch_posts()
+    s = Summarizer(_cfg(batch=batch))
+    sess = _CountingSession(
+        _FakeResponse(status, {"error": {"status": "X", "message": "boom"}}, "boom")
+    )
+    s.session = sess
+
+    assert s.summarize_all({_SOURCE: posts}) == 0
+    # 배치 3개. 1·2번은 호출하고(연속 2회) 3번은 브레이커가 열려 호출하지 않는다.
+    assert len(sess.sent) == 2
+    assert all(p.summary == [] for p in posts)
+
+
+def test_network_failure_probes_next_batch_then_trips_breaker():
     posts, batch = _multi_batch_posts()
     s = Summarizer(_cfg(batch=batch))
     calls = {"n": 0}
@@ -802,11 +837,112 @@ def test_network_failure_stops_remaining_batches():
     class _Boom:
         def post(self, *a, **k):
             calls["n"] += 1
-            raise ConnectionError("연결 실패")
+            raise requests.ConnectionError("연결 실패")
 
     s.session = _Boom()
     assert s.summarize_all({_SOURCE: posts}) == 0
-    assert calls["n"] == 1
+    assert calls["n"] == 2      # 1·2번 배치까지만. 3번은 브레이커가 막는다
+
+
+def test_transient_batch_failure_does_not_skip_the_next_batch():
+    """시나리오 A — 첫 배치가 503 으로 재시도를 소진해도 둘째 배치는 정상 요약된다.
+
+    이번 패치의 핵심 회귀. 첫 배치의 일시 장애 때문에 그날 나머지 의안이 전부
+    발췌로 나가면 안 된다.
+    """
+    posts = [_bill(i) for i in range(4)]
+    first_batch = {"PRC_0000", "PRC_0001"}
+
+    def _first_batch_503(requested, n):
+        if set(requested) & first_batch:
+            raise _transient_error()
+        return _reply(requested)
+
+    cfg = _cfg(batch=AssemblyBatchConfig(batch_size=2, retry_missing_once=False))
+    ok, rec = _run(posts, cfg, reply=_first_batch_503)
+
+    assert ok == 2
+    # 첫 배치는 요약 없이 원문(제안이유) 발췌로 나간다
+    assert posts[0].summary == [] and posts[1].summary == []
+    # 둘째 배치는 정상적으로 AI 요약을 받는다
+    assert posts[2].summary == _lines("PRC_0002")
+    assert posts[3].summary == _lines("PRC_0003")
+    assert any(set(c) == {"PRC_0002", "PRC_0003"} for c in rec.calls)
+
+
+def test_auth_failure_does_not_probe_the_next_batch():
+    """시나리오 C — 인증 실패는 다음 배치를 아예 호출하지 않는다."""
+    posts = [_bill(i) for i in range(6)]
+
+    def _auth_dead(requested, n):
+        raise LLMCallError("HTTP 401", kind=LLMErrorKind.AUTH, status=401)
+
+    cfg = _cfg(batch=AssemblyBatchConfig(batch_size=2, retry_missing_once=False))
+    ok, rec = _run(posts, cfg, reply=_auth_dead)
+
+    assert ok == 0
+    assert len(rec.calls) == 1
+    assert all(p.summary == [] for p in posts)
+
+
+def test_content_failure_does_not_count_toward_the_transient_breaker():
+    """시나리오 D — 응답 내용 문제는 global breaker 를 열지 않는다.
+
+    깨진 JSON 이 연속 두 배치에서 나와도(=transient 였다면 브레이커가 열릴 횟수)
+    셋째 배치는 정상 호출되어야 한다. 내용 문제는 그 배치의 의안에 달린 것이지
+    서비스 장애가 아니다.
+    """
+    posts = [_bill(i) for i in range(6)]
+    broken = {"PRC_0000", "PRC_0001", "PRC_0002", "PRC_0003"}
+
+    def _first_two_batches_broken(requested, n):
+        if set(requested) & broken:
+            return _envelope("{쓰레기")
+        return _reply(requested)
+
+    cfg = _cfg(batch=AssemblyBatchConfig(batch_size=2, retry_missing_once=False))
+    ok, rec = _run(posts, cfg, reply=_first_two_batches_broken)
+
+    assert ok == 2
+    assert posts[4].summary == _lines("PRC_0004")
+    assert posts[5].summary == _lines("PRC_0005")
+    assert any(set(c) == {"PRC_0004", "PRC_0005"} for c in rec.calls)
+
+
+def test_transient_breaker_resets_after_a_successful_batch():
+    """연속 실패만 센다 — 사이에 성공한 배치가 있으면 카운터는 초기화된다."""
+    posts = [_bill(i) for i in range(8)]
+    # 배치: [0,1] 실패, [2,3] 성공, [4,5] 실패, [6,7] 성공
+    failing = {"PRC_0000", "PRC_0001", "PRC_0004", "PRC_0005"}
+
+    def _alternating(requested, n):
+        if set(requested) & failing:
+            raise _transient_error()
+        return _reply(requested)
+
+    cfg = _cfg(batch=AssemblyBatchConfig(batch_size=2, retry_missing_once=False))
+    ok, rec = _run(posts, cfg, reply=_alternating)
+
+    assert ok == 4                  # 성공한 두 배치 4건이 모두 요약됐다
+    assert len(rec.calls) == 4      # 브레이커가 열리지 않고 끝까지 돌았다
+
+
+def test_breaker_threshold_is_configurable():
+    posts = [_bill(i) for i in range(6)]
+
+    def _always_transient(requested, n):
+        raise _transient_error()
+
+    cfg = _cfg(
+        batch=AssemblyBatchConfig(
+            batch_size=2,
+            retry_missing_once=False,
+            max_consecutive_transient_failures=3,
+        )
+    )
+    ok, rec = _run(posts, cfg, reply=_always_transient)
+    assert ok == 0
+    assert len(rec.calls) == 3      # 3회째에 브레이커가 열린다(배치도 3개)
 
 
 def test_content_level_failure_does_not_stop_remaining_batches():
@@ -840,7 +976,7 @@ def test_split_stops_second_half_after_call_failure():
         seq["n"] = n
         if n == 1:
             return _envelope("{쓰레기")          # 분할 유발
-        raise RuntimeError("HTTP 401: invalid api key")
+        raise LLMCallError("HTTP 401", kind=LLMErrorKind.AUTH, status=401)
 
     cfg = _cfg(batch=AssemblyBatchConfig(batch_size=4, retry_missing_once=False))
     ok, rec = _run(posts, cfg, reply=_broken_then_dead)
@@ -860,7 +996,7 @@ def test_general_posts_still_summarized_after_assembly_call_failure():
     def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
         calls["n"] += 1
         if "bill_id:" in prompt:
-            raise RuntimeError("HTTP 403: forbidden")
+            raise LLMCallError("HTTP 403", kind=LLMErrorKind.AUTH, status=403)
         return _envelope("첫째 문장임\n둘째 문장임\n셋째 문장임")
 
     s._generate = _generate

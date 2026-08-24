@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import threading
 import time
+from enum import Enum
 from itertools import zip_longest
 
 import requests
@@ -52,6 +54,115 @@ def _split_timeout(budget: float) -> tuple[float, float]:
     """
     connect = min(_CONNECT_TIMEOUT_CAP, budget / 2)
     return connect, max(budget - connect, 0.1)
+
+
+# --- 실패 분류 -------------------------------------------------------------
+#
+# 모든 Gemini 실패를 하나의 RuntimeError 로 묶으면 상위 계층이 "자격증명이 죽었다"와
+# "서버가 잠깐 흔들렸다"를 구분할 수 없다. 그 결과 한 번의 503 이 남은 의안 배치를
+# 전부 취소해 버렸다(실제 장애). 아래 분류는 상위 계층이 '다음 호출을 해도 되는가'를
+# 판단하기 위한 최소한의 의미만 담는다 — 프레임워크를 만들지 않는다.
+class LLMErrorKind(Enum):
+    """Gemini 실패의 의미. 값은 로그 표기용."""
+
+    AUTH = "auth"                            # 401/403 — API key·권한·설정 문제
+    RATE_LIMIT = "rate_limit"                # 429 — 한도 초과
+    MODEL_UNAVAILABLE = "model_unavailable"  # 404 등 — 그 모델을 쓸 수 없음
+    TRANSIENT = "transient"                  # 408/5xx/네트워크 — 잠시 후 되살아남
+    BAD_REQUEST = "bad_request"              # 400 — 우리가 보낸 요청이 잘못됨
+    CONTENT = "content"                      # 응답 내용 문제(차단·잘림·스키마 위반)
+    INTERNAL = "internal"                    # HTTP/네트워크/내용으로 설명되지 않는
+                                             # 우리 코드의 예상치 못한 예외
+
+
+class LLMError(RuntimeError):
+    """분류된 Gemini 실패. 기존 호출부 호환을 위해 RuntimeError 를 유지한다."""
+
+    kind = LLMErrorKind.TRANSIENT
+
+    def __init__(self, message: str, *, kind: "LLMErrorKind | None" = None,
+                 model: str = "", status: int | None = None):
+        super().__init__(message)
+        if kind is not None:
+            self.kind = kind
+        self.model = model
+        self.status = status
+
+
+class LLMCallError(LLMError):
+    """HTTP 호출 계층의 실패(상태 코드로 분류됨)."""
+
+
+# 재시도해도 같은 답이 오는 실패. 여기에 없는 것만 bounded retry 대상이다.
+_RETRYABLE_KINDS = frozenset({LLMErrorKind.RATE_LIMIT, LLMErrorKind.TRANSIENT})
+
+# 다음 글/배치를 불러도 똑같이 실패하는 종류. 하나라도 나오면 이번 실행에서는 남은
+# LLM 호출을 그만둔다(한도·시간예산만 태우고 결과는 같다). 메일은 그대로 나간다 —
+# 요약이 빈 글은 notifier 가 기존 원문 발췌로 되돌린다.
+#
+# TRANSIENT 는 여기 없다 — 잠깐 흔들린 서버는 다음 호출에서 살아날 수 있으므로 연속
+# 실패 카운터로 따로 판단한다. CONTENT 도 여기 없다 — 그 글/배치의 응답 내용 문제라
+# 다른 대상은 통과할 수 있다.
+#
+# INTERNAL 이 여기 있는 이유: 우리 코드의 버그는 다음 글·다음 배치에서도 똑같이
+# 터진다. 서버 장애가 아니므로 재시도할 것도 없고, 반복해도 실패만 쌓인다.
+_STOP_CALLING_KINDS = frozenset(
+    {
+        LLMErrorKind.AUTH,
+        LLMErrorKind.RATE_LIMIT,
+        LLMErrorKind.MODEL_UNAVAILABLE,
+        LLMErrorKind.BAD_REQUEST,
+        LLMErrorKind.INTERNAL,
+    }
+)
+
+# 408 은 서버가 스스로 '요청 시간 초과'를 알린 것이라 일시 장애로 본다.
+_TRANSIENT_STATUS = frozenset({408, 500, 502, 503, 504})
+
+# 재시도 백오프에 더할 지터 비율(0.25 = 최대 +25%). 여러 요청이 같은 순간에 다시
+# 몰리는 것을 막는 정도면 충분하다. 대기를 늘리는 방향으로만 붙이므로 시간예산
+# 판정이 낙관적으로 흔들리지 않는다.
+_RETRY_JITTER_RATIO = 0.25
+
+
+def classify_status(status: int) -> LLMErrorKind:
+    """HTTP 상태 코드를 실패 의미로 옮긴다.
+
+    429(한도)와 503(일시 장애)을 같은 뜻으로 다루지 않는다 — 한도가 막힌 실행에서
+    남은 배치를 계속 두드리는 것과, 잠깐 흔들린 서버를 한 번 더 두드리는 것은
+    전혀 다른 판단이기 때문이다.
+    """
+    if status in (401, 403):
+        return LLMErrorKind.AUTH
+    if status == 429:
+        return LLMErrorKind.RATE_LIMIT
+    if status == 404:
+        return LLMErrorKind.MODEL_UNAVAILABLE
+    if status in _TRANSIENT_STATUS:
+        return LLMErrorKind.TRANSIENT
+    if status >= 500:
+        # 목록에 없는 5xx 도 서버 쪽 문제다.
+        return LLMErrorKind.TRANSIENT
+    # 400 을 포함한 나머지 4xx 는 우리가 보낸 요청이 잘못됐을 가능성이 크다.
+    return LLMErrorKind.BAD_REQUEST
+
+
+def classify_error(exc: BaseException) -> LLMErrorKind:
+    """예외를 실패 의미로 옮긴다(상위 계층이 다음 호출 여부를 정할 때 쓴다).
+
+    핵심은 '서버가 흔들렸다'와 '우리 코드가 틀렸다'를 섞지 않는 것이다. ValueError·
+    TypeError·KeyError 같은 예상치 못한 예외를 TRANSIENT 로 세면, 같은 버그를 남은
+    모든 글과 배치에서 다시 밟으면서 백오프까지 자게 된다. 그래서 INTERNAL 로 따로
+    분류해 즉시 멈춘다(메일은 원문 발췌로 계속 나간다).
+    """
+    if isinstance(exc, LLMError):
+        return exc.kind
+    # requests 예외는 물론 OS 레벨 소켓 오류(builtin ConnectionError·TimeoutError 는
+    # OSError 하위다)도 네트워크 장애다 — 우리 코드의 버그가 아니므로 TRANSIENT.
+    if isinstance(exc, (requests.RequestException, OSError)):
+        return LLMErrorKind.TRANSIENT
+    return LLMErrorKind.INTERNAL
+
 
 _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가입니다.
 아래는 금융위원회·금융감독원·금융규제포털·의안정보시스템 등에서 수집한 게시물입니다.
@@ -177,12 +288,33 @@ def _prepare_body(cfg: LLMConfig, post: Post) -> str:
     return body[: cfg.max_input_chars]
 
 
-class SummaryUnavailable(RuntimeError):
+class SummaryUnavailable(LLMError):
     """호출은 됐지만 쓸 수 있는 요약을 얻지 못함(차단·잘림·스키마 위반).
 
     서킷 브레이커가 '실패'로 세도록 예외로 올린다 — 전량 차단 같은 상황에서 성공으로
     세면 브레이커가 열리지 않는다.
+
+    기본 분류는 CONTENT 다. 이 배치/글의 응답 내용이 문제라는 뜻이므로 서비스 전체
+    장애로 취급해서는 안 된다(다음 배치는 통과할 수 있다). 다만 같은 예외형을
+    시간예산 초과·모델 전멸에도 쓰고 있어, 그 자리에서는 kind 를 명시해 올린다.
     """
+
+    kind = LLMErrorKind.CONTENT
+
+
+class RequestDeadlineExceeded(SummaryUnavailable):
+    """요청이 자체 wall-clock 마감을 넘겨 caller 가 기다리기를 포기함.
+
+    _post_within 이 데몬 워커를 두고 빠져나올 때만 쓴다. 응답 '내용'의 문제가 아니라
+    호출 계층의 일시 장애이므로, HTTP 5xx·네트워크 오류와 **같은** bounded retry 정책을
+    탄다(_generate_with 의 단일 재시도 루프).
+
+    SummaryUnavailable 을 그대로 상속한다 — 기존 호출부·테스트가 이 타임아웃을
+    SummaryUnavailable 로 잡고 있고, 그 계약을 깰 이유가 없다. 부모와 달리 kind 는
+    TRANSIENT 다: 파싱 단계의 CONTENT 실패(차단·잘림·스키마 위반)와 섞이면 안 된다.
+    """
+
+    kind = LLMErrorKind.TRANSIENT
 
 
 def _unfence(text: str) -> str:
@@ -253,6 +385,9 @@ class Summarizer:
         self._active_model: str | None = None
         # 사용 불가로 확인된 모델(404 등). 이후 게시글에서 다시 시도하지 않는다.
         self._unavailable: set[str] = set()
+        # 이번 summarize_all() 실행에서 확정된 종료성 실패(AUTH 등). summarize_all 이
+        # 매 호출 시작 시 None 으로 되돌리므로 실행 사이에 끌려가지 않는다.
+        self._terminal_failure: LLMErrorKind | None = None
         # thinkingConfig 를 받지 않는 모델. 400 을 한 번 겪으면 그 모델에는 빼고 보낸다
         # (모델별로 따로 기억한다). 애초에 Gemini 2.5 계열에만 보내므로 평상시엔 빈 집합.
         self._thinking_unsupported: set[str] = set()
@@ -269,7 +404,26 @@ class Summarizer:
         따로 모아 배치로 요약한다. 반환값은 두 경로에서 요약에 성공한 글 수의 합.
         실패는 로그만 남기고 넘어간다(빈 summary → 메일에서 기존 발췌로 표시).
         """
+        # 이번 invocation 에서만 유효한 상태로 시작한다. 인스턴스에 남겨 두면 지난
+        # 실행의 401 이 이번 실행의 정상 키까지 막는다(sticky terminal 금지).
+        self._terminal_failure = None
+
         ok = self._summarize_general(posts_by_source)
+
+        # 일반 경로에서 '다시 불러도 같은 결과'인 실패가 확정됐다면, 같은 자격증명·
+        # 같은 설정으로 도는 의안 배치도 부를 이유가 없다. 남은 의안은 제안이유
+        # 발췌로 나가고 메일은 그대로 발송된다.
+        #
+        # TRANSIENT·CONTENT 는 여기 걸리지 않는다 — 서버가 회복됐을 수도 있고,
+        # 응답 내용 문제는 그 글에 달린 것이라 의안 배치는 통과할 수 있다.
+        if self._terminal_failure is not None:
+            log.warning(
+                "일반 요약에서 %s 실패가 확정되어 의안 배치 요약을 건너뜁니다 — "
+                "의안은 제안이유 발췌로 발송됩니다.",
+                self._terminal_failure.value,
+            )
+            return ok
+
         try:
             # 지연 임포트: assembly_summary 는 이 모듈을 임포트한다(순환 방지).
             from .assembly_summary import summarize_assembly_bills
@@ -351,8 +505,25 @@ class Summarizer:
             try:
                 lines = self.summarize(post, deadline)
             except Exception as e:  # noqa: BLE001 — 요약 실패가 메일 발송을 막지 않는다
+                kind = classify_error(e)
+                log.warning(
+                    "[%s] 요약 실패(%s) %s: %s", post.source_key, kind.value, post.url, e
+                )
+                if kind in _STOP_CALLING_KINDS:
+                    # 자격증명·한도·모델 부재·잘못된 요청·내부 오류는 다음 글에서도
+                    # 똑같이 실패한다. 연속 실패 카운터를 채울 때까지 기다릴 이유가
+                    # 없다(그만큼 한도와 시간예산만 태운다). 남은 글은 원문 발췌로 나간다.
+                    #
+                    # summarize_all 이 이 값을 보고 의안 배치까지 건너뛴다 — 같은
+                    # 자격증명으로 같은 서비스를 다시 부를 이유가 없기 때문이다.
+                    self._terminal_failure = kind
+                    log.warning(
+                        "%s 실패로 남은 %d건은 호출하지 않고 원문 발췌로 발송합니다.",
+                        kind.value,
+                        len(targets) - i - 1,
+                    )
+                    break
                 consecutive += 1
-                log.warning("[%s] 요약 실패 %s: %s", post.source_key, post.url, e)
                 continue
             consecutive = 0
             if lines:
@@ -428,7 +599,8 @@ class Summarizer:
         if not candidates:
             raise SummaryUnavailable(
                 f"설정된 모델({', '.join(self._models) or '없음'})이 모두 사용 불가 — "
-                "원문 발췌를 사용합니다"
+                "원문 발췌를 사용합니다",
+                kind=LLMErrorKind.MODEL_UNAVAILABLE,
             )
 
         last_reason = ""
@@ -466,7 +638,12 @@ class Summarizer:
             ", ".join(candidates),
             last_reason,
         )
-        raise SummaryUnavailable(f"사용 가능한 모델 없음: {last_reason}")
+        # 설정된 모델이 전부 사라진 상태는 이 배치/글의 내용 문제가 아니다 — 다음
+        # 배치를 불러도 같은 결과이므로 상위 계층이 즉시 멈출 수 있도록 분류한다.
+        raise SummaryUnavailable(
+            f"사용 가능한 모델 없음: {last_reason}",
+            kind=LLMErrorKind.MODEL_UNAVAILABLE,
+        )
 
     def _generation_config(
         self,
@@ -518,15 +695,18 @@ class Summarizer:
             ),
         }
 
-        log.debug("Gemini 호출 (model=%s)", model)
         url = _ENDPOINT.format(model=model)
+        # API key 는 헤더에만 넣는다. 이 dict 는 절대 로그로 나가지 않는다.
         headers = {
             "x-goog-api-key": self.cfg.api_key,
             "Content-Type": "application/json",
         }
 
         last_error = ""
+        last_kind = LLMErrorKind.TRANSIENT
+        last_status: int | None = None
         attempt = 0
+        total = self.cfg.max_retries + 1
         while attempt <= self.cfg.max_retries:
             # RPM 간격 대기를 '먼저' 한다. 이 대기가 예산을 다 먹을 수 있으므로,
             # 타임아웃은 반드시 대기가 끝난 뒤의 남은 시간으로 계산해야 한다.
@@ -537,14 +717,45 @@ class Summarizer:
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise RuntimeError(last_error or "요약 시간예산 소진")
+                    raise LLMCallError(
+                        last_error or "요약 시간예산 소진",
+                        kind=LLMErrorKind.TRANSIENT,
+                        model=model,
+                        status=last_status,
+                    )
                 budget = min(budget, remaining)
 
+            # 장애 때 '어느 모델을 몇 번째로 불렀는가'가 운영 로그만으로 보여야 한다.
+            # 프롬프트 본문·API key 는 절대 남기지 않는다.
+            log.info("Gemini 요청 — model=%s attempt=%d/%d", model, attempt + 1, total)
+
             self._last_call = time.monotonic()
-            resp = self._post_within(url, headers, payload, budget)
+            try:
+                resp = self._post_within(url, headers, payload, budget)
+            except (requests.RequestException, RequestDeadlineExceeded) as e:
+                # 호출 계층의 일시 장애 두 가지를 **같은** 정책으로 다룬다:
+                #   - 네트워크 예외(연결 실패·읽기 타임아웃 등)
+                #   - 우리 자신의 wall-clock 마감 초과(RequestDeadlineExceeded)
+                # 뒤엣것은 TRANSIENT 로 분류해 두고도 이 except 에 걸리지 않아 재시도를
+                # 전혀 타지 못했다(코드리뷰 지적). 두 경우 모두 max_retries·백오프·
+                # 시간예산 판정을 공유하고, 소진되면 원래 예외형 그대로 올려 보낸다
+                # (상위의 분류·폴백이 기존과 같게 유지된다). 다른 모델로 넘어가지 않는다.
+                last_error = f"{type(e).__name__}: {e}"
+                last_kind = LLMErrorKind.TRANSIENT
+                last_status = None
+                reason = "timeout" if isinstance(e, RequestDeadlineExceeded) else "network"
+                if not self._sleep_before_retry(
+                    attempt, deadline, model, LLMErrorKind.TRANSIENT, reason
+                ):
+                    raise
+                attempt += 1
+                continue
+
             if resp.status_code == 200:
                 return resp.json()
 
+            last_status = resp.status_code
+            last_kind = classify_status(resp.status_code)
             last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
 
             # 모델 자체가 없거나 이 프로젝트에 제공되지 않음 → 다음 모델로 넘긴다.
@@ -571,24 +782,74 @@ class Summarizer:
                 )
                 continue
 
-            # 한도 초과/일시 장애만 재시도. 400·401·403 은 설정 문제라 즉시 실패.
-            if resp.status_code not in (429, 500, 502, 503, 504):
+            # 한도 초과(429)/일시 장애(408·5xx)만 재시도. 400·401·403 은 설정 문제라
+            # 즉시 실패한다(재시도해도 같은 답이 오고 한도만 태운다).
+            if last_kind not in _RETRYABLE_KINDS:
+                log.warning(
+                    "Gemini %s 실패 — model=%s status=%s (재시도하지 않음)",
+                    last_kind.value,
+                    model,
+                    resp.status_code,
+                )
                 break
-            if attempt < self.cfg.max_retries:
-                wait = self.cfg.retry_backoff_sec * (2**attempt)
-                # 백오프 대기 + 최소한의 재요청 시간이 예산 밖이면 재시도를 포기한다.
-                if (
-                    deadline is not None
-                    and time.monotonic() + wait + _MIN_CALL_SEC > deadline
-                ):
-                    log.info("남은 요약 시간예산이 부족해 재시도를 생략합니다")
-                    break
-                log.info("Gemini %s — %.1f초 후 재시도(%d/%d)",
-                         resp.status_code, wait, attempt + 1, self.cfg.max_retries)
-                time.sleep(wait)
+            if not self._sleep_before_retry(
+                attempt, deadline, model, last_kind, str(resp.status_code)
+            ):
+                break
             attempt += 1
 
-        raise RuntimeError(last_error or "Gemini 호출 실패")
+        raise LLMCallError(
+            last_error or "Gemini 호출 실패",
+            kind=last_kind,
+            model=model,
+            status=last_status,
+        )
+
+    def _sleep_before_retry(
+        self,
+        attempt: int,
+        deadline: float | None,
+        model: str,
+        kind: "LLMErrorKind",
+        status: str,
+    ) -> bool:
+        """재시도해야 하면 백오프만큼 자고 True. 더 시도하지 않을 상황이면 False.
+
+        백오프는 기존 정책(retry_backoff_sec × 2^attempt)을 그대로 쓰고, 여러 호출이
+        같은 순간에 몰려 다시 부딪히지 않도록 작은 지터만 더한다. 지터는 대기를
+        **늘리는 방향으로만** 붙이므로 남은 시간예산 판정은 보수적으로 유지된다.
+        """
+        if attempt >= self.cfg.max_retries:
+            log.warning(
+                "Gemini %s 실패 — model=%s status=%s 재시도 소진(%d회)",
+                kind.value,
+                model,
+                status,
+                self.cfg.max_retries,
+            )
+            return False
+
+        base = self.cfg.retry_backoff_sec * (2**attempt)
+        wait = base + base * random.uniform(0.0, _RETRY_JITTER_RATIO)
+        # 백오프 대기 + 최소한의 재요청 시간이 예산 밖이면 재시도를 포기한다.
+        if deadline is not None and time.monotonic() + wait + _MIN_CALL_SEC > deadline:
+            log.info(
+                "남은 요약 시간예산이 부족해 재시도를 생략합니다 — model=%s status=%s",
+                model,
+                status,
+            )
+            return False
+        log.info(
+            "Gemini %s 실패 — model=%s status=%s attempt=%d/%d retry_in=%.1fs",
+            kind.value,
+            model,
+            status,
+            attempt + 1,
+            self.cfg.max_retries + 1,
+            wait,
+        )
+        time.sleep(wait)
+        return True
 
     def _post_within(self, url: str, headers: dict, payload: dict, budget: float):
         """요청 전체를 budget(초) 안으로 가둔다.
@@ -618,7 +879,11 @@ class Summarizer:
         worker.join(timeout=budget)
         if worker.is_alive():
             # 소켓은 살아 있을 수 있지만 우리는 더 기다리지 않는다(메일 지연 방지).
-            raise SummaryUnavailable(f"요청이 시간예산({budget:.1f}초)을 초과함")
+            # 응답 내용의 문제가 아니라 '늦었다'는 뜻이다 — 호출 계층의 일시 장애이므로
+            # _generate_with 의 재시도 정책을 그대로 탄다.
+            raise RequestDeadlineExceeded(
+                f"요청이 시간예산({budget:.1f}초)을 초과함"
+            )
         if "error" in box:
             raise box["error"]
         return box["resp"]

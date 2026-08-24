@@ -20,8 +20,13 @@ from src.summarizer import (
     _MAX_OUTPUT_TOKENS_THINKING,
     _SCHEMA,
     _TEMPERATURE,
+    LLMCallError,
+    LLMErrorKind,
+    RequestDeadlineExceeded,
     Summarizer,
     SummaryUnavailable,
+    classify_error,
+    classify_status,
     summarize_posts,
 )
 
@@ -883,13 +888,16 @@ def test_max_posts_counts_only_eligible_bodies():
 
 
 def test_circuit_breaker_stops_after_consecutive_failures():
+    # 503(일시 장애)은 다음 글에서 살아날 수 있으므로 연속 실패 카운터로 판단한다.
+    # 여기서 bare RuntimeError 를 쓰면 '우리 코드의 버그'(INTERNAL)를 흉내 내는 것이라
+    # 즉시 중단 경로를 타고, 정작 브레이커는 검증되지 않는다.
     posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)]
     s = Summarizer(_cfg(max_consecutive_failures=3))
     calls = {"n": 0}
 
     def _generate(prompt, deadline=None):
         calls["n"] += 1
-        raise RuntimeError("HTTP 503")
+        raise LLMCallError("HTTP 503", kind=LLMErrorKind.TRANSIENT, status=503)
 
     s._generate = _generate
     assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
@@ -906,7 +914,7 @@ def test_circuit_breaker_resets_on_success():
         calls["n"] += 1
         # 실패, 실패, 성공, 실패, 실패, 성공 — 연속 2회를 넘지 않으므로 끝까지 간다
         if calls["n"] % 3 != 0:
-            raise RuntimeError("일시 오류")
+            raise LLMCallError("일시 오류", kind=LLMErrorKind.TRANSIENT, status=503)
         return _envelope('{"summary": ["요약함"]}')
 
     s._generate = _generate
@@ -1389,3 +1397,773 @@ def test_email_escapes_summary_html():
     p = _post()
     p.summary = ["<script>alert(1)</script> 포함함"]
     assert "<script>" not in build_html({p.source_name: [p]})
+
+# --- 모델 설정 precedence: GEMINI_MODEL > MODEL > config.yaml > 코드 기본값 ---
+#
+# GitHub Actions 의 repository Variable `MODEL` 이 workflow 를 통해 GEMINI_MODEL 로
+# 들어온다. 그 Variable 은 유일한 출처가 아니라 override 다 — 없으면 config.yaml 의
+# llm.model, 그것도 없으면 _DEFAULT_MODEL 로 내려간다. 아래 테스트는 실제 모델명이
+# 아닌 임의 문자열을 써서 '어느 출처가 이겼는가'만 확인한다(특정 모델에 묶이지 않도록).
+
+
+@pytest.fixture(autouse=True)
+def _clear_model_env(monkeypatch):
+    """이 파일의 모든 테스트가 깨끗한 환경에서 돌도록 모델 환경변수를 지운다."""
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("MODEL", raising=False)
+
+
+def _yaml_with(tmp_path, **llm_over):
+    import yaml
+
+    base = yaml.safe_load(open("config.yaml", encoding="utf-8"))
+    for k, v in llm_over.items():
+        if v is _MISSING:
+            base["llm"].pop(k, None)
+        else:
+            base["llm"][k] = v
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump(base, allow_unicode=True), encoding="utf-8")
+    return p
+
+
+_MISSING = object()
+
+
+def test_gemini_model_env_wins_over_everything(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEMINI_MODEL", "env-primary")
+    monkeypatch.setenv("MODEL", "legacy-env")
+    cfg = load_config(_yaml_with(tmp_path, model="from-yaml"))
+    assert cfg.llm.model == "env-primary"
+    assert "GEMINI_MODEL" in cfg.llm.model_source
+
+
+def test_model_env_is_used_when_gemini_model_is_absent(tmp_path, monkeypatch):
+    # 로컬 실행/기존 설정 호환성을 위해 MODEL 도 계속 인정한다.
+    monkeypatch.setenv("MODEL", "legacy-env")
+    cfg = load_config(_yaml_with(tmp_path, model="from-yaml"))
+    assert cfg.llm.model == "legacy-env"
+    assert "MODEL" in cfg.llm.model_source
+
+
+def test_config_yaml_is_used_when_no_env_is_set(tmp_path):
+    cfg = load_config(_yaml_with(tmp_path, model="from-yaml"))
+    assert cfg.llm.model == "from-yaml"
+    assert "config.yaml" in cfg.llm.model_source
+
+
+def test_code_default_is_used_when_yaml_has_no_model(tmp_path):
+    from src.config import _DEFAULT_MODEL
+
+    cfg = load_config(_yaml_with(tmp_path, model=_MISSING))
+    assert cfg.llm.model == _DEFAULT_MODEL
+    assert "기본값" in cfg.llm.model_source
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_blank_env_is_not_a_model_name(tmp_path, monkeypatch, blank):
+    # 워크플로가 vars.MODEL 을 넘길 때 Variable 이 비어 있으면 빈 문자열이 들어온다.
+    # 그것을 모델명으로 쓰면 전 요청이 죽는다 — 반드시 다음 순위로 넘어가야 한다.
+    monkeypatch.setenv("GEMINI_MODEL", blank)
+    cfg = load_config(_yaml_with(tmp_path, model="from-yaml"))
+    assert cfg.llm.model == "from-yaml"
+
+
+def test_blank_gemini_model_falls_through_to_model_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("GEMINI_MODEL", "")
+    monkeypatch.setenv("MODEL", "legacy-env")
+    cfg = load_config(_yaml_with(tmp_path, model="from-yaml"))
+    assert cfg.llm.model == "legacy-env"
+
+
+def test_blank_yaml_model_falls_through_to_default(tmp_path):
+    from src.config import _DEFAULT_MODEL
+
+    cfg = load_config(_yaml_with(tmp_path, model="   "))
+    assert cfg.llm.model == _DEFAULT_MODEL
+
+
+def test_env_model_is_surrounded_by_configured_fallbacks(tmp_path, monkeypatch):
+    # env 로 지정한 primary 가 체인의 맨 앞이고, 설정된 대체 모델은 그대로 남는다.
+    monkeypatch.setenv("GEMINI_MODEL", "env-primary")
+    cfg = load_config(_yaml_with(tmp_path, fallback_models=["fb-a", "fb-b"]))
+    assert cfg.llm.model_chain == ["env-primary", "fb-a", "fb-b"]
+
+
+def test_env_model_actually_reaches_the_request_url(tmp_path, monkeypatch):
+    # 설정 precedence 가 실제 호출 URL 까지 이어지는지(연결이 끊긴 곳이 없는지).
+    monkeypatch.setenv("GEMINI_MODEL", "env-primary")
+    cfg = load_config(_yaml_with(tmp_path, fallback_models=[]))
+    s = Summarizer(cfg.llm)
+    s.cfg.api_key = "test-key"
+    sess = _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}'))])
+
+    class _Recording:
+        def __init__(self, inner):
+            self.inner = inner
+            self.urls = []
+
+        def post(self, url, **kw):
+            self.urls.append(url)
+            return self.inner.post(url, **kw)
+
+    s.session = rec = _Recording(sess)
+    s.summarize(_post())
+    assert "models/env-primary:generateContent" in rec.urls[0]
+
+
+def test_startup_log_names_the_effective_model_without_secrets(caplog):
+    import logging
+
+    from src.main import _log_llm_settings
+
+    cfg = _cfg(model="env-primary", fallback_models=["fb-a"], api_key="super-secret-key")
+    cfg.model_source = "GEMINI_MODEL 환경변수"
+    with caplog.at_level(logging.INFO, logger="law_rader"):
+        _log_llm_settings(cfg)
+    text = caplog.text
+    assert "LLM 설정 — primary=env-primary" in text
+    assert "fb-a" in text
+    assert "GEMINI_MODEL" in text
+    assert "super-secret-key" not in text     # API key 는 절대 로그로 나가지 않는다
+
+
+# --- 실패 분류 ---
+
+
+@pytest.mark.parametrize(
+    "status,kind",
+    [
+        (401, LLMErrorKind.AUTH),
+        (403, LLMErrorKind.AUTH),
+        (429, LLMErrorKind.RATE_LIMIT),
+        (404, LLMErrorKind.MODEL_UNAVAILABLE),
+        (400, LLMErrorKind.BAD_REQUEST),
+        (408, LLMErrorKind.TRANSIENT),
+        (500, LLMErrorKind.TRANSIENT),
+        (502, LLMErrorKind.TRANSIENT),
+        (503, LLMErrorKind.TRANSIENT),
+        (504, LLMErrorKind.TRANSIENT),
+    ],
+)
+def test_status_classification(status, kind):
+    assert classify_status(status) is kind
+
+
+def test_rate_limit_and_server_error_are_not_the_same_kind():
+    # 429 는 '한도가 막혔다', 503 은 '잠깐 흔들렸다' — 상위 정책이 달라야 한다.
+    assert classify_status(429) is not classify_status(503)
+
+
+def test_network_errors_classify_as_transient():
+    import requests
+
+    assert classify_error(requests.ConnectTimeout("x")) is LLMErrorKind.TRANSIENT
+    assert classify_error(requests.ConnectionError("x")) is LLMErrorKind.TRANSIENT
+    assert classify_error(requests.ReadTimeout("x")) is LLMErrorKind.TRANSIENT
+
+
+def test_content_failure_classifies_as_content():
+    assert classify_error(SummaryUnavailable("깨짐")) is LLMErrorKind.CONTENT
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [ValueError("?"), TypeError("?"), KeyError("?"), AssertionError("?"), AttributeError("?")],
+)
+def test_programming_errors_classify_as_internal(exc):
+    """우리 코드의 버그를 'Gemini 일시 장애'로 오진하면 안 된다.
+
+    TRANSIENT 로 세면 같은 버그를 남은 모든 글·배치에서 다시 밟으면서 백오프까지
+    자게 된다. INTERNAL 은 재시도하지 않고 즉시 남은 호출을 멈춘다.
+    """
+    assert classify_error(exc) is LLMErrorKind.INTERNAL
+
+
+def test_os_level_socket_errors_still_classify_as_transient():
+    # builtin ConnectionError/TimeoutError 는 OSError 하위의 '네트워크 장애'다.
+    # 프로그래밍 오류가 아니므로 INTERNAL 로 승격해 실행을 멈추면 안 된다.
+    assert classify_error(ConnectionError("연결 끊김")) is LLMErrorKind.TRANSIENT
+    assert classify_error(TimeoutError("시간 초과")) is LLMErrorKind.TRANSIENT
+
+
+def test_internal_is_a_stop_calling_kind():
+    from src.summarizer import _STOP_CALLING_KINDS
+
+    assert LLMErrorKind.INTERNAL in _STOP_CALLING_KINDS
+    # 반대로 이 둘은 절대 전역 중단으로 승격되면 안 된다.
+    assert LLMErrorKind.TRANSIENT not in _STOP_CALLING_KINDS
+    assert LLMErrorKind.CONTENT not in _STOP_CALLING_KINDS
+
+
+@pytest.mark.parametrize(
+    "status,kind",
+    [
+        (401, LLMErrorKind.AUTH),
+        (403, LLMErrorKind.AUTH),
+        (429, LLMErrorKind.RATE_LIMIT),
+        (400, LLMErrorKind.BAD_REQUEST),
+        (503, LLMErrorKind.TRANSIENT),
+    ],
+)
+def test_generate_raises_typed_error_with_model_and_status(status, kind):
+    s = Summarizer(_cfg(max_retries=0))
+    _stub(s, [_FakeResponse(status, text="boom")])
+    with pytest.raises(LLMCallError) as exc:
+        s.summarize(_post())
+    assert exc.value.kind is kind
+    assert exc.value.status == status
+    assert exc.value.model == "gemini-flash-latest"
+    # 기존 호출부 호환: 여전히 RuntimeError 다
+    assert isinstance(exc.value, RuntimeError)
+
+
+def test_all_models_unavailable_is_typed_model_unavailable():
+    s = Summarizer(_chain_cfg())
+    s.session = _ModelSession(
+        {_PRIMARY: _gone_resp(), _FB1: _gone_resp(), _FB2: _gone_resp()}
+    )
+    with pytest.raises(SummaryUnavailable) as exc:
+        s.summarize(_post())
+    assert exc.value.kind is LLMErrorKind.MODEL_UNAVAILABLE
+
+
+# --- 재시도 정책 ---
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    """실제 시간을 기다리지 않는다. 요청된 대기 시간만 기록한다."""
+    waits = []
+    # src.summarizer 는 `import time` 이므로 time 모듈의 sleep 을 갈면 그대로 적용된다.
+    # 다만 이 패치는 전역이다 — 응답 지연을 흉내 내려고 time.sleep 을 쓰는 테스트
+    # (_FakeSession(delay=...))에는 이 fixture 를 쓰면 안 된다.
+    monkeypatch.setattr(time, "sleep", lambda s: waits.append(s))
+    return waits
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_error_is_not_retried(status, no_sleep):
+    s = Summarizer(_cfg(max_retries=3, retry_backoff_sec=5))
+    sess = _stub(s, [_FakeResponse(status, text="API key not valid")])
+    with pytest.raises(LLMCallError):
+        s.summarize(_post())
+    assert len(sess.sent) == 1      # 재시도 없음
+    assert no_sleep == []           # 백오프도 자지 않음
+
+
+def test_bad_request_is_not_retried(no_sleep):
+    # 400 은 payload/설정 문제라 재시도해도 같은 답이 온다.
+    s = Summarizer(_cfg(max_retries=3, retry_backoff_sec=5))
+    sess = _stub(s, [_FakeResponse(400, text="Invalid argument")])
+    with pytest.raises(LLMCallError):
+        s.summarize(_post())
+    assert len(sess.sent) == 1
+    assert no_sleep == []
+
+
+def test_rate_limit_is_retried_boundedly(no_sleep):
+    s = Summarizer(_cfg(max_retries=2, retry_backoff_sec=1))
+    sess = _stub(s, [_FakeResponse(429, text="quota") for _ in range(3)])
+    with pytest.raises(LLMCallError) as exc:
+        s.summarize(_post())
+    assert exc.value.kind is LLMErrorKind.RATE_LIMIT
+    assert len(sess.sent) == 3          # 최초 1 + 재시도 2 (무한 재시도 금지)
+    assert len(no_sleep) == 2
+
+
+def test_server_error_is_retried_the_configured_number_of_times(no_sleep):
+    s = Summarizer(_cfg(max_retries=2, retry_backoff_sec=1))
+    sess = _stub(s, [_FakeResponse(503, text="unavailable") for _ in range(3)])
+    with pytest.raises(LLMCallError) as exc:
+        s.summarize(_post())
+    assert exc.value.kind is LLMErrorKind.TRANSIENT
+    assert len(sess.sent) == 3
+
+
+def test_backoff_is_exponential_with_bounded_jitter(no_sleep):
+    from src.summarizer import _RETRY_JITTER_RATIO
+
+    s = Summarizer(_cfg(max_retries=3, retry_backoff_sec=2))
+    _stub(s, [_FakeResponse(503, text="unavailable") for _ in range(4)])
+    with pytest.raises(LLMCallError):
+        s.summarize(_post())
+
+    assert len(no_sleep) == 3
+    for i, waited in enumerate(no_sleep):
+        base = 2 * (2**i)
+        # 지터는 대기를 늘리는 방향으로만 붙는다(시간예산 판정이 낙관적으로 흔들리지 않게).
+        assert base <= waited <= base * (1 + _RETRY_JITTER_RATIO)
+
+
+def test_jitter_is_deterministic_when_the_random_source_is_pinned(monkeypatch, no_sleep):
+    monkeypatch.setattr("src.summarizer.random.uniform", lambda a, b: b)
+    s = Summarizer(_cfg(max_retries=1, retry_backoff_sec=4))
+    _stub(s, [_FakeResponse(503, text="unavailable") for _ in range(2)])
+    with pytest.raises(LLMCallError):
+        s.summarize(_post())
+    from src.summarizer import _RETRY_JITTER_RATIO
+
+    assert no_sleep == [4 * (1 + _RETRY_JITTER_RATIO)]
+
+
+def test_network_timeout_is_retried_as_transient(no_sleep):
+    import requests
+
+    s = Summarizer(_cfg(max_retries=2, retry_backoff_sec=1))
+
+    class _Timeout:
+        def __init__(self):
+            self.n = 0
+
+        def post(self, *a, **kw):
+            self.n += 1
+            raise requests.ReadTimeout("응답 시간 초과")
+
+    s.session = _Timeout()
+    with pytest.raises(requests.ReadTimeout):
+        s.summarize(_post())
+    # 최초 1 + 재시도 2. 예전에는 첫 실패에서 곧장 포기했다.
+    assert s.session.n == 3
+    assert len(no_sleep) == 2
+
+
+def test_network_error_still_propagates_its_original_type_after_retries(no_sleep):
+    # 재시도를 소진해도 원래 예외형을 유지한다(상위의 분류·처리가 기존과 같게).
+    import requests
+
+    s = Summarizer(_cfg(max_retries=1, retry_backoff_sec=0))
+
+    class _Boom:
+        def post(self, *a, **kw):
+            raise requests.ConnectionError("연결 실패")
+
+    s.session = _Boom()
+    with pytest.raises(requests.ConnectionError):
+        s.summarize(_post())
+
+
+def test_retry_exhaustion_reports_the_typed_transient_failure(no_sleep):
+    s = Summarizer(_cfg(max_retries=1, retry_backoff_sec=0))
+    _stub(s, [_FakeResponse(503, text="unavailable") for _ in range(2)])
+    with pytest.raises(LLMCallError) as exc:
+        s.summarize(_post())
+    assert exc.value.kind is LLMErrorKind.TRANSIENT
+    assert exc.value.status == 503
+
+
+def test_transient_failure_never_switches_models(no_sleep):
+    """503 으로는 다른 모델로 자동 전환하지 않는다(운영자가 고정한 모델을 존중).
+
+    404(MODEL_UNAVAILABLE)의 기존 대체 정책은 그대로 유지된다 —
+    test_primary_404_falls_back_to_first_fallback 참고.
+    """
+    for status in (500, 502, 503, 504, 408):
+        s = Summarizer(_chain_cfg(max_retries=1, retry_backoff_sec=0))
+        s.session = _ModelSession({_PRIMARY: _err_resp(status, "UNAVAILABLE", "boom")})
+        with pytest.raises(LLMCallError):
+            s.summarize(_post())
+        assert set(s.session.models) == {_PRIMARY}, status
+        assert s._unavailable == set(), status
+
+
+# --- 로그 위생: API key / 프롬프트 본문이 로그에 새면 안 된다 ---
+
+
+def test_logs_name_the_model_without_leaking_key_or_prompt(caplog, no_sleep):
+    import logging
+
+    secret = "AIza-super-secret-key"
+    body = "절대로 로그에 남으면 안 되는 본문 문장임. " * 8
+    s = Summarizer(_cfg(api_key=secret, max_retries=1, retry_backoff_sec=0))
+    _stub(s, [_FakeResponse(503, text="unavailable") for _ in range(2)])
+
+    with caplog.at_level(logging.DEBUG, logger="src.summarizer"):
+        with pytest.raises(LLMCallError):
+            s.summarize(_post(body=body, title="증권사 내부통제 개선방안"))
+
+    text = caplog.text
+    assert "gemini-flash-latest" in text          # 모델은 추적 가능해야 하고
+    assert "503" in text                          # 실패 원인도 보여야 한다
+    assert "transient" in text
+    assert secret not in text                     # 키는 절대 안 된다
+    assert "절대로 로그에 남으면 안 되는 본문" not in text
+
+
+def test_successful_call_logs_the_model_at_info(caplog):
+    import logging
+
+    s = Summarizer(_cfg())
+    _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}'))])
+    with caplog.at_level(logging.INFO, logger="src.summarizer"):
+        s.summarize(_post())
+    assert "model=gemini-flash-latest" in caplog.text
+    assert "attempt=1/1" in caplog.text
+
+
+# --- 종료성 실패는 일반 요약 경로에서도 남은 글을 태우지 않는다 ---
+
+
+@pytest.mark.parametrize(
+    "kind", [LLMErrorKind.AUTH, LLMErrorKind.RATE_LIMIT, LLMErrorKind.BAD_REQUEST]
+)
+def test_terminal_kind_stops_the_general_loop_immediately(kind):
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)]
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+    calls = {"n": 0}
+
+    def _generate(prompt, deadline=None):
+        calls["n"] += 1
+        raise LLMCallError("boom", kind=kind)
+
+    s._generate = _generate
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
+    assert calls["n"] == 1                        # 브레이커(3회)를 기다리지 않는다
+    assert all(p.summary == [] for p in posts)    # 전부 원문 발췌로 나간다
+
+
+def test_transient_kind_still_uses_the_consecutive_breaker():
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)]
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+    calls = {"n": 0}
+
+    def _generate(prompt, deadline=None):
+        calls["n"] += 1
+        raise LLMCallError("boom", kind=LLMErrorKind.TRANSIENT)
+
+    s._generate = _generate
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
+    assert calls["n"] == 3
+
+
+def test_content_kind_still_uses_the_consecutive_breaker():
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)]
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+    calls = {"n": 0}
+
+    def _generate(prompt, deadline=None):
+        calls["n"] += 1
+        raise SummaryUnavailable("응답이 깨짐")
+
+    s._generate = _generate
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
+    assert calls["n"] == 3
+
+
+# --- A. _post_within 자체 wall-clock 타임아웃도 재시도 정책을 탄다 -------------
+#
+# 회귀: 이 타임아웃은 TRANSIENT 로 '분류'되어 있으면서도 _generate_with 의
+# `except requests.RequestException` 에 걸리지 않아 재시도를 전혀 타지 못했다.
+# 실제 시간을 기다리지 않도록 워커 경계를 스텁으로 대체한다(데몬 스레드도 만들지 않는다).
+
+
+class _PostWithinStub:
+    """_post_within 을 대신해 '타임아웃 / 응답'을 순서대로 돌려준다.
+
+    실제 스레드·소켓을 쓰지 않으므로 테스트가 기다리지도, 스레드를 남기지도 않는다.
+    """
+
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.calls = 0
+        self.budgets = []
+
+    def __call__(self, url, headers, payload, budget):
+        self.calls += 1
+        self.budgets.append(budget)
+        out = self._outcomes.pop(0)
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+
+def _timeout(budget=5.0):
+    return RequestDeadlineExceeded(f"요청이 시간예산({budget:.1f}초)을 초과함")
+
+
+def test_a1_own_timeout_is_retried_and_can_recover(no_sleep):
+    """A1 — 1회차 자체 타임아웃, 2회차 성공."""
+    s = Summarizer(_chain_cfg(max_retries=2, retry_backoff_sec=1))
+    stub = _PostWithinStub(
+        [_timeout(), _FakeResponse(200, _envelope('{"summary": ["요약함"]}'))]
+    )
+    s._post_within = stub
+    # 세션을 건드리면 안 된다 — 건드리면 스텁을 우회했다는 뜻이다.
+    s.session = _ModelSession({})
+
+    assert s.summarize(_post()) == ["요약함"]
+    assert stub.calls == 2                    # API 계층 시도 2회
+    assert len(no_sleep) == 1                 # 백오프 1회
+    assert s._active_model == _PRIMARY        # 다른 모델로 넘어가지 않았다
+    assert s._unavailable == set()
+
+
+def test_a2_own_timeout_exhaustion_is_bounded_and_typed(no_sleep):
+    """A2 — 모든 시도가 자체 타임아웃. 1 + max_retries 로 끝나고 kind 는 TRANSIENT."""
+    s = Summarizer(_chain_cfg(max_retries=2, retry_backoff_sec=1))
+    stub = _PostWithinStub([_timeout() for _ in range(5)])
+    s._post_within = stub
+    s.session = _ModelSession({})
+
+    with pytest.raises(SummaryUnavailable) as exc:
+        s.summarize(_post())
+
+    assert stub.calls == 3                    # 무한 재시도 없음
+    assert len(no_sleep) == 2
+    assert exc.value.kind is LLMErrorKind.TRANSIENT
+    assert classify_error(exc.value) is LLMErrorKind.TRANSIENT
+    assert s._unavailable == set()            # 타임아웃으로 모델을 낙인찍지 않는다
+
+
+def test_own_timeout_does_not_switch_models(no_sleep):
+    # 타임아웃은 모델 문제가 아니다 — fallback 을 소진하면 안 된다.
+    s = Summarizer(_chain_cfg(max_retries=1, retry_backoff_sec=0))
+    calls = []
+
+    def _post_within(url, headers, payload, budget):
+        calls.append(url)
+        raise _timeout()
+
+    s._post_within = _post_within
+    with pytest.raises(SummaryUnavailable):
+        s.summarize(_post())
+    assert {u.split("/models/")[1].split(":")[0] for u in calls} == {_PRIMARY}
+
+
+def test_own_timeout_backoff_respects_the_remaining_budget(no_sleep):
+    # 남은 예산 밖의 백오프는 자지 않는다(기존 정책 재사용을 확인).
+    s = Summarizer(_cfg(max_retries=2, retry_backoff_sec=30))
+    stub = _PostWithinStub([_timeout() for _ in range(3)])
+    s._post_within = stub
+    with pytest.raises(SummaryUnavailable):
+        s.summarize(_post(), time.monotonic() + 5.0)
+    assert stub.calls == 1
+    assert no_sleep == []
+
+
+def test_content_failure_is_not_retried_by_the_call_layer():
+    """파싱 단계의 CONTENT 실패는 호출 재시도 정책과 무관하다(기존 의미 유지)."""
+    s = Summarizer(_cfg(max_retries=2, retry_backoff_sec=0))
+    sess = _stub(s, [_FakeResponse(200, _envelope("{쓰레기"))])
+    with pytest.raises(SummaryUnavailable) as exc:
+        s.summarize(_post())
+    assert exc.value.kind is LLMErrorKind.CONTENT
+    assert len(sess.sent) == 1                # 호출은 한 번뿐
+
+
+def test_timeout_retries_do_not_grow_threads_without_bound():
+    """실제 워커 경계로도 재시도가 도는지, 그리고 고아 스레드가 시도 수만큼만 생기는지.
+
+    _post_within 은 마감을 넘긴 워커를 데몬으로 남겨 둔 채 빠져나온다. 재시도를
+    추가하면 그 고아가 시도 수만큼 늘어나므로, max_retries 로 확실히 묶여 있어야 한다.
+    """
+    import threading
+
+    s = Summarizer(_cfg(timeout_sec=0.2, max_retries=2, retry_backoff_sec=0))
+    _stub(s, [_FakeResponse(200, _envelope('{"summary": ["요약함"]}')) for _ in range(3)],
+          delay=2.0)
+
+    before = {t for t in threading.enumerate()}
+    with pytest.raises(SummaryUnavailable):
+        s.summarize(_post())
+    leftover = [t for t in threading.enumerate() if t not in before]
+
+    # 1 + max_retries 만큼만 시도하고, 남은 워커는 전부 데몬이라 종료를 막지 않는다.
+    assert len(leftover) <= 3
+    assert all(t.daemon for t in leftover)
+
+
+# --- B/C. 종료성 실패는 의안 배치까지 전파되고, 비종료성 실패는 그러지 않는다 ---
+
+
+def _mixed_posts():
+    """일반 게시물 1건 + 의안 2건."""
+    general = _post(post_id="g1", url="https://example.com/g1")
+    bills = [
+        Post(
+            source_key="assembly_bill",
+            source_name="의안정보시스템 · 계류의안",
+            post_id=f"PRC_{i}",
+            title=f"제{i}호 일부개정법률안",
+            url=f"https://likms.assembly.go.kr/bill/{i}",
+            date="2026-07-01",
+            body="제안이유 및 주요내용 원문임. " * 10,
+        )
+        for i in range(2)
+    ]
+    return general, bills
+
+
+def _run_mixed(s):
+    """summarize_all 을 돌리고 (일반 호출 수, 의안 호출 수) 를 돌려준다."""
+    general, bills = _mixed_posts()
+    counts = {"general": 0, "assembly": 0}
+    original = s._generate
+
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+        if "bill_id:" in prompt:
+            counts["assembly"] += 1
+        else:
+            counts["general"] += 1
+        return original(prompt, deadline, schema=schema, max_output_tokens=max_output_tokens)
+
+    s._generate = _generate
+    ok = s.summarize_all(
+        {"금융위 · 보도자료": [general], "의안정보시스템 · 계류의안": bills}
+    )
+    return ok, counts, general, bills
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        LLMErrorKind.AUTH,
+        LLMErrorKind.RATE_LIMIT,
+        LLMErrorKind.BAD_REQUEST,
+        LLMErrorKind.MODEL_UNAVAILABLE,
+        LLMErrorKind.INTERNAL,
+    ],
+)
+def test_b_general_terminal_failure_skips_the_assembly_stage(kind):
+    """B — 일반 경로의 종료성 실패가 확정되면 의안 Gemini 호출은 0회다.
+
+    회귀: 예전에는 일반 루프만 break 하고 summarize_all 이 그대로 의안 배치를 불러,
+    죽은 자격증명·소진된 한도로 같은 서비스를 다시 두드렸다.
+    """
+    s = Summarizer(_cfg())
+    s._generate = lambda *a, **k: (_ for _ in ()).throw(LLMCallError("boom", kind=kind))
+
+    ok, counts, general, bills = _run_mixed(s)
+
+    assert ok == 0
+    assert counts["general"] == 1        # 첫 글에서 종료성 실패 확정
+    assert counts["assembly"] == 0       # 의안은 한 번도 부르지 않는다
+    # 메일 폴백은 그대로 — 요약이 비어 있을 뿐 예외는 새지 않는다
+    assert general.summary == []
+    assert all(b.summary == [] for b in bills)
+
+
+def test_c1_general_transient_failure_still_allows_the_assembly_stage():
+    """C1 — 일시 장애는 전역 중단이 아니다. 서비스가 회복됐을 수 있으므로 의안은 시도한다."""
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+    calls = {"n": 0}
+
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+        calls["n"] += 1
+        if "bill_id:" in prompt:
+            return _envelope(
+                json.dumps(
+                    {
+                        "summaries": [
+                            {"bill_id": f"PRC_{i}", "summary": ["첫째임", "둘째임", "셋째임"]}
+                            for i in range(2)
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        raise LLMCallError("HTTP 503", kind=LLMErrorKind.TRANSIENT, status=503)
+
+    s._generate = _generate
+    ok, counts, general, bills = _run_mixed(s)
+
+    assert s._terminal_failure is None
+    assert counts["assembly"] == 1        # 의안 배치는 정상적으로 호출됐다
+    assert ok == 2 and all(b.summary for b in bills)
+    assert general.summary == []          # 일반 글만 발췌 폴백
+
+
+def test_c2_general_content_failure_still_allows_the_assembly_stage():
+    """C2 — 응답 내용 문제는 그 글에 달린 것이다. 의안 배치를 막으면 안 된다."""
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+        if "bill_id:" in prompt:
+            return _envelope(
+                json.dumps(
+                    {
+                        "summaries": [
+                            {"bill_id": f"PRC_{i}", "summary": ["첫째임", "둘째임", "셋째임"]}
+                            for i in range(2)
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        raise SummaryUnavailable("응답이 깨짐")
+
+    s._generate = _generate
+    ok, counts, general, bills = _run_mixed(s)
+
+    assert s._terminal_failure is None
+    assert counts["assembly"] == 1
+    assert ok == 2
+
+
+def test_terminal_state_is_not_sticky_across_invocations():
+    """run A 가 AUTH 로 끝나도 run B 는 정상적으로 다시 호출할 수 있어야 한다."""
+    s = Summarizer(_cfg())
+    s._generate = lambda *a, **k: (_ for _ in ()).throw(
+        LLMCallError("boom", kind=LLMErrorKind.AUTH)
+    )
+    ok_a, counts_a, _, _ = _run_mixed(s)
+    assert counts_a["assembly"] == 0
+    assert s._terminal_failure is LLMErrorKind.AUTH
+
+    # 키가 복구된 다음 실행
+    def _healthy(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+        if "bill_id:" in prompt:
+            return _envelope(
+                json.dumps(
+                    {
+                        "summaries": [
+                            {"bill_id": f"PRC_{i}", "summary": ["첫째임", "둘째임", "셋째임"]}
+                            for i in range(2)
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return _envelope('{"summary": ["요약함"]}')
+
+    s._generate = _healthy
+    ok_b, counts_b, general_b, bills_b = _run_mixed(s)
+
+    assert s._terminal_failure is None
+    assert counts_b["general"] == 1 and counts_b["assembly"] == 1
+    assert ok_b == 3
+    assert general_b.summary == ["요약함"] and all(b.summary for b in bills_b)
+
+
+def test_terminal_skip_still_lets_the_mail_pipeline_run(caplog):
+    """종료성 실패에서도 예외는 새지 않고, 로그만 남기고 정상 종료한다(메일 계속)."""
+    import logging
+
+    s = Summarizer(_cfg())
+    s._generate = lambda *a, **k: (_ for _ in ()).throw(
+        LLMCallError("boom", kind=LLMErrorKind.AUTH)
+    )
+    with caplog.at_level(logging.WARNING, logger="src.summarizer"):
+        ok, counts, general, bills = _run_mixed(s)
+
+    assert ok == 0
+    assert "의안 배치 요약을 건너뜁니다" in caplog.text
+    assert "auth" in caplog.text
+    # 메일 렌더는 원문 발췌로 정상 동작한다
+    html = build_html({b.source_name: bills for b in bills[:1]})
+    assert "제안이유 및 주요내용 원문임" in html
+
+
+def test_internal_error_stops_further_calls_but_keeps_excerpt_fallback():
+    """D — INTERNAL 은 같은 버그를 반복하지 않되 메일 폴백은 그대로 둔다."""
+    s = Summarizer(_cfg(max_consecutive_failures=3))
+    s._generate = lambda *a, **k: (_ for _ in ()).throw(TypeError("내부 버그"))
+
+    ok, counts, general, bills = _run_mixed(s)
+
+    assert ok == 0
+    assert counts["general"] == 1        # 브레이커(3회)를 기다리지 않는다
+    assert counts["assembly"] == 0
+    assert general.summary == [] and all(b.summary == [] for b in bills)
+    html = build_html({general.source_name: [general]})
+    assert ">AI 3줄 요약</div>" not in html    # 발췌로 나간다
