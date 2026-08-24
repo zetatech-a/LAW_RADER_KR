@@ -43,6 +43,37 @@ _DEFAULT_MODEL = "gemini-flash-latest"
 # alias 자체가 막히거나 대상 버전이 사라졌을 때 넘어갈 검증된 stable 모델(순서 보존).
 _DEFAULT_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash-lite")
 
+# primary 모델을 덮어쓸 환경변수(앞이 우선). GitHub Actions 의 repository Variable
+# `MODEL` 을 workflow 가 GEMINI_MODEL 로 넘겨주므로, 운영자가 코드를 고치지 않고
+# 모델을 바꿀 수 있다. MODEL 도 함께 보는 이유는 로컬 실행/기존 설정 호환성이다.
+#
+# 값 자체는 절대 코드에 하드코딩하지 않는다 — 여기서는 '어느 변수를 보는지'만 정한다.
+_MODEL_ENV_VARS = ("GEMINI_MODEL", "MODEL")
+
+
+def _model_from_env() -> tuple[str, str]:
+    """(모델명, 출처) — 앞선 환경변수가 우선. 빈 문자열/공백은 미지정으로 본다."""
+    for name in _MODEL_ENV_VARS:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value, f"{name} 환경변수"
+    return "", ""
+
+
+def resolve_model(yaml_model) -> tuple[str, str]:
+    """primary 모델과 그 출처를 정한다.
+
+    precedence:  GEMINI_MODEL > MODEL > config.yaml 의 llm.model > 코드 기본값.
+    어느 단계든 빈 문자열/공백은 '지정되지 않음'으로 보고 다음으로 넘어간다.
+    """
+    env_model, source = _model_from_env()
+    if env_model:
+        return env_model, source
+    configured = str(yaml_model or "").strip()
+    if configured:
+        return configured, "config.yaml llm.model"
+    return _DEFAULT_MODEL, "코드 기본값"
+
 
 @dataclass
 class AssemblyBatchConfig:
@@ -68,6 +99,14 @@ class AssemblyBatchConfig:
     budget_sec: float = 120.0
     # 응답에서 빠진 의안이 있으면 그 ID 만 한 번 다시 요청할지
     retry_missing_once: bool = True
+    # 서킷 브레이커 — 일시 장애(TRANSIENT: 5xx·타임아웃 등)로 배치 호출이 **연속으로**
+    # 이만큼 실패하면 남은 배치는 호출하지 않고 발췌로 넘긴다(0=무제한).
+    #
+    # 1회로 두면 예전 동작(첫 배치 503 → 전량 중단)으로 되돌아간다. 한 번의 일시 장애가
+    # 나머지 의안을 전부 발췌로 떨어뜨리지 않도록 다음 배치를 한 번은 더 두드려 본다.
+    # 반대로 인증(AUTH)·한도(RATE_LIMIT)·잘못된 요청(BAD_REQUEST)·모델 부재처럼 다음
+    # 배치도 똑같이 실패할 실패는 이 카운터와 무관하게 즉시 브레이커를 연다.
+    max_consecutive_transient_failures: int = 2
 
 
 @dataclass
@@ -97,6 +136,9 @@ class LLMConfig:
     api_key: str = ""
     # 의안 전용 배치 요약 설정(일반 게시물 경로에는 영향 없음).
     assembly_batch: AssemblyBatchConfig = field(default_factory=AssemblyBatchConfig)
+    # primary 모델이 어디서 왔는지(운영 로그용). 장애 때 "어느 모델을 왜 불렀나"를
+    # Actions 로그만 보고 판단할 수 있어야 한다.
+    model_source: str = "config.yaml llm.model"
 
     @property
     def model_chain(self) -> list[str]:
@@ -186,10 +228,19 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         retry_missing_once=bool(
             ab.get("retry_missing_once", _ab_default.retry_missing_once)
         ),
+        max_consecutive_transient_failures=int(
+            ab.get(
+                "max_consecutive_transient_failures",
+                _ab_default.max_consecutive_transient_failures,
+            )
+        ),
     )
+    # primary 모델: GEMINI_MODEL > MODEL > config.yaml > 코드 기본값.
+    model, model_source = resolve_model(lm.get("model"))
     llm = LLMConfig(
         enabled=bool(lm.get("enabled", True)),
-        model=str(lm.get("model", _DEFAULT_MODEL)),
+        model=model,
+        model_source=model_source,
         fallback_models=[
             str(m).strip() for m in raw_fallbacks if str(m).strip()
         ],

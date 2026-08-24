@@ -79,6 +79,7 @@ def run(argv=None) -> int:
     )
 
     cfg = load_config(args.config)
+    _log_llm_settings(cfg.llm)
     state = State(args.state)
     fetcher = Fetcher(
         timeout=cfg.fetch.timeout_sec,
@@ -292,6 +293,27 @@ def run(argv=None) -> int:
     if errors:
         log.warning("일부 소스 오류: %s", "; ".join(errors))
     return 0
+
+
+def _log_llm_settings(llm) -> None:
+    """실행 초기에 '어느 모델을 부를 것인가'를 INFO 로 못박는다.
+
+    장애가 났을 때 Actions 로그만 보고 실제 호출 모델을 확인할 수 있어야 한다.
+    예전에는 성공한 뒤에야 모델명이 INFO 로 찍혀서, 전 요청이 실패한 실행에서는
+    어느 모델을 불렀는지 로그에 남지 않았다.
+
+    API key 는 절대 찍지 않는다 — 설정 여부만 남긴다.
+    """
+    if not llm.enabled:
+        log.info("LLM 요약 비활성(config.yaml llm.enabled=false)")
+        return
+    log.info(
+        "LLM 설정 — primary=%s, fallback=%s (primary 출처: %s, API key %s)",
+        llm.model,
+        ", ".join(llm.fallback_models) or "없음",
+        llm.model_source,
+        "설정됨" if llm.api_key else "없음",
+    )
 
 
 def _log_detail_summary(

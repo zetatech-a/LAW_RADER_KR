@@ -120,6 +120,18 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 | `SMTP_PORT` | `587` (기본값과 같으면 생략 가능) |
 | `MAIL_FROM` | 발신 표시 주소(보통 `SMTP_USER`와 동일) |
 
+`Settings → Secrets and variables → Actions → Variables` 탭에는 비밀이 아닌 설정을 둡니다:
+
+| Variable 이름 | 값 |
+|---|---|
+| `MODEL` | 요약에 쓸 **Gemini 모델명**. 워크플로가 이 값을 `GEMINI_MODEL` 환경변수로 넘겨 그대로 primary 모델이 됩니다. 비워 두면 `config.yaml` 의 `llm.model` 로 되돌아갑니다 |
+
+> 모델명은 코드 어디에도 하드코딩하지 않습니다 — 이 Variable 이 유일한 출처입니다.
+> 우선순위는 `GEMINI_MODEL` > `MODEL` > `config.yaml` 의 `llm.model` > 코드 기본값이며,
+> 빈 문자열은 '지정 안 함'으로 보고 다음 순위로 넘어갑니다(`MODEL` 환경변수 폴백은
+> 로컬 실행·기존 설정 호환용). 실제로 어떤 모델이 쓰였는지는 실행 시작 로그의
+> `LLM 설정 — primary=… , fallback=…` 한 줄로 확인할 수 있습니다.
+
 > 신규 글이 있으면 **AI 요약을 호출하기 전에** ① 필수 Secret(`SMTP_USER`·`SMTP_PASSWORD`·`MAIL_TO`)이 채워졌는지, ② 그 값으로 실제 SMTP 로그인이 되는지를 먼저 확인합니다. 둘 중 하나라도 실패하면 요약 없이 즉시 실패로 끝냅니다 — 어차피 보낼 수 없는 메일에 Gemini 무료 할당량을 쓰지 않기 위함입니다. 앱 비밀번호를 폐기했거나 SMTP 호스트에 닿지 못하는 경우가 여기 걸립니다. 신규 글은 미확정으로 남아 복구한 다음 실행에 그대로 발송됩니다.
 
 ### 3) 수신자 설정
@@ -186,19 +198,21 @@ npm run deploy -- --secrets-file .dev.vars
 | `fetch.max_new_per_source` | 50 | 한 소스에서 한 번에 발송할 신규 상한(폭주 안전장치) |
 | `email.max_attach_mb` | 15 | 메일에 첨부할 총 용량 상한. 초과분은 링크로만 안내 |
 | `llm.enabled` | true | 본문 AI 요약 사용 여부. `false` 면 기존 원문 발췌로 발송 |
-| `llm.model` | `gemini-flash-latest` | 요약에 쓸 기본 Gemini 모델. 특정 버전을 고정하면 그 버전 수명 종료일에 전 요청이 404가 되므로 공식 latest alias 사용 |
+| `llm.model` | `gemini-flash-latest` | 요약에 쓸 기본 Gemini 모델. 특정 버전을 고정하면 그 버전 수명 종료일에 전 요청이 404가 되므로 공식 latest alias 사용. **환경변수 `GEMINI_MODEL`(= GitHub Variable `MODEL`) 이 있으면 그 값이 우선**합니다 |
 | `llm.fallback_models` | `gemini-3.6-flash`, `gemini-3.5-flash-lite` | `model` 을 쓸 수 없을 때(404 / `NOT_FOUND` / 모델 부재 메시지) 이 **순서대로** 넘어갑니다. `[]` 로 두면 대체 없음 |
 | `llm.lines` | 3 | 요약 문장 수 |
 | `llm.max_posts` | 40 | 한 실행에서 요약할 최대 글 수(무료 티어 일일 한도 보호). 초과분은 원문 발췌 |
 | `llm.rpm` | 10 | 분당 요청 상한. 이 간격에 맞춰 호출을 벌립니다 |
 | `llm.max_consecutive_failures` | 3 | 연속 실패가 이만큼 쌓이면 요약을 중단하고 남은 글은 원문 발췌로 발송(LLM 전면 장애 시 메일 지연 방지) |
 | `llm.budget_sec` | 240 | 요약 단계 전체 시간예산(초). 개별 요청은 단조시계 마감으로 강제 중단되고 재시도 대기도 남은 예산 안으로 잘리므로, 요약 단계 소요시간의 실질 상한 |
+| `llm.assembly_batch.max_consecutive_transient_failures` | 2 | 의안 배치가 **일시 장애(5xx·타임아웃)로 연속** 이만큼 실패하면 남은 배치는 호출 없이 발췌로 발송. `1` 로 두면 첫 배치의 503 하나로 그날 의안 전부가 발췌가 됩니다. 인증(401/403)·한도(429)·잘못된 요청(400)·모델 부재는 이 카운터와 무관하게 즉시 중단하고, 깨진 JSON·ID 누락·안전필터 차단 같은 **배치 내용** 문제는 세지 않습니다 |
 
 ## 알려진 한계
 
 - **예약 실행 지연:** Cloudflare가 예약 시각에 Dispatch를 요청해도 GitHub-hosted runner의 실제 시작 시각은 부하에 따라 늦을 수 있으며 정확한 시작 시각은 보장되지 않습니다.
 - **AI 요약의 정확도:** 3줄 요약은 생성형 AI가 만든 것으로 부정확하거나 누락이 있을 수 있습니다. 메일 하단에도 같은 안내가 표시되며, 판단 전에는 반드시 원문 링크를 확인해야 합니다.
 - **Gemini 모델 수명 종료:** Google이 특정 모델을 종료하면 그 모델 호출은 404가 됩니다. 기본값은 `gemini-flash-latest` alias이고 `llm.fallback_models` 로 자동 전환하지만, alias와 대체 모델이 모두 막히면 해당 회차는 원문 발췌로만 발송됩니다(메일 자체는 정상 발송). 로그의 `모델 … 사용 불가` / `요약 모델 확정: …` 로 확인하고 `config.yaml` 의 모델 목록을 갱신하세요.
+- **Gemini 일시 장애(429·5xx·타임아웃):** 모델 문제가 아니므로 **다른 모델로 자동 전환하지 않습니다**(운영자가 `MODEL` 로 고정한 모델을 존중). 대신 `llm.max_retries` 만큼 지수 백오프(+작은 지터)로 재시도하고, 그래도 실패하면 그 글/배치만 원문 발췌로 넘깁니다. 의안 배치는 한 배치가 일시 장애로 실패해도 **다음 배치를 한 번 더 시도**하며, 연속 실패가 `llm.assembly_batch.max_consecutive_transient_failures` 에 도달할 때만 남은 배치를 포기합니다. 로그의 `Gemini transient 실패 — model=… status=… attempt=…` 로 확인하세요.
 - **해외 IP 접속 제한:** `fsc.go.kr`·`better.fsc.go.kr`·`open.assembly.go.kr` 는 시간대에 따라 GitHub 러너(해외 IP)에서 연결이 되지 않아 해당 회차에 건너뛸 수 있습니다(로그에 `ConnectTimeout`). 금융감독원(`fss.or.kr`) 5개 소스는 안정적으로 수집됩니다.
   - 연결 실패는 소스별로 격리되어 나머지 소스 수집에는 영향이 없고, 건너뛴 글은 **접속이 되는 다음 회차에 신규로 잡혀 발송**됩니다.
   - 완전히 해결하려면 국내 IP에서 실행해야 합니다(self-hosted runner 또는 국내 서버 cron). 코드는 환경 독립적이라 그대로 사용 가능합니다.

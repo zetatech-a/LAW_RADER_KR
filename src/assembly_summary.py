@@ -25,7 +25,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
-from .summarizer import _LIST_PREFIX, _MIN_CALL_SEC, _unfence
+from .summarizer import (
+    _LIST_PREFIX,
+    _MIN_CALL_SEC,
+    _STOP_CALLING_KINDS,
+    LLMErrorKind,
+    _unfence,
+    classify_error,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - 타입 힌트 전용
     from .config import AssemblyBatchConfig
@@ -125,7 +132,20 @@ def summarize_assembly_bills(
 
     deadline = time.monotonic() + cfg.budget_sec if cfg.budget_sec > 0 else None
     batches = _batches(items, cfg.batch_size, cfg.max_batch_chars)
-    log.info("의안 %d건을 %d개 배치로 요약 시작", len(items), len(batches))
+    # 배치 구성을 운영 로그에서 그대로 볼 수 있어야 batch_size 를 데이터로 튜닝할 수 있다.
+    log.info(
+        "Assembly AI — target=%d batches=%d sizes=%s",
+        len(items),
+        len(batches),
+        [len(b) for b in batches],
+    )
+
+    # 서킷 브레이커: 일시 장애(TRANSIENT)가 **연속으로** 쌓일 때만 남은 배치를 포기한다.
+    # 한 배치가 503 으로 재시도를 소진했다는 이유만으로 전체를 접으면, 잠깐 흔들린
+    # 서버 때문에 그날 의안 전부가 발췌로 나간다(실제 장애). 그래서 다음 배치를 한 번
+    # 더 두드려 보고, 그것마저 일시 장애면 그때 브레이커를 연다.
+    breaker = cfg.max_consecutive_transient_failures
+    consecutive_transient = 0
 
     ok = 0
     for i, batch in enumerate(batches):
@@ -136,23 +156,47 @@ def summarize_assembly_bills(
                 len(batches) - i,
             )
             break
+        log.info("Assembly AI batch — batch=%d/%d items=%d", i + 1, len(batches), len(batch))
         result = _run(
             summarizer, batch, deadline, cfg, allow_split=True, allow_retry=True
         )
         ok += result.ok
-        # 호출 자체가 실패했다면(인증·한도·5xx·네트워크) 다음 배치도 같은 자격증명으로
-        # 같은 서비스를 부른다. 401/403 이면 확실히, 5xx·타임아웃이어도 _generate 가
-        # 이미 재시도를 소진한 뒤라 반복할 이유가 없다. 남은 배치를 계속 부르면 실패만
-        # 쌓이며 시간예산을 태우고 메일이 그만큼 늦어진다(일반 요약 경로의 연속 실패
-        # 서킷 브레이커와 같은 취지). 응답 내용이 문제인 경우(_Splittable 등)는
-        # 배치마다 다를 수 있으므로 여기서 멈추지 않는다.
-        if result.call_failed:
+
+        if not result.call_failed:
+            # 응답 내용이 문제였을 수는 있지만(_Splittable/_BatchFailed) 서비스는 살아
+            # 있었다는 뜻이다 — 연속 카운터를 리셋한다.
+            consecutive_transient = 0
+            continue
+
+        kind = result.failure_kind or LLMErrorKind.TRANSIENT
+        if kind in _STOP_CALLING_KINDS:
+            # 자격증명·한도·모델 부재·잘못된 요청: 다음 배치도 같은 자격증명으로 같은
+            # 서비스를 부르므로 결과가 달라지지 않는다. 즉시 브레이커를 연다.
             log.warning(
-                "의안 배치 호출이 실패했습니다 — 남은 %d개 배치는 호출하지 않고 "
+                "의안 배치 호출이 %s 로 실패 — 남은 %d개 배치는 호출하지 않고 "
                 "발췌로 발송합니다.",
+                kind.value,
                 len(batches) - i - 1,
             )
             break
+
+        consecutive_transient += 1
+        if breaker > 0 and consecutive_transient >= breaker:
+            log.warning(
+                "의안 배치가 일시 장애로 연속 %d회 실패 — 남은 %d개 배치는 호출하지 "
+                "않고 발췌로 발송합니다.",
+                consecutive_transient,
+                len(batches) - i - 1,
+            )
+            break
+        log.warning(
+            "의안 배치 %d/%d 가 일시 장애로 실패(연속 %d/%d) — 이 배치는 발췌로 넘기고 "
+            "다음 배치를 계속 시도합니다.",
+            i + 1,
+            len(batches),
+            consecutive_transient,
+            breaker if breaker > 0 else 0,
+        )
 
     log.info("의안 배치 요약 완료 %d/%d건", ok, len(items))
     if ok < len(items):
@@ -236,11 +280,16 @@ class _Result:
 
     ok: int = 0
     call_failed: bool = False   # 인증·한도·5xx·네트워크 등 호출 계층의 실패
+    # 그 실패의 의미(AUTH/RATE_LIMIT/TRANSIENT/…). 호출자가 '다음 배치를 불러도
+    # 되는가'를 정할 때 쓴다. call_failed 가 False 면 의미가 없다.
+    failure_kind: "LLMErrorKind | None" = None
 
     def __add__(self, other: "_Result") -> "_Result":
         return _Result(
             ok=self.ok + other.ok,
             call_failed=self.call_failed or other.call_failed,
+            # 먼저 확인된 실패 원인을 유지한다(분할 앞 조각에서 죽으면 그것이 사유다).
+            failure_kind=self.failure_kind or other.failure_kind,
         )
 
 
@@ -298,13 +347,15 @@ def _run(
         )
         return _Result()
     except Exception as e:  # noqa: BLE001 — 인증·한도·5xx·네트워크: 분할하지 않는다
+        kind = classify_error(e)
         log.warning(
-            "의안 배치(%d건) 호출 실패(%s) — 분할하지 않고 발췌로 발송합니다: %s",
+            "의안 배치(%d건) 호출 실패(%s / %s) — 분할하지 않고 발췌로 발송합니다: %s",
             len(items),
+            kind.value,
             type(e).__name__,
             e,
         )
-        return _Result(call_failed=True)
+        return _Result(call_failed=True, failure_kind=kind)
 
     result = _Result(ok=_apply(items, mapping))
     missing = [it for it in items if it.bill_id not in mapping]

@@ -71,6 +71,12 @@ jobs:
           ASSEMBLY_API_KEY: ${{ secrets.ASSEMBLY_API_KEY }}
           # 본문 3줄 요약용. 없으면 요약을 건너뛰고 원문 발췌로 발송된다.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # 사용할 Gemini 모델. Settings → Secrets and variables → Actions →
+          # Variables 의 repository Variable `MODEL` 이 그대로 primary 모델이 된다.
+          # 비어 있으면 config.yaml 의 llm.model 로 자동으로 되돌아간다
+          # (precedence: GEMINI_MODEL > MODEL > config.yaml > 코드 기본값).
+          # 모델명은 코드에 하드코딩하지 않는다 — 이 Variable 이 유일한 출처다.
+          GEMINI_MODEL: ${{ vars.MODEL }}
         run: python -m src.main
 
       # 모니터가 실패·취소되더라도 그때까지 기록된 기준선/신규 상태를 저장소에 반영해,
