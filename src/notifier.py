@@ -60,6 +60,17 @@ _PENDING_LABEL = "제안이유 및 주요내용 · 등록 대기"
 _PENDING_TEXT = "의안정보시스템에 제안이유 및 주요내용이 아직 공개되지 않았습니다."
 
 
+# 상세 업데이트(복구) 알림 문구. 최초 알림 때 제안이유가 없던(PENDING) 또는 수집이
+# 실패한(ERROR) 의안의 원문을 나중에 확보했을 때 쓴다. **'신규 게시물'과 반드시 구분
+# 되어야 한다** — 같은 의안을 두 번 신규로 알리는 것처럼 보이면 수신자가 중복 발송으로
+# 오해하고, 실제로는 이미 알린 의안의 후속 정보이기 때문이다.
+_UPDATE_HEADING = "의안 상세 업데이트"
+_UPDATE_NOTICE = (
+    "기존에 등록 대기 또는 상세 수집 실패였던 의안의 "
+    "제안이유 및 주요내용이 확인되었습니다."
+)
+
+
 def _is_pending(p: Post) -> bool:
     return (
         p.source_key == ASSEMBLY_SOURCE_KEY
@@ -82,8 +93,19 @@ def _body_label(p: Post) -> str:
     return _BODY_LABEL
 
 
-def _has_summary(posts_by_source: dict[str, list[Post]]) -> bool:
-    return any(p.summary for posts in posts_by_source.values() for p in posts)
+def _has_summary(*groups: "dict[str, list[Post]] | None") -> bool:
+    """AI 요약이 하나라도 실렸는지(하단 유의사항 노출 여부).
+
+    신규와 상세 업데이트를 **함께** 본다 — 업데이트만 있는 메일에도 AI 요약이 실리므로
+    유의사항이 빠지면 안 된다.
+    """
+    return any(
+        p.summary
+        for group in groups
+        if group
+        for posts in group.values()
+        for p in posts
+    )
 
 
 # 구조화 항목 블록의 제목. AI 요약이 아니라 원문 그대로의 항목임을 나타낸다.
@@ -222,28 +244,9 @@ def _agency(source_name: str) -> str:
     return source_name.split("·")[0].strip() or source_name
 
 
-def build_html(posts_by_source: dict[str, list[Post]]) -> str:
-    total = sum(len(v) for v in posts_by_source.values())
-    # 게시판 수가 아니라 '기관' 수를 센다(같은 기관의 게시판 여러 개 = 1개 기관).
-    agencies = {_agency(name) for name, posts in posts_by_source.items() if posts}
-    src_count = len(agencies)
-
-    parts = [
-        f"<div style=\"margin:0;padding:20px 16px;background:#f1f5f9;font-family:{_FONT}\">",
-        "<table role='presentation' width='100%' cellpadding='0' "
-        "cellspacing='0' style='max-width:900px;border-collapse:collapse'>",
-        # ── 헤더
-        "<tr><td style='padding:22px 24px;background:#0f172a;border-radius:10px 10px 0 0'>"
-        "<div style='font-size:11px;letter-spacing:1.6px;color:#94a3b8;"
-        "font-weight:600'>LAW RADER KR</div>"
-        "<div style='margin:6px 0 0;font-size:20px;font-weight:700;color:#ffffff'>"
-        f"신규 게시물 {total}건</div>"
-        "<div style='margin:4px 0 0;font-size:13px;color:#cbd5e1'>"
-        f"{src_count}개 기관에서 새로 등록되었습니다</div>"
-        "</td></tr>",
-        "<tr><td style='padding:18px 16px 6px;background:#f8fafc'>",
-    ]
-
+def _source_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
+    """소스별 헤더 + 카드 묶음. 신규와 상세 업데이트가 같은 렌더링을 공유한다."""
+    parts: list[str] = []
     for source_name, posts in posts_by_source.items():
         if not posts:
             continue
@@ -261,10 +264,84 @@ def build_html(posts_by_source: dict[str, list[Post]]) -> str:
         )
         for p in posts:
             parts.append(_card(p, accent))
+    return parts
+
+
+def _header_lines(total: int, updates: int, src_count: int) -> tuple[str, str]:
+    """메일 상단의 (제목, 부제). 신규가 하나도 없으면 '신규'라고 쓰지 않는다.
+
+    상세 업데이트는 이미 알린 의안의 후속 정보이므로, 그것만 있는 메일을 '신규 게시물'
+    이라고 표시하면 거짓말이 된다.
+    """
+    # 업데이트가 없으면 신규가 0건이어도 기존 문구를 그대로 쓴다(빈 묶음으로 부르는
+    # 기존 호출자의 출력이 달라지지 않도록).
+    if updates <= 0:
+        return (
+            f"신규 게시물 {total}건",
+            f"{src_count}개 기관에서 새로 등록되었습니다",
+        )
+    if total > 0:
+        return (
+            f"신규 게시물 {total}건 · {_UPDATE_HEADING} {updates}건",
+            f"{src_count}개 기관에서 새로 등록되었습니다",
+        )
+    return f"{_UPDATE_HEADING} {updates}건", _UPDATE_NOTICE
+
+
+def build_html(
+    posts_by_source: dict[str, list[Post]],
+    detail_updates_by_source: dict[str, list[Post]] | None = None,
+) -> str:
+    """다이제스트 HTML.
+
+    detail_updates_by_source 는 **이미 알린** 의안의 제안이유를 나중에 확보해 보내는
+    '상세 업데이트' 묶음이다. 생략하면(기본) 기존과 완전히 같은 출력이 나온다.
+    """
+    updates = detail_updates_by_source or {}
+    total = sum(len(v) for v in posts_by_source.values())
+    updates_total = sum(len(v) for v in updates.values())
+    # 게시판 수가 아니라 '기관' 수를 센다(같은 기관의 게시판 여러 개 = 1개 기관).
+    agencies = {_agency(name) for name, posts in posts_by_source.items() if posts}
+    src_count = len(agencies)
+    head_title, head_sub = _header_lines(total, updates_total, src_count)
+
+    parts = [
+        f"<div style=\"margin:0;padding:20px 16px;background:#f1f5f9;font-family:{_FONT}\">",
+        "<table role='presentation' width='100%' cellpadding='0' "
+        "cellspacing='0' style='max-width:900px;border-collapse:collapse'>",
+        # ── 헤더
+        "<tr><td style='padding:22px 24px;background:#0f172a;border-radius:10px 10px 0 0'>"
+        "<div style='font-size:11px;letter-spacing:1.6px;color:#94a3b8;"
+        "font-weight:600'>LAW RADER KR</div>"
+        "<div style='margin:6px 0 0;font-size:20px;font-weight:700;color:#ffffff'>"
+        f"{_esc(head_title)}</div>"
+        "<div style='margin:4px 0 0;font-size:13px;color:#cbd5e1'>"
+        f"{_esc(head_sub)}</div>"
+        "</td></tr>",
+        "<tr><td style='padding:18px 16px 6px;background:#f8fafc'>",
+    ]
+
+    parts.extend(_source_sections(posts_by_source))
+
+    if updates_total > 0:
+        # ── 상세 업데이트 섹션. 신규 섹션과 시각적으로 분리하고, 무엇인지 한 줄로
+        #    설명한다(신규 발송이 아니라는 것이 카드만 봐서는 드러나지 않는다).
+        parts.append(
+            "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
+            "style='border-collapse:collapse;margin:18px 0 8px'><tr>"
+            "<td style='padding:10px 12px;background:#fffbeb;border:1px solid #fde68a;"
+            "border-radius:6px'>"
+            "<div style='font-size:13px;font-weight:700;color:#b45309'>"
+            f"{_esc(_UPDATE_HEADING)} {updates_total}건</div>"
+            "<div style='margin:4px 0 0;font-size:12px;line-height:1.6;color:#92400e'>"
+            f"{_esc(_UPDATE_NOTICE)}</div>"
+            "</td></tr></table>"
+        )
+        parts.extend(_source_sections(updates))
 
     parts.append("</td></tr>")
     # ── 푸터. AI 요약이 실린 메일에만 요약 관련 유의사항을 덧붙인다.
-    ai_note = f"{_esc(_AI_NOTICE)}<br>" if _has_summary(posts_by_source) else ""
+    ai_note = f"{_esc(_AI_NOTICE)}<br>" if _has_summary(posts_by_source, updates) else ""
     parts.append(
         "<tr><td style='padding:16px 24px 22px;background:#f8fafc;"
         "border-radius:0 0 10px 10px;border-top:1px solid #e2e8f0'>"
@@ -279,10 +356,9 @@ def build_html(posts_by_source: dict[str, list[Post]]) -> str:
     return "".join(parts)
 
 
-def build_text(posts_by_source: dict[str, list[Post]]) -> str:
-    lines = []
-    total = sum(len(v) for v in posts_by_source.values())
-    lines.append(f"신규 게시물 {total}건\n")
+def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
+    """소스별 text/plain 블록. 신규와 상세 업데이트가 같은 렌더링을 공유한다."""
+    lines: list[str] = []
     for source_name, posts in posts_by_source.items():
         if not posts:
             continue
@@ -309,8 +385,38 @@ def build_text(posts_by_source: dict[str, list[Post]]) -> str:
             lines.append(f"    {p.url}")
             for a in p.attachments:
                 lines.append(f"      첨부: {a.filename} ({a.url})")
+    return lines
 
-    if _has_summary(posts_by_source):
+
+def build_text(
+    posts_by_source: dict[str, list[Post]],
+    detail_updates_by_source: dict[str, list[Post]] | None = None,
+) -> str:
+    """다이제스트 text/plain 파트. HTML 파트와 같은 의미를 전달해야 한다."""
+    updates = detail_updates_by_source or {}
+    lines = []
+    total = sum(len(v) for v in posts_by_source.values())
+    updates_total = sum(len(v) for v in updates.values())
+
+    if updates_total <= 0:
+        # 기존 호출(신규만)의 출력은 한 글자도 달라지지 않는다.
+        lines.append(f"신규 게시물 {total}건\n")
+    elif total > 0:
+        lines.append(f"신규 게시물 {total}건")
+        lines.append(f"{_UPDATE_HEADING} {updates_total}건\n")
+    else:
+        # 업데이트만 있는 메일을 '신규 게시물 0건'으로 시작하지 않는다.
+        lines.append(f"{_UPDATE_HEADING} {updates_total}건")
+        lines.append(f"{_UPDATE_NOTICE}\n")
+
+    lines.extend(_text_sections(posts_by_source))
+
+    if updates_total > 0 and total > 0:
+        lines.append(f"\n=== {_UPDATE_HEADING} ({updates_total}건) ===")
+        lines.append(_UPDATE_NOTICE)
+    lines.extend(_text_sections(updates))
+
+    if _has_summary(posts_by_source, updates):
         lines.append(f"\n※ {_AI_NOTICE}")
     return "\n".join(lines)
 
@@ -344,9 +450,52 @@ def verify_smtp_login(cfg: EmailConfig) -> None:
         server.login(cfg.smtp_user, cfg.smtp_password)
 
 
-def send_digest(cfg: EmailConfig, posts_by_source: dict[str, list[Post]]) -> None:
+def build_subject(
+    cfg: EmailConfig,
+    posts_by_source: dict[str, list[Post]],
+    detail_updates_by_source: dict[str, list[Post]] | None = None,
+) -> str:
+    """메일 제목. 신규만 있을 때는 기존 형식을 그대로 유지한다.
+
+    상세 업데이트가 섞이면 제목만 보고도 두 종류가 들어 있음을 알 수 있어야 하고,
+    업데이트만 있을 때는 '신규'라는 단어가 나오면 안 된다.
+    """
+    updates = detail_updates_by_source or {}
     total = sum(len(v) for v in posts_by_source.values())
+    updates_total = sum(len(v) for v in updates.values())
+
     if total == 0:
+        return f"{cfg.subject_prefix} {_UPDATE_HEADING} {updates_total}건"
+
+    # 제목: 가장 많은 소스명 + 총 건수
+    top_source = max(posts_by_source.items(), key=lambda kv: len(kv[1]))[0]
+    others = sum(1 for v in posts_by_source.values() if v) - 1
+    subject = f"{cfg.subject_prefix} 신규 {total}건 · {top_source}"
+    if others > 0:
+        subject += f" 외 {others}개 소스"
+    if updates_total > 0:
+        subject = (
+            f"{cfg.subject_prefix} 신규 {total}건 · "
+            f"{_UPDATE_HEADING} {updates_total}건"
+        )
+    return subject
+
+
+def send_digest(
+    cfg: EmailConfig,
+    posts_by_source: dict[str, list[Post]],
+    detail_updates_by_source: dict[str, list[Post]] | None = None,
+) -> None:
+    """한 실행의 결과를 다이제스트 **한 통**으로 보낸다.
+
+    detail_updates_by_source 는 이미 알린 의안의 제안이유를 나중에 확보한 '상세
+    업데이트'다. 신규와 함께 있으면 한 메일 안에 두 섹션으로 싣는다 — 실행당 메일
+    한 통이라는 기존 원칙을 지키기 위해서다.
+    """
+    updates = detail_updates_by_source or {}
+    total = sum(len(v) for v in posts_by_source.values())
+    updates_total = sum(len(v) for v in updates.values())
+    if total == 0 and updates_total == 0:
         log.info("신규 없음 — 메일 발송 생략")
         return
 
@@ -357,12 +506,7 @@ def send_digest(cfg: EmailConfig, posts_by_source: dict[str, list[Post]]) -> Non
             "환경변수/Secrets 와 config.yaml 을 확인하세요."
         )
 
-    # 제목: 가장 많은 소스명 + 총 건수
-    top_source = max(posts_by_source.items(), key=lambda kv: len(kv[1]))[0]
-    others = sum(1 for v in posts_by_source.values() if v) - 1
-    subject = f"{cfg.subject_prefix} 신규 {total}건 · {top_source}"
-    if others > 0:
-        subject += f" 외 {others}개 소스"
+    subject = build_subject(cfg, posts_by_source, updates)
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -371,20 +515,24 @@ def send_digest(cfg: EmailConfig, posts_by_source: dict[str, list[Post]]) -> Non
     # 수신자 숨김: To 헤더에는 발신주소만 표시하고, 실제 수신자는 봉투(envelope)로만
     # 전달한다. 이렇게 하면 여러 명에게 보내도 서로의 주소가 보이지 않는다(BCC 효과).
     msg["To"] = formataddr((cfg.from_name, cfg.mail_from))
-    msg.set_content(build_text(posts_by_source))
-    msg.add_alternative(build_html(posts_by_source), subtype="html")
+    msg.set_content(build_text(posts_by_source, updates))
+    msg.add_alternative(build_html(posts_by_source, updates), subtype="html")
 
     # 첨부 (용량 상한 내에서만)
     budget = cfg.max_attach_bytes
-    for posts in posts_by_source.values():
-        for p in posts:
-            for a in p.attachments:
-                if a.data and len(a.data) <= budget:
-                    maintype, _, subtype = _guess_mime(a.filename)
-                    msg.add_attachment(
-                        a.data, maintype=maintype, subtype=subtype, filename=a.filename
-                    )
-                    budget -= len(a.data)
+    for group in (posts_by_source, updates):
+        for posts in group.values():
+            for p in posts:
+                for a in p.attachments:
+                    if a.data and len(a.data) <= budget:
+                        maintype, _, subtype = _guess_mime(a.filename)
+                        msg.add_attachment(
+                            a.data,
+                            maintype=maintype,
+                            subtype=subtype,
+                            filename=a.filename,
+                        )
+                        budget -= len(a.data)
 
     with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=60) as server:
         server.starttls()
@@ -400,7 +548,13 @@ def send_digest(cfg: EmailConfig, posts_by_source: dict[str, list[Post]]) -> Non
         # (성공한 수신자에게는 재발송되어 중복될 수 있으나, 알림 누락보다 낫다)
         raise RuntimeError(f"일부 수신자에게 발송 실패(재시도 대상): {refused}")
 
-    log.info("메일 발송 완료 → %s (%d건)", ", ".join(cfg.recipients), total)
+    log.info(
+        "메일 발송 완료 → %s (신규 %d건 / %s %d건)",
+        ", ".join(cfg.recipients),
+        total,
+        _UPDATE_HEADING,
+        updates_total,
+    )
 
 
 def _guess_mime(filename: str) -> tuple[str, str, str]:

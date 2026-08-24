@@ -98,6 +98,13 @@ _SUMMARY_MARKER = "제안이유 및 주요내용"
 # 초기 상세 GET 에만 쓰는 selector 목록. 구형(inline) 페이지 지원용 폴백을 포함한다.
 _SUMMARY_SELECTORS = (_BILLINFO_SUMMARY_SELECTOR, "#prntSummary", "#summaryContentDiv")
 
+# 상세 재조회 큐(state 의 pending_detail) 처리 기본값. **숫자는 여기 한 곳에만 둔다** —
+# config.yaml 은 override 이고, main/README 는 이 값을 참조만 한다.
+#   DETAIL_RETRY_INTERVAL_SEC  같은 의안을 다시 시도하기 전 최소 간격(초). 0=매 실행 허용
+#   DETAIL_RETRY_MAX_PER_RUN   한 실행에서 처리할 기존 큐 항목 최대 수. 0=건수 상한 없음
+DETAIL_RETRY_INTERVAL_SEC = 1800.0
+DETAIL_RETRY_MAX_PER_RUN = 10
+
 
 class SummaryRequestError(ValueError):
     """확정된 계약대로 요청을 만들 수 없음(form#form·CSRF·billId 문제).
@@ -563,6 +570,26 @@ class AssemblyBillScraper(BaseScraper):
         self.detail_budget_sec = float(ex.get("detail_budget_sec", 120.0))
         self.detail_max_consecutive_failures = int(
             ex.get("detail_max_consecutive_failures", 5)
+        )
+
+        # 상세 재조회 큐(pending_detail) 처리 속도 제한. 최초 알림 때 제안이유가 아직
+        # 등록되지 않았거나(PENDING) 수집이 실패한(ERROR) 의안은 state 큐에 남아
+        # 다음 실행부터 다시 조회된다. 제한이 없으면 오래 남은 큐 하나가 15분마다
+        # 의안정보시스템을 계속 두드리게 되므로 두 가지 상한을 둔다.
+        #
+        #   detail_retry_interval_sec  같은 의안을 다시 시도하기 전 최소 간격(초).
+        #                              0 이면 매 실행 재시도를 허용한다.
+        #   detail_retry_max_per_run   한 번의 실행에서 처리할 기존 큐 항목 최대 수.
+        #                              0 이면 건수 상한 없음(그래도 위의
+        #                              detail_budget_sec / 연속실패 브레이커는 적용된다).
+        #
+        # 기본값은 여기 한 곳에만 둔다 — main/config/README 가 각자 숫자를 적어 두면
+        # 한쪽만 바뀌었을 때 실제 동작과 문서가 어긋난다.
+        self.detail_retry_interval_sec = float(
+            ex.get("detail_retry_interval_sec", DETAIL_RETRY_INTERVAL_SEC)
+        )
+        self.detail_retry_max_per_run = int(
+            ex.get("detail_retry_max_per_run", DETAIL_RETRY_MAX_PER_RUN)
         )
         self._detail_deadline: float | None = None
         self._consecutive_failures = 0
