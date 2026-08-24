@@ -781,6 +781,34 @@ class AssemblyBillScraper(BaseScraper):
                 return self._breaker_note
         return ""
 
+    def exclude_detail_idle_time(self, elapsed_sec: float) -> None:
+        """상세 수집과 무관하게 흘려보낸 시간을 시간예산에서 제외한다.
+
+        detail_budget_sec 는 첫 enrich 에서 **절대 마감시각**으로 고정된다
+        (_detail_blocked 참고). 그런데 신규 의안 상세수집과 큐 재조회 사이에는
+        SMTP 선점검 같은 '상세 수집이 아닌' 대기가 끼어들 수 있다. 그 대기가 길면
+        LIKMS 요청을 한 번도 하지 않았는데 예산이 소진되어, 선택된 큐 항목들이
+        요청 없이 ERROR 로 떨어지고 시도 횟수만 소모한 채 다음 간격까지 미뤄진다.
+        detail_budget_sec 의 의미는 '실제 의안 상세 작업이 폭주하는 것을 제한'이므로
+        그런 대기는 예산에서 빠져야 한다.
+
+        마감시각을 **뒤로 미루기만** 한다 — 예산을 다시 시작하지 않는다. 그래서 신규
+        수집과 재조회가 하나의 누적 예산을 공유한다는 성질이 그대로 유지된다.
+
+        연속 실패 브레이커(_consecutive_failures)는 건드리지 않는다. 이번 조정은
+        시간에 대한 것이지 실패 판정에 대한 것이 아니다.
+        """
+        if self.detail_budget_sec <= 0:
+            return                      # 예산 자체가 없으면 조정할 것도 없다
+        if self._detail_deadline is None:
+            return                      # 아직 상세 예산이 시작되지 않았다(첫 요청에서 시작)
+        if elapsed_sec <= 0:
+            return
+        self._detail_deadline += elapsed_sec
+        log.debug(
+            "[%s] 상세 시간예산에서 비-상세 대기 %.1f초 제외", self.key, elapsed_sec
+        )
+
     def _set_status(
         self, post: Post, status: ProposalContentStatus, note: str = ""
     ) -> None:

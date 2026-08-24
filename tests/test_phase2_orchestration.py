@@ -1040,3 +1040,146 @@ def test_other_sources_newness_semantics_unchanged(tmp_path, monkeypatch):
     ctx = _run(tmp_path, monkeypatch, state_path=path, only=PRESS_KEY)
     assert ctx.scrapers[PRESS_KEY].collect_known == {"old1", "old2"}
     assert "PRC_Q" not in ctx.scrapers[PRESS_KEY].collect_known
+
+
+# ==========================================================================
+# 손상된 큐 항목이 실행 전체를 중단시키면 안 된다 (PR #25 Codex P2)
+# ==========================================================================
+BAD_URL = "http://["      # urlparse 가 ValueError 를 던지는 실제 입력
+
+
+def _seed_with_bad_entry(tmp_path):
+    """손상된 항목 하나 + 정상 항목 하나가 든 큐."""
+    path = tmp_path / "seen.json"
+    st = State(path)
+    st.mark_seen(ASSEMBLY_SOURCE_KEY, ["PRC_BAD", "PRC_GOOD"], baselined=True)
+    st.mark_seen(PRESS_KEY, ["old"], baselined=True)
+    st.queue_detail(ASSEMBLY_SOURCE_KEY, "PRC_BAD", title="깨진 항목",
+                    url=BAD_URL, date="2026-08-01", status="pending", now=OLD)
+    good = _bill("PRC_GOOD")
+    st.queue_detail(ASSEMBLY_SOURCE_KEY, "PRC_GOOD", title=good.title, url=good.url,
+                    date=good.date, status="pending", now=OLD)
+    st.save()
+    return path
+
+
+def test_B3_malformed_queue_entry_does_not_abort_the_run(tmp_path, monkeypatch):
+    path = _seed_with_bad_entry(tmp_path)
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        statuses={"PRC_GOOD": (S.AVAILABLE, "제안이유 본문")},
+    )
+    # run() 이 예외로 죽지 않고, 정상 항목은 끝까지 처리된다.
+    assert ctx.rc == 0
+    assert ctx.enriched == ["PRC_GOOD"]                  # 손상 항목은 요청 없음
+    assert [p.post_id for p in ctx.updates] == ["PRC_GOOD"]
+    assert len(ctx.digests) == 1
+    assert "PRC_GOOD" not in ctx.queue                   # 전달 완료 → 큐에서 제거
+
+
+def test_B3_malformed_entry_metadata_is_persisted_and_kept(tmp_path, monkeypatch):
+    path = _seed_with_bad_entry(tmp_path)
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        statuses={"PRC_GOOD": (S.AVAILABLE, "본문")},
+    )
+    bad = ctx.queue["PRC_BAD"]                           # 큐에 그대로 남는다(조용히 삭제 금지)
+    assert bad["status"] == "error"
+    assert bad["attempts"] == 2                          # 시도 기록은 갱신
+    assert bad["last_attempt_at"] != OLD
+    assert "ValueError" in bad["note"]
+    assert bad["url"] == BAD_URL                         # 손상된 값을 임의로 고치지 않는다
+
+
+def test_B3_all_entries_malformed_still_completes_the_run(tmp_path, monkeypatch):
+    path = tmp_path / "seen.json"
+    st = State(path)
+    st.mark_seen(ASSEMBLY_SOURCE_KEY, ["PRC_B1", "PRC_B2"], baselined=True)
+    for pid in ("PRC_B1", "PRC_B2"):
+        st.queue_detail(ASSEMBLY_SOURCE_KEY, pid, title=pid, url=BAD_URL,
+                        date="2026-08-01", status="pending", now=OLD)
+    st.save()
+
+    ctx = _run(tmp_path, monkeypatch, state_path=path)
+    assert ctx.rc == 0
+    assert ctx.enriched == []
+    assert ctx.digests == []                             # 보낼 것이 없으면 메일도 없다
+    assert set(ctx.queue) == {"PRC_B1", "PRC_B2"}        # 둘 다 큐 유지
+    assert all(e["status"] == "error" for e in ctx.queue.values())
+
+
+# ==========================================================================
+# SMTP 선점검 시간은 의안 상세 시간예산에서 제외된다 (PR #25 Codex P2)
+# ==========================================================================
+def test_smtp_preflight_time_is_excluded_from_the_detail_budget(tmp_path, monkeypatch):
+    """느린 SMTP 핸드셰이크가 큐 재조회의 예산을 갉아먹으면 안 된다."""
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)])
+    excluded = []
+
+    class _BudgetScraper(_FakeScraper):
+        """실제 스크래퍼처럼 예산 보정 API 를 노출하는 대역."""
+
+        def exclude_detail_idle_time(self, elapsed_sec):
+            excluded.append(elapsed_sec)
+
+    import src.main as main_mod
+
+    made = {}
+
+    def _factory(src, fetcher):
+        sc = _BudgetScraper(src.key, src.name, [], {"PRC_Q": (S.AVAILABLE, "본문")})
+        made[src.key] = sc
+        return sc
+
+    calls = {"verify": 0}
+
+    def _verify(cfg):
+        calls["verify"] += 1
+
+    monkeypatch.setenv("SMTP_USER", "s@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "pw")
+    monkeypatch.setenv("MAIL_TO", "to@example.com")
+    monkeypatch.setattr(main_mod, "build_scraper", _factory)
+    monkeypatch.setattr(main_mod, "verify_smtp_login", _verify)
+    monkeypatch.setattr(main_mod, "send_digest", lambda *a, **k: None)
+    monkeypatch.setattr(main_mod, "summarize_posts", lambda *a, **k: 0)
+
+    rc = main_mod.run(["--state", str(path), "--only", "assembly_bill"])
+    assert rc == 0
+    assert calls["verify"] == 1
+    # 선점검이 성공했으므로 그 대기시간이 상세 예산에서 제외되도록 호출된다.
+    assert len(excluded) == 1
+    assert excluded[0] >= 0
+    # 재조회는 정상 수행되었다.
+    assert made["assembly_bill"].enrich_calls == ["PRC_Q"]
+
+
+def test_smtp_failure_does_not_adjust_the_detail_budget(tmp_path, monkeypatch):
+    """실패하면 재조회 자체를 하지 않으므로 예산을 손볼 이유가 없다."""
+    import smtplib
+
+    import src.main as main_mod
+
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)])
+    excluded = []
+
+    class _BudgetScraper(_FakeScraper):
+        def exclude_detail_idle_time(self, elapsed_sec):
+            excluded.append(elapsed_sec)
+
+    def _factory(src, fetcher):
+        return _BudgetScraper(src.key, src.name, [], {"PRC_Q": (S.AVAILABLE, "본문")})
+
+    monkeypatch.setenv("SMTP_USER", "s@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "pw")
+    monkeypatch.setenv("MAIL_TO", "to@example.com")
+    monkeypatch.setattr(main_mod, "build_scraper", _factory)
+    monkeypatch.setattr(
+        main_mod, "verify_smtp_login",
+        lambda cfg: (_ for _ in ()).throw(smtplib.SMTPAuthenticationError(535, b"bad")),
+    )
+    monkeypatch.setattr(main_mod, "send_digest", lambda *a, **k: None)
+
+    rc = main_mod.run(["--state", str(path), "--only", "assembly_bill"])
+    assert rc == 1
+    assert excluded == []

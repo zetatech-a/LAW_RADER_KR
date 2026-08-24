@@ -302,3 +302,79 @@ def test_long_waiters_quiet_for_fresh_entries(caplog):
     with caplog.at_level(logging.WARNING, logger="law_rader"):
         log_long_waiters([_q("PRC_NEW")], now_ts=NOW, warn_after_sec=7 * 24 * 3600)
     assert caplog.records == []
+
+
+# --- 손상된 큐 항목의 격리 (PR #25 Codex P2) -------------------------------
+#
+# state 에 저장된 스냅샷은 시간이 지나며 손상될 수 있다. 재구성(build_post)이 예외를
+# 던지면 그 항목 하나가 재조회 루프 전체를 중단시켜서는 안 된다.
+
+# urlparse 가 ValueError("Invalid IPv6 URL") 를 던지는 실제 입력.
+BAD_URL = "http://["
+
+
+def test_build_post_raises_on_malformed_url():
+    """이 회귀가 막는 실제 예외를 먼저 못박는다(가정이 아니라 사실이다)."""
+    import pytest
+
+    with pytest.raises(ValueError):
+        build_post(_q("PRC_BAD", url=BAD_URL),
+                   source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME)
+
+
+def test_B1_malformed_entry_does_not_block_later_items():
+    sc = _Scraper({"PRC_GOOD": (S.AVAILABLE, "제안이유 본문")})
+    sel = _sel(_q("PRC_BAD", url=BAD_URL), _q("PRC_GOOD"))
+    out = retry_bills(sc, sel, source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME)
+
+    # 손상된 항목은 요청을 보내지 않는다 — 뒤 항목만 실제로 조회된다.
+    assert sc.calls == ["PRC_GOOD"]
+    assert [p.post_id for p in out.recovered] == ["PRC_GOOD"]
+    assert [p.post_id for p in out.still_queued] == ["PRC_BAD"]
+
+
+def test_B2_reconstruction_failure_becomes_an_error_outcome():
+    sc = _Scraper({})
+    out = retry_bills(sc, _sel(_q("PRC_BAD", url=BAD_URL)),
+                      source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME)
+
+    (bad,) = out.still_queued
+    assert bad.post_id == "PRC_BAD"
+    assert bad.proposal_status is S.ERROR
+    assert "ValueError" in bad.proposal_note          # 진단에 쓸 수 있는 사유
+    assert len(bad.proposal_note) <= 200              # 길이 제한
+    assert out.recovered == []
+    # 상태 기록용 Post 이므로 저장된 스냅샷을 그대로 담는다(임의 URL 로 바꾸지 않는다).
+    assert bad.url == BAD_URL
+    assert bad.title == "PRC_BAD 법률안"
+
+
+def test_B2_malformed_item_never_reaches_enrich():
+    """손상된 URL 을 조용히 canonical URL 로 바꿔 다시 요청하지 않는다(fail-closed)."""
+    sc = _Scraper({})
+    retry_bills(sc, _sel(_q("PRC_BAD", url=BAD_URL)),
+                source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME)
+    assert sc.calls == []
+
+
+def test_B4_all_reconstruction_failures_still_return_an_outcome():
+    sc = _Scraper({})
+    sel = _sel(_q("PRC_B1", url=BAD_URL), _q("PRC_B2", url=BAD_URL),
+               _q("PRC_B3", url=BAD_URL))
+    out = retry_bills(sc, sel, source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME)
+
+    assert sc.calls == []
+    assert out.attempted == 3
+    assert len(out.recovered) == 0
+    assert out.failed == 3            # ERROR 이므로 pending 이 아니라 failed 로 센다
+    assert out.pending == 0
+
+
+def test_malformed_entry_is_logged_without_the_raw_exception_dump(caplog):
+    sc = _Scraper({"PRC_GOOD": (S.PENDING, "")})
+    with caplog.at_level(logging.WARNING, logger="law_rader"):
+        retry_bills(sc, _sel(_q("PRC_BAD", url=BAD_URL), _q("PRC_GOOD")),
+                    source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME)
+    assert "PRC_BAD" in caplog.text
+    assert "요청을 만들지 못함" in caplog.text
+    assert "Traceback" not in caplog.text

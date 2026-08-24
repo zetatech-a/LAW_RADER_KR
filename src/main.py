@@ -36,6 +36,7 @@ from dataclasses import dataclass
 
 from .config import load_config
 from .detail_retry import (
+    NOTE_MAX_CHARS,
     DueSelection,
     RetryOutcome,
     load_queue,
@@ -56,10 +57,6 @@ log = logging.getLogger("law_rader")
 # 이보다 오래 큐에 남은 항목은 경고로 드러낸다. **삭제하지는 않는다** — 자동 만료는
 # 명시적 운영 정책이 정해지기 전까지 하지 않는다(알림 기회를 조용히 지우지 않는다).
 _QUEUE_WARN_AFTER_SEC = 7 * 24 * 3600
-
-# state 에 남기는 진단 note 의 길이 상한. 예외 문자열이 통째로 들어가 state 파일이
-# 부풀지 않도록 자른다(이 파일은 매 실행 저장소에 커밋된다).
-_NOTE_MAX_CHARS = 200
 
 
 @dataclass
@@ -356,6 +353,12 @@ def run(argv=None) -> int:
             return 1
         # 값이 채워져 있어도 앱 비밀번호 폐기·호스트 도달 불가면 발송은 실패한다.
         # 요약에 할당량을 쓰기 전에 실제로 로그인해 본다.
+        #
+        # 이 핸드셰이크에 걸린 시간은 의안 상세 시간예산에서 빼야 한다. 예산은 신규
+        # 의안의 첫 상세 요청에서 절대 마감시각으로 고정되는데, 여기서 오래 기다리면
+        # LIKMS 요청을 한 번도 하지 않았는데 예산이 소진되어 뒤따르는 큐 재조회가
+        # 요청 없이 전부 ERROR 로 떨어진다(시도 횟수만 소모하고 다음 간격까지 미뤄짐).
+        smtp_started = time.monotonic()
         try:
             verify_smtp_login(cfg.email)
         except Exception as e:  # noqa: BLE001
@@ -368,7 +371,14 @@ def run(argv=None) -> int:
                 total,
                 len(selection.selected),
             )
+            # 실패하면 이 실행은 큐 재조회를 하지 않고 끝나므로 예산을 손볼 이유가 없다.
             return 1
+        # 성공한 선점검의 대기시간만 마감시각을 뒤로 민다(예산 재시작이 아니다).
+        # 스크래퍼가 교체되어 이 API 가 없으면(테스트 대역 등) 조용히 건너뛴다 —
+        # 시간예산 보정이 없다고 실행을 실패시킬 이유는 없다.
+        exclude_idle = getattr(assembly_scraper, "exclude_detail_idle_time", None)
+        if callable(exclude_idle):
+            exclude_idle(time.monotonic() - smtp_started)
 
     # ── 큐 재조회 실행 ─────────────────────────────────────────────────────────
     retry = RetryOutcome()
@@ -552,7 +562,7 @@ def _record_retry_metadata(state: State, retry: RetryOutcome) -> bool:
 def _note(raw: str) -> str:
     """state 에 남길 진단 문구 — 한 줄로 접고 길이를 제한한다."""
     text = " ".join((raw or "").split())
-    return text[:_NOTE_MAX_CHARS]
+    return text[:NOTE_MAX_CHARS]
 
 
 def _log_llm_settings(llm) -> None:

@@ -38,6 +38,11 @@ from .state import State, parse_ts
 
 log = logging.getLogger("law_rader")
 
+# 진단 note 길이 상한. state 파일은 매 실행 저장소에 커밋되므로 예외 문자열이 통째로
+# 들어가 부풀지 않게 자른다. main 의 state 기록 경로도 이 값을 함께 쓴다(숫자를 두 곳에
+# 적어 두면 한쪽만 바뀌었을 때 실제 동작과 어긋난다).
+NOTE_MAX_CHARS = 200
+
 
 @dataclass(frozen=True)
 class QueuedBill:
@@ -163,6 +168,32 @@ def build_post(
     )
 
 
+def _fallback_post(item: QueuedBill, *, source_key: str, source_name: str) -> Post:
+    """스냅샷 재구성이 실패했을 때 쓰는 최소 Post.
+
+    HTTP 요청용이 아니라 **재조회 결과/state 메타데이터 기록용**이다. 저장된 url 을
+    그대로 담아 두어 진단에 쓰되, 이 Post 로 다시 enrich 를 부르지 않는다.
+    """
+    return Post(
+        source_key=source_key,
+        source_name=source_name,
+        post_id=item.bill_id,
+        title=item.title or item.bill_id,
+        url=item.url,
+        date=item.date,
+    )
+
+
+def _short_note(exc: BaseException) -> str:
+    """state·로그에 남길 짧은 진단 문구.
+
+    예외 타입과 한 줄로 접은 메시지만 남긴다 — 전체 HTML·토큰·쿠키·긴 traceback 은
+    남기지 않는다.
+    """
+    message = " ".join(str(exc).split())
+    return f"{type(exc).__name__}: {message}"[:NOTE_MAX_CHARS]
+
+
 @dataclass
 class RetryOutcome:
     """재조회 결과. 알림/state 확정은 호출자(main)가 트랜잭션에 맞춰 결정한다."""
@@ -222,26 +253,44 @@ def retry_bills(
     detail_url = getattr(scraper, "detail_url", _DETAIL) or _DETAIL
 
     for item in selection.selected:
-        post = build_post(
-            item,
-            source_key=source_key,
-            source_name=source_name,
-            detail_url_template=detail_url,
-        )
-        log.info(
-            "의안 상세 재조회 — bill=%s previous=%s attempt=%d",
-            item.bill_id,
-            item.status or "unknown",
-            item.attempts + 1,
-        )
+        # **Post 재구성부터 enrich 까지가 한 항목의 실패 경계다.**
+        # state 에 저장된 스냅샷이 손상돼 있으면(예: url="http://[" → urlparse 가
+        # ValueError) 재구성 단계에서 예외가 난다. 그 예외가 경계 밖에서 나면 손상된
+        # 항목 하나가 재조회 루프 전체를 중단시켜 뒤따르는 의안이 모두 조회되지 못한다
+        # — '한 의안의 실패가 다른 의안을 막지 않는다'는 원칙과 정면으로 어긋난다.
+        post = None
         try:
+            post = build_post(
+                item,
+                source_key=source_key,
+                source_name=source_name,
+                detail_url_template=detail_url,
+            )
+            log.info(
+                "의안 상세 재조회 — bill=%s previous=%s attempt=%d",
+                item.bill_id,
+                item.status or "unknown",
+                item.attempts + 1,
+            )
             scraper.enrich(post)
         except Exception as e:  # noqa: BLE001 — 한 건의 실패가 나머지를 막지 않는다
             # AssemblyBillScraper.enrich 는 원래 예외를 밖으로 내보내지 않지만,
-            # 계약이 바뀌어도 재조회 루프가 통째로 죽지 않도록 방어한다.
+            # 계약이 바뀌어도(그리고 재구성이 실패해도) 루프가 통째로 죽지 않게 한다.
+            if post is None:
+                # 재구성 자체가 실패했다 — 요청은 한 번도 보내지 않았다. 그래도 이 항목의
+                # 결과를 남겨야 state 의 진단 메타데이터가 갱신되고 큐에 남는다.
+                # 이 Post 는 **상태 기록용**이며 다시 enrich 에 넣지 않는다(손상된 URL 을
+                # 조용히 다른 주소로 바꿔 '복구 성공'처럼 보이게 하지 않는다 — fail-closed).
+                post = _fallback_post(item, source_key=source_key, source_name=source_name)
+                log.warning(
+                    "의안 상세 재조회 — 저장된 스냅샷으로 요청을 만들지 못함 bill=%s (%s)",
+                    item.bill_id,
+                    type(e).__name__,
+                )
+            else:
+                log.warning("의안 상세 재조회 실패 bill=%s: %s", item.bill_id, e)
             post.proposal_status = ProposalContentStatus.ERROR
-            post.proposal_note = f"{type(e).__name__}: {e}"
-            log.warning("의안 상세 재조회 실패 bill=%s: %s", item.bill_id, e)
+            post.proposal_note = _short_note(e)
 
         if post.proposal_status is ProposalContentStatus.AVAILABLE:
             log.info("의안 상세 재조회 — AVAILABLE 복구 bill=%s", item.bill_id)
