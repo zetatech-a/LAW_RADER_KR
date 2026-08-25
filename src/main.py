@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 import time
 
@@ -471,6 +472,32 @@ def run(argv=None) -> int:
     return 1 if collection_failed_globally else 0
 
 
+def _positive_int_or_zero(raw) -> int:
+    """설정값을 양의 정수로 해석한다. 정수가 아니면 0(= 무효)을 돌려준다.
+
+    int(raw) 에만 맡기면 안 되는 이유가 세 가지다.
+      - bool 은 int 의 하위형이라 int(True) == 1 이 '상한 1건'으로 통한다.
+      - int() 는 실수를 **절단**하므로 1.9 가 1 이 된다.
+      - int(float("inf")) 는 OverflowError 를 던지는데, 이는 ValueError 도
+        TypeError 도 아니라서 기존 핸들러를 그대로 통과해 실행을 죽인다.
+    이 상한은 '몇 건을 발송할지'를 정하고 초과분은 seen 으로 확정되므로, 잘못
+    해석된 값 하나가 곧바로 영구 알림 누락이 된다. 그래서 정수임이 분명할 때만
+    받아들인다(문자열 해석 범위는 넓히지 않는다 — 기존과 같이 int() 에 맡긴다).
+    """
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, float):
+        # 75.0 처럼 값이 실제로 정수인 실수는 기존처럼 받아들이고, 1.9·inf·NaN 은
+        # 거절한다. 절단은 하지 않는다.
+        if not math.isfinite(raw) or not raw.is_integer():
+            return 0
+        return int(raw)
+    try:
+        return int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _source_new_cap(src: SourceConfig, global_cap: int) -> int:
     """이 소스의 신규 상한. 소스별 max_new_per_run 이 있으면 그것, 없으면 전역값.
 
@@ -485,17 +512,7 @@ def _source_new_cap(src: SourceConfig, global_cap: int) -> int:
     raw = src.extra.get("max_new_per_run")
     if raw is None:
         return global_cap
-    if isinstance(raw, bool):
-        # bool 은 int 의 하위형이라 int(True) == 1 이 된다. 이대로 두면 YAML 의
-        # `max_new_per_run: true` 오타가 '상한 1건'으로 조용히 받아들여져, 신규가
-        # 여러 건인 날 1건만 발송되고 나머지 ID 는 기존 overflow 규칙에 따라 seen
-        # 처리된다 — 설정 오타 하나가 영구 알림 누락이 된다. 명시적으로 거절한다.
-        cap = 0
-    else:
-        try:
-            cap = int(raw)
-        except (TypeError, ValueError):
-            cap = 0
+    cap = _positive_int_or_zero(raw)
     if cap <= 0:
         log.warning(
             "[%s] max_new_per_run 값이 올바르지 않아 무시합니다(%r) — 전역 상한 %d 사용",

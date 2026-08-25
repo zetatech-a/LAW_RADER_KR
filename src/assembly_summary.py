@@ -139,28 +139,52 @@ class _BatchContext:
         return max(0.0, self.overall_deadline - time.monotonic())
 
 
-def _fair_share_sec(
-    overall_deadline: float | None, remaining_top_level_batches: int, now: float
+def _effective_window_sec(
+    overall_deadline: float | None,
+    remaining_top_level_batches: int,
+    request_timeout_sec: float,
+    now: float,
 ) -> float | None:
-    """남은 top-level 배치가 하나씩 나눠 가질 시간(초). 마감이 없으면 None."""
+    """이 배치의 요청을 실제로 제약할 시간(초). 전체 마감이 없으면 None.
+
+    **이 함수 하나가 유일한 계산 근거다.** '호출할 수 있는가'(_has_callable_window)와
+    '언제까지인가'(_allocate_batch_deadline)가 서로 다른 식을 쓰면 조용히 어긋난다 —
+    실제로 그랬다: 판정은 공정 몫만 보고, 배분은 요청 타임아웃까지 적용해서,
+    request_timeout_sec 이 _MIN_CALL_SEC 보다 작으면 바깥 루프가 모든 배치를 차례로
+    통과시키면서 정작 어느 배치도 호출하지 못했다.
+
+    공정 몫(남은 시간 ÷ 남은 배치 수)과 요청 타임아웃 중 **작은 쪽**이 실제 window 다.
+    request_timeout_sec 이 0 이하면 요청 단위 제한이 없다는 뜻이라 공정 몫만 쓴다.
+    """
     if overall_deadline is None:
         return None
-    return max(0.0, overall_deadline - now) / max(1, remaining_top_level_batches)
+    remaining = max(0.0, overall_deadline - now)
+    fair_share = remaining / max(1, remaining_top_level_batches)
+    if request_timeout_sec > 0:
+        return min(request_timeout_sec, fair_share)
+    return fair_share
 
 
 def _has_callable_window(
-    overall_deadline: float | None, remaining_top_level_batches: int, now: float
+    overall_deadline: float | None,
+    remaining_top_level_batches: int,
+    request_timeout_sec: float,
+    now: float,
 ) -> bool:
-    """남은 배치에 공정 분배했을 때 한 번의 호출을 담을 수 있는가.
+    """이 배치가 실제로 호출을 시도할 만한 window 를 갖는가.
 
     False 면 **남은 top-level 배치 전체**를 포기해야 한다. 첫 배치만 건너뛰고 다음으로
     넘어가면, 배치 수가 줄어 몫이 커진 뒤 배치가 앞 배치의 시간을 가져가는 불공정한
     동작이 된다(앞 배치는 호출 기회를 한 번도 받지 못한 채 발췌로 떨어진다).
+    request_timeout_sec 이 원인일 때는 남은 배치도 사정이 같으므로 역시 함께 멈춘다.
 
-    마감이 없으면(budget_sec=0 = 무제한) 이 판정을 적용하지 않는다.
+    마감이 없으면(budget_sec=0 = 무제한) 이 판정을 적용하지 않는다 — 그때도 요청
+    타임아웃은 여전히 요청 단위 제약으로 남는다(둘은 서로를 대체하지 않는다).
     """
-    share = _fair_share_sec(overall_deadline, remaining_top_level_batches, now)
-    return share is None or share >= _MIN_CALL_SEC
+    window = _effective_window_sec(
+        overall_deadline, remaining_top_level_batches, request_timeout_sec, now
+    )
+    return window is None or window >= _MIN_CALL_SEC
 
 
 def _allocate_batch_deadline(
@@ -173,7 +197,7 @@ def _allocate_batch_deadline(
 
     하나의 절대 마감만 공유하면 첫 배치가 뒤 배치의 시간을 전부 먹는다(실제 장애:
     첫 25건이 타임아웃을 반복하며 예산을 소진해 뒤 배치가 몇 초짜리 window 로 시작).
-    남은 시간을 남은 배치 수로 나눈 공정 몫과 요청 타임아웃 중 **작은 쪽**을 준다.
+    window 계산은 _effective_window_sec 하나에 맡긴다(판정과 같은 식을 쓰기 위함).
 
       overall=300, 3배치 → 300/3=100 → min(90,100)=90초
       첫 배치가 90초를 다 써도 → 210/2=105 → 다시 90초
@@ -184,13 +208,13 @@ def _allocate_batch_deadline(
     if overall_deadline is None:
         return None
     now = time.monotonic() if now is None else now
-    remaining = overall_deadline - now
-    if remaining <= 0:
+    if overall_deadline - now <= 0:
         return overall_deadline
-    fair_share = remaining / max(1, remaining_top_level_batches)
-    window = min(request_timeout_sec, fair_share) if request_timeout_sec > 0 else fair_share
+    window = _effective_window_sec(
+        overall_deadline, remaining_top_level_batches, request_timeout_sec, now
+    )
     # overall 은 최종 안전 상한이다 — 어떤 배분도 이보다 뒤로 갈 수 없다.
-    return min(now + window, overall_deadline)
+    return min(now + (window or 0.0), overall_deadline)
 
 
 def _request_timeout_sec(summarizer: "Summarizer", cfg: "AssemblyBatchConfig") -> float:
@@ -251,15 +275,27 @@ def summarize_assembly_bills(
         # 시계는 이 배치를 판정하는 동안 한 번만 읽는다 — 배분과 검사가 서로 다른
         # now 를 쓰면 경계값(정확히 2.000초)에서 결과가 흔들린다.
         now = time.monotonic()
-        if not _has_callable_window(overall_deadline, remaining_batches, now):
-            # 남은 배치에 **공정하게** 나눠도 한 번의 호출을 담지 못한다. 여기서
-            # 멈추지 않고 진행하면 앞 배치는 호출 기회를 못 받은 채 버려지고, 배치가
-            # 줄어 몫이 커진 뒤 배치만 호출된다 — 앞 배치의 몫을 뒤가 가져가는 셈이다.
+        if not _has_callable_window(
+            overall_deadline, remaining_batches, request_timeout, now
+        ):
+            # 이 배치가 실제로 쓸 수 있는 window 가 한 번의 호출도 담지 못한다.
+            # 여기서 멈추지 않고 진행하면 앞 배치는 호출 기회를 못 받은 채 버려지고,
+            # 배치가 줄어 몫이 커진 뒤 배치만 호출된다 — 앞 배치의 몫을 뒤가 가져간다.
+            #
+            # 원인이 남은 예산일 수도, 요청 타임아웃 설정일 수도 있으므로 둘 다 적어
+            # 로그만으로 어느 쪽인지 판단할 수 있게 한다.
             log.warning(
-                "의안 요약 시간예산(%.0f초) 소진 — 남은 %d개 배치는 호출 없이 발췌로 "
-                "발송됩니다.",
-                cfg.budget_sec,
+                "의안 배치의 실제 호출 window(%.1f초)가 최소 호출시간(%.1f초)에 못 미쳐 "
+                "남은 %d개 배치는 호출 없이 발췌로 발송됩니다 "
+                "— 남은 예산 %.1f초 / 요청 타임아웃 %.0f초.",
+                _effective_window_sec(
+                    overall_deadline, remaining_batches, request_timeout, now
+                )
+                or 0.0,
+                _MIN_CALL_SEC,
                 remaining_batches,
+                max(0.0, overall_deadline - now),
+                request_timeout,
             )
             break
         # 이 배치의 몫을 여기서 확정한다. 앞 배치가 느렸어도 뒤 배치가 몇 초짜리

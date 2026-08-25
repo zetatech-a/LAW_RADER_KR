@@ -1146,3 +1146,159 @@ def test_FAIR8_shared_envelope_shrinks_windows_but_keeps_them_callable(clock):
     assert calls.windows[0] == pytest.approx(40.0)         # 120 / 3
     # 어떤 배치도 공유 잔여(120초)를 넘겨 받지 않는다
     assert all(w <= 120.0 for w in calls.windows), calls.windows
+
+
+# ==========================================================================
+# PR #26 Codex follow-up #5 — 소스별 cap 의 분수·비유한 값 거절
+#
+# int() 는 실수를 절단하므로 `max_new_per_run: 1.9` 가 '상한 1건'이 된다. 초과분은
+# 기존 overflow 규칙에 따라 seen 으로 확정되므로 오타 하나가 영구 알림 누락이 된다.
+# int(float("inf")) 는 OverflowError 인데 기존 핸들러가 잡지 않아 실행이 죽었다.
+# ==========================================================================
+@pytest.mark.parametrize("value", [1.9, 75.5, 0.5, -75.5])
+def test_C24_fractional_source_cap_falls_back_to_the_global_cap(value):
+    assert _source_new_cap(_src(value), 50) == 50
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_C25_non_finite_source_cap_falls_back_without_raising(value):
+    assert _source_new_cap(_src(value), 50) == 50
+
+
+def test_C26_integral_float_source_cap_stays_compatible():
+    """75.0 처럼 값이 실제로 정수인 실수는 기존처럼 받아들인다(절단이 아니다)."""
+    assert _source_new_cap(_src(75.0), 50) == 75
+    assert _source_new_cap(_src(60.0), 50) == 60
+
+
+def test_C27_string_parsing_is_not_broadened():
+    """숫자 문자열 호환은 유지하되 "75.0" 을 새로 받아들이지는 않는다."""
+    assert _source_new_cap(_src("75"), 50) == 75
+    assert _source_new_cap(_src("75.0"), 50) == 50
+
+
+def test_C28_invalid_fractional_cap_logs_a_warning(caplog):
+    caplog.set_level(logging.WARNING, logger="src.main")
+    assert _source_new_cap(_src(1.9), 50) == 50
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("max_new_per_run" in m for m in warnings)
+
+
+# ==========================================================================
+# PR #26 Codex follow-up #5 — 유효 window 로 판정한 뒤에만 배치로 진입한다
+#
+# 판정(_has_callable_window)은 공정 몫만 보고, 실제 window 는 요청 타임아웃까지
+# 적용됐다. request_timeout_sec 이 _MIN_CALL_SEC 보다 작으면 바깥 루프가 모든
+# 배치를 차례로 통과시키면서 정작 어느 배치도 호출하지 못했다.
+#
+# **API 호출 0회만 확인하는 테스트로는 부족하다** — 버그 코드도 0회였다(_run 에
+# 들어간 뒤 내부에서 스킵). 그래서 _run 진입 자체를 관찰한다.
+# ==========================================================================
+@pytest.fixture
+def run_spy(monkeypatch):
+    """_run 이 몇 번째 배치까지 실제로 진입했는지 기록한다."""
+    seen: list[int] = []
+    original = asm._run
+
+    def _spy(summarizer, items, deadline, cfg, ctx=None, **kw):
+        seen.append(len(items))
+        return original(summarizer, items, deadline, cfg, ctx, **kw)
+
+    monkeypatch.setattr(asm, "_run", _spy)
+    return seen
+
+
+def _batch_log_lines(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("Assembly AI batch —")
+    ]
+
+
+def test_EFF1_request_timeout_below_min_call_stops_before_entering_any_batch(
+    clock, caplog, run_spy
+):
+    caplog.set_level(logging.INFO, logger="src.assembly_summary")
+    ok, calls = _run_batches(
+        [_bill(i) for i in range(75)],
+        _batch_cfg(budget_sec=300.0, request_timeout_sec=1.0),
+    )
+    assert run_spy == []                     # 첫 배치조차 _run 에 들어가지 않는다
+    assert _batch_log_lines(caplog) == []    # per-batch 로그도 남지 않는다
+    assert calls.calls == []                 # Gemini 호출 0회
+    assert ok == 0
+    stops = [r.getMessage() for r in caplog.records if "호출 없이 발췌로" in r.getMessage()]
+    assert len(stops) == 1                   # 한 번의 중단 결정으로 끝난다
+    assert "요청 타임아웃" in stops[0]        # 원인을 로그만으로 구분할 수 있다
+
+
+def test_EFF2_request_timeout_exactly_at_min_call_is_callable(clock, run_spy):
+    ok, calls = _run_batches(
+        [_bill(i) for i in range(75)],
+        _batch_cfg(budget_sec=300.0, request_timeout_sec=_MIN_CALL_SEC),
+    )
+    assert len(run_spy) == 3                 # 경계는 포함이다
+    assert len(calls.calls) == 3
+    assert calls.windows == [pytest.approx(_MIN_CALL_SEC)] * 3
+    assert ok == 75
+
+
+def test_EFF3_fair_share_below_min_call_keeps_the_followup3_behavior(clock, run_spy):
+    """요청 타임아웃이 넉넉해도 공정 몫이 모자라면 기존대로 전체를 멈춘다."""
+    _run_batches([_bill(i) for i in range(75)], _batch_cfg(budget_sec=5.0))
+    assert run_spy == []
+
+
+def test_EFF4_fair_share_exactly_at_min_call_is_callable(clock, run_spy):
+    _, calls = _run_batches([_bill(i) for i in range(75)], _batch_cfg(budget_sec=6.0))
+    assert len(run_spy) == 3
+    assert calls.windows[0] == pytest.approx(_MIN_CALL_SEC)
+
+
+def test_EFF5_production_allocation_is_unchanged(clock, run_spy):
+    _, calls = _run_batches([_bill(i) for i in range(75)], _batch_cfg())
+    assert len(run_spy) == 3
+    assert [round(w) for w in calls.windows] == [90, 90, 90]
+
+
+def test_EFF6_unlimited_budget_keeps_request_timeout_as_request_level_only(
+    clock, run_spy
+):
+    """budget_sec=0 은 '전체 마감 없음'이다 — 요청 타임아웃이 이를 대신하지 않는다."""
+    _, calls = _run_batches(
+        [_bill(i) for i in range(75)],
+        _batch_cfg(budget_sec=0.0, request_timeout_sec=1.0),
+    )
+    assert len(run_spy) == 3                 # 전체 마감이 없으므로 판정하지 않는다
+    assert len(calls.calls) == 3
+    assert all(w is None for w in calls.windows)
+    # 요청 타임아웃 자체는 호출별 제약으로 그대로 전달된다
+    assert all(kw["request_timeout_sec"] == 1.0 for kw in calls.kwargs)
+
+
+def test_EFF7_no_window_is_not_reported_as_a_call_failure(clock):
+    """호출 window 부족은 HTTP/서비스 실패가 아니다 — 브레이커 분류를 오염시키지 않는다."""
+    ok, calls = _run_batches(
+        [_bill(i) for i in range(75)],
+        _batch_cfg(budget_sec=300.0, request_timeout_sec=1.0),
+    )
+    assert ok == 0 and calls.calls == []
+    # 예외가 새지 않고, 요약 없이 발췌로 넘어간 것뿐이다
+    assert all(p.summary == [] for p in calls.posts)
+
+
+def test_EFF8_effective_window_helper_uses_one_calculation():
+    """판정과 배분이 같은 식을 쓰는지 직접 확인한다(두 계산이 다시 어긋나지 않도록)."""
+    now = 1000.0
+    deadline = now + 300.0
+    for timeout in (1.0, 2.0, 90.0, 0.0):
+        window = asm._effective_window_sec(deadline, 3, timeout, now)
+        allocated = asm._allocate_batch_deadline(deadline, 3, timeout, now)
+        assert allocated - now == pytest.approx(window)
+        assert asm._has_callable_window(deadline, 3, timeout, now) is (
+            window >= _MIN_CALL_SEC
+        )
+    # 전체 마감이 없으면 판정 자체를 하지 않는다
+    assert asm._effective_window_sec(None, 3, 1.0, now) is None
+    assert asm._has_callable_window(None, 3, 1.0, now) is True
