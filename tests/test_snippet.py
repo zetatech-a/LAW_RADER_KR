@@ -895,3 +895,82 @@ def test_single_syllable_sentence_endings_are_not_treated_as_labels():
     """표식 목록을 한글 한 글자 전체로 넓히면 멀쩡한 문장이 합쳐진다."""
     lines = build_assembly_fallback_lines("그러하다. 이에 개정하려는 것임.")
     assert lines == ["그러하다.", "이에 개정하려는 것임."]
+
+
+# --- 구체적 개정 문장을 배경 설명보다 우선한다 (PR #26 Codex follow-up #4) ---
+#
+# 키워드를 한 tuple 에 섞어 두고 '먼저 걸리는 문장'을 고르면, 앞쪽 배경 문장의
+# 약한 단서("규정"·"필요")가 뒤의 구체적 개정 문장("신설"·"개정")을 가린다.
+# tuple 순서를 바꿔도 소용없다 — 앞 문장에서 이미 any() 가 참이 되기 때문이다.
+_OPENER = "이 법률안은 전자금융거래의 안전성 확보를 목적으로 함."
+_CLOSER = "부칙에서 시행일을 공포 후 6개월로 정함."
+
+
+def test_strong_amendment_wins_over_earlier_generic_context():
+    lines = build_assembly_fallback_lines(
+        _assembly_body(
+            _OPENER,
+            "현행법은 신고 절차를 규정하고 있음.",        # weak '규정' (앞쪽)
+            "제도 개선이 필요하다는 의견이 있음.",        # weak '필요'
+            "신고 의무를 신설함.",                        # strong '신설'
+            _CLOSER,
+        )
+    )
+    assert "신고 의무를 신설함." in lines
+    assert "현행법은 신고 절차를 규정하고 있음." not in lines
+    assert lines[0] == _OPENER and lines[-1] == _CLOSER   # 첫/마지막 역할은 그대로
+
+
+def test_medium_keyword_is_used_when_no_strong_one_exists():
+    middle = "이에 신고 절차를 조정하도록 하려는 것임."
+    lines = build_assembly_fallback_lines(
+        _assembly_body(_OPENER, "관련 통계가 증가하고 있음.", middle, _CLOSER)
+    )
+    assert middle in lines
+
+
+def test_weak_keyword_still_serves_as_a_last_resort():
+    """weak tier 를 지워 버리면 단서가 약한 의안에서 가운데 구간을 잃는다."""
+    middle = "현행 절차를 규정하고 있음."
+    lines = build_assembly_fallback_lines(
+        _assembly_body(_OPENER, middle, "관련 통계가 증가하고 있음.", _CLOSER)
+    )
+    assert middle in lines
+
+
+def test_no_keyword_falls_back_to_the_middle_sentence():
+    lines = build_assembly_fallback_lines(
+        _assembly_body(_OPENER, "둘째 문장임.", "셋째 문장임.", _CLOSER)
+    )
+    assert len(lines) == 3
+    assert lines[0] == _OPENER and lines[-1] == _CLOSER
+    assert lines[1] in ("둘째 문장임.", "셋째 문장임.")
+
+
+def test_earliest_sentence_wins_within_the_same_tier():
+    """같은 단계 안에서는 원문 순서를 따른다("신설 > 개정" 같은 세부 순위 없음)."""
+    lines = build_assembly_fallback_lines(
+        _assembly_body(
+            _OPENER,
+            "등록 제도를 개정함.",       # strong, 먼저
+            "관련 통계가 증가하고 있음.",
+            "별도 의무를 신설함.",       # strong, 나중
+            _CLOSER,
+        )
+    )
+    assert "등록 제도를 개정함." in lines
+    assert "별도 의무를 신설함." not in lines
+
+
+def test_strong_keyword_is_detected_through_an_enumeration_label():
+    """지난 표식 병합 수정과 함께 동작해야 한다 — 라벨이 붙어도 '신설'을 찾는다."""
+    lines = build_assembly_fallback_lines(
+        _assembly_body(
+            "가. 현행 제도를 규정하고 있음.",
+            "나. 개선이 필요하다는 의견이 있음.",
+            "다. 신고 의무를 신설함.",
+            "라. 이에 제도를 정비하려는 것임.",
+        )
+    )
+    assert "다. 신고 의무를 신설함." in lines
+    assert all(line not in _BARE_LABELS for line in lines)

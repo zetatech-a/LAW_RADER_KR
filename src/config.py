@@ -1,6 +1,7 @@
 """config.yaml + 환경변수 로딩."""
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -255,8 +256,12 @@ def _as_optional_positive_float(raw, key: str) -> float | None:
         value = float(raw)
     except (TypeError, ValueError):
         raise ValueError(f"{key} 는 숫자여야 합니다 — 받은 값: {raw!r}") from None
-    if value != value or value <= 0:   # NaN 또는 0 이하
-        raise ValueError(f"{key} 는 0보다 커야 합니다 — 받은 값: {raw!r}")
+    # math.isfinite 로 NaN 과 ±무한대를 한 번에 거른다. 무한대는 범위 검사(> 0)를
+    # 통과해 버리는데, 이 설정들은 애초에 실행 시간을 **제한하려고** 존재한다 —
+    # `request_timeout_sec: .inf` 는 Thread.join(timeout=inf) 에서 OverflowError 가
+    # 되어 의안 요약이 통째로 발췌로 떨어진다.
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{key} 는 0보다 큰 유한한 숫자여야 합니다 — 받은 값: {raw!r}")
     return value
 
 
@@ -269,8 +274,11 @@ def _as_non_negative_float(raw, key: str, default: float) -> float:
         value = float(raw)
     except (TypeError, ValueError):
         raise ValueError(f"{key} 는 숫자여야 합니다 — 받은 값: {raw!r}") from None
-    if value != value or value < 0:
-        raise ValueError(f"{key} 는 0 이상이어야 합니다 — 받은 값: {raw!r}")
+    # NaN·±무한대는 여기서도 거절한다. 무한대 예산은 '상한 없음'이 되어 이 설정이
+    # 지키려는 시간 guard(공유 LLM envelope·의안 단계 예산)를 조용히 없앤다.
+    # '무제한'을 원하면 기존 의미대로 0 을 쓴다.
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{key} 는 0 이상의 유한한 숫자여야 합니다 — 받은 값: {raw!r}")
     return value
 
 

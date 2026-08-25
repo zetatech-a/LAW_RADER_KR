@@ -567,9 +567,25 @@ _ENUMERATION_LABEL = re.compile(r"^(?:[가나다라마바사아자차카타파�
 # 입법행위를 나타낼 가능성이 높은 표현. 의안 본문에서 '현행 제도 설명'과 '무엇을
 # 바꾸는가'를 가르는 최소한의 단서만 둔다 — 목록을 키우면 첫 문장에서 바로 걸려
 # 구간 선택이 무의미해진다.
-_AMENDMENT_KEYWORDS = (
-    "이에", "따라서", "개정", "신설", "삭제", "하도록", "하려는",
-    "필요", "주요내용", "규정", "도입", "확대", "제한", "의무",
+#
+# 표현마다 '실제로 무엇을 바꾸는가'를 말해 주는 정도가 다르므로 세 단계로 나눈다.
+# 한 tuple 에 섞어 두고 **먼저 걸리는 문장**을 고르면, 앞쪽 배경 문장의 약한 단서
+# ("현행법은 … 규정하고 있음")가 뒤의 구체적 개정 문장("신고 의무를 신설함")을
+# 가린다. tuple 안의 순서를 바꿔도 소용없다 — 앞 문장에서 이미 any() 가 참이 된다.
+# 그래서 문장 단위로 **어느 단계에 걸리는지**를 비교한다.
+#
+# 형태소 분석이나 점수 모델을 들이지 않는다. 이 정도 우선순위면 충분하다.
+_STRONG_AMENDMENT_KEYWORDS = ("개정", "신설", "삭제", "도입", "확대", "제한")
+_MEDIUM_AMENDMENT_KEYWORDS = ("이에", "따라서", "하도록", "하려는", "주요내용", "의무")
+# 배경 설명에도 흔하지만, 아무 단서도 없는 것보다는 낫다(마지막 순위로 남긴다).
+_WEAK_AMENDMENT_KEYWORDS = ("규정", "필요")
+
+# 강한 쪽부터 본다. 같은 단계 안에서는 원문상 먼저 나온 문장을 고른다
+# (같은 단계에서 "신설 > 개정" 같은 세부 순위는 만들지 않는다).
+_AMENDMENT_TIERS = (
+    _STRONG_AMENDMENT_KEYWORDS,
+    _MEDIUM_AMENDMENT_KEYWORDS,
+    _WEAK_AMENDMENT_KEYWORDS,
 )
 
 # 문장 분리가 통째로 실패했을 때(마침표 없는 한 덩어리) 쓰는 머리/꼬리 길이.
@@ -638,26 +654,36 @@ def _giant_sentence_lines(text: str, max_total_chars: int) -> list[str]:
     return [f"{head} {ELLIPSIS}", f"{marker}{tail}"]
 
 
+def _amendment_index(sentences: list[str], candidates) -> int | None:
+    """가장 구체적인 입법행위 문장의 위치. 단서가 하나도 없으면 None.
+
+    **가장 강한 단계를 먼저** 보고, 그 단계 안에서 원문상 가장 이른 문장을 고른다.
+    "먼저 걸리는 문장"이 아니다 — 그러면 앞쪽 배경 문장의 "규정"·"필요" 같은 약한
+    단서가 뒤의 "신설"·"개정" 문장을 가려, 발췌에서 정작 무엇을 바꾸는지가 빠진다.
+    """
+    for tier in _AMENDMENT_TIERS:
+        hit = next(
+            (i for i in candidates if any(word in sentences[i] for word in tier)),
+            None,
+        )
+        if hit is not None:
+            return hit
+    return None
+
+
 def _pick_assembly_indexes(sentences: list[str], max_lines: int) -> list[int]:
     """싣을 문장의 위치를 고른다(원문 순서 보존, 중복 제거).
 
     1) 첫 의미 문장          — 배경 / 현행 제도
-    2) 입법행위 문장         — 없으면 가운데 문장(서로 다른 구간을 확보하기 위함)
+    2) 입법행위 문장         — 가장 구체적인 것(_amendment_index). 단서가 없으면
+                               가운데 문장(서로 다른 구간을 확보하기 위함)
     3) 마지막 의미 문장      — "이에 … 하려는 것임" 계열 결론
 
     세 역할이 같은 문장을 가리키면 그만큼 줄 수가 줄어든다(억지로 채우지 않는다).
     """
     last = len(sentences) - 1
     picks = {0, last}
-    middle = range(1, last)
-    keyword_at = next(
-        (
-            i
-            for i in middle
-            if any(word in sentences[i] for word in _AMENDMENT_KEYWORDS)
-        ),
-        None,
-    )
+    keyword_at = _amendment_index(sentences, range(1, last))
     if keyword_at is None and last >= 2:
         keyword_at = last // 2
     if keyword_at is not None:

@@ -347,6 +347,67 @@ def test_C16_numeric_string_compatibility_is_unchanged(tmp_path, key, value, exp
     assert getattr(load_config(path).llm.assembly_batch, key) == expected
 
 
+# --- 무한대 숫자 설정 거절 (PR #26 Codex follow-up #4) ----------------------
+#
+# +inf 는 범위 검사(> 0 / >= 0)를 통과한다. 그런데 이 설정들은 실행 시간을
+# **제한하려고** 존재한다 — 무한대 예산은 guard 를 조용히 없애고, 무한대
+# request_timeout_sec 은 Thread.join(timeout=inf) 에서 OverflowError 가 된다.
+_INF, _NINF, _NAN = float("inf"), float("-inf"), float("nan")
+
+
+@pytest.mark.parametrize("value", [_INF, "inf", _NINF, "-inf", _NAN, "nan"])
+def test_C17toC22_non_finite_request_timeout_is_rejected(tmp_path, value):
+    path = _yaml_config(
+        tmp_path,
+        lambda raw: raw["llm"]["assembly_batch"].__setitem__("request_timeout_sec", value),
+    )
+    with pytest.raises(ValueError) as e:
+        load_config(path)
+    assert "request_timeout_sec" in str(e.value)
+
+
+@pytest.mark.parametrize("value", [_INF, "inf", _NINF, _NAN])
+def test_C19_non_finite_assembly_budget_is_rejected(tmp_path, value):
+    path = _yaml_config(
+        tmp_path, lambda raw: raw["llm"]["assembly_batch"].__setitem__("budget_sec", value)
+    )
+    with pytest.raises(ValueError) as e:
+        load_config(path)
+    assert "budget_sec" in str(e.value)
+
+
+@pytest.mark.parametrize("value", [_INF, "inf", _NINF, _NAN])
+def test_C20_non_finite_shared_budget_is_rejected(tmp_path, value):
+    """무한대 공유 예산은 Phase 3 의 shared LLM envelope 를 통째로 무효화한다."""
+    path = _yaml_config(tmp_path, lambda raw: raw["llm"].__setitem__("total_budget_sec", value))
+    with pytest.raises(ValueError) as e:
+        load_config(path)
+    assert "total_budget_sec" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "key,value,expected",
+    [
+        ("request_timeout_sec", "90", 90.0),
+        ("budget_sec", "300", 300.0),
+        ("budget_sec", 0, 0.0),            # 0 = 무제한이라는 기존 의미 유지
+    ],
+)
+def test_C23_finite_values_are_still_accepted(tmp_path, key, value, expected):
+    path = _yaml_config(
+        tmp_path, lambda raw: raw["llm"]["assembly_batch"].__setitem__(key, value)
+    )
+    assert getattr(load_config(path).llm.assembly_batch, key) == expected
+
+
+def test_C23b_shared_budget_string_and_zero_are_still_accepted(tmp_path):
+    for value, expected in (("360", 360.0), (0, 0.0)):
+        path = _yaml_config(
+            tmp_path, lambda raw: raw["llm"].__setitem__("total_budget_sec", value)
+        )
+        assert load_config(path).llm.total_budget_sec == expected
+
+
 def test_C6_global_new_cap_is_unchanged():
     assert load_config("config.yaml").fetch.max_new_per_source == 50
 
