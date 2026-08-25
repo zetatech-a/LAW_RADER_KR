@@ -150,6 +150,18 @@ class LLMConfig:
     max_consecutive_failures: int = 3
     # 요약 단계 전체 시간예산(초, 0=무제한). 초과하면 남은 글은 원문 발췌로 넘긴다.
     budget_sec: float = 240.0
+    # 일반 + 의안 Gemini 단계가 **한 실행에서 합쳐** 쓸 수 있는 상위 시간 상한(초).
+    #
+    # 위 budget_sec(일반)과 assembly_batch.budget_sec(의안)은 각 단계가 단독으로
+    # 돌 때 필요한 ceiling이라 낮출 수 없다. 그런데 두 단계는 연달아 실행되므로
+    # 단순 합(240+300=540)이 그대로 최악값이 되고, 의안 상세수집 예산까지 더하면
+    # 15분 monitor 주기를 통째로 먹는다(워크플로는 cancel-in-progress:false 라
+    # 다음 실행이 큐에 쌓인다). 그래서 두 단계가 **같은 절대 마감**을 공유하도록
+    # 상위 envelope 를 씌운다.
+    #
+    # 0 = 비활성(공유 상한 없음) — 새 키를 생략한 기존 custom config 는 예전
+    # 동작 그대로다. 실제 단계 마감은 min(단계 마감, 공유 마감) 이다.
+    total_budget_sec: float = 0.0
     # model 이 사용 불가(404/NOT_FOUND)일 때 이 순서로 넘어갈 대체 모델들.
     fallback_models: list[str] = field(default_factory=list)
     api_key: str = ""
@@ -372,6 +384,10 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         retry_backoff_sec=float(lm.get("retry_backoff_sec", 5)),
         max_consecutive_failures=int(lm.get("max_consecutive_failures", 3)),
         budget_sec=float(lm.get("budget_sec", 240)),
+        # 새 키라 Phase 3 의 strict helper 를 쓴다(0 허용, true/false 는 거절).
+        total_budget_sec=_as_non_negative_float(
+            lm.get("total_budget_sec"), "llm.total_budget_sec", 0.0
+        ),
         api_key=_env("GEMINI_API_KEY"),
         assembly_batch=assembly_batch,
     )

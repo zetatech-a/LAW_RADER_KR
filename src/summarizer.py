@@ -46,6 +46,16 @@ _MIN_CALL_SEC = 2.0
 _CONNECT_TIMEOUT_CAP = 8.0
 
 
+def _earlier_deadline(*deadlines: float | None) -> float | None:
+    """마감시각 여럿 중 가장 이른 것. 전부 None(무제한)이면 None.
+
+    단계별 마감과 공유 마감을 합칠 때 쓴다 — 어느 한쪽이 없어도 나머지가 그대로
+    적용되어야 하므로 min() 을 직접 부르지 않는다.
+    """
+    real = [d for d in deadlines if d is not None]
+    return min(real) if real else None
+
+
 def _split_timeout(budget: float) -> tuple[float, float]:
     """예산을 (연결, 응답대기) 로 쪼갠다.
 
@@ -479,7 +489,16 @@ class Summarizer:
         # 실행의 401 이 이번 실행의 정상 키까지 막는다(sticky terminal 금지).
         self._terminal_failure = None
 
-        ok = self._summarize_general(posts_by_source)
+        # 일반·의안 두 단계가 **함께** 쓸 상위 마감. 여기서 딱 한 번 만들고 두 단계가
+        # 같은 절대 시각을 공유한다 — 단계마다 다시 만들면(now+360 을 두 번) 공유
+        # 예산의 의미가 사라지고 최악값이 다시 두 배가 된다.
+        shared_deadline = (
+            time.monotonic() + self.cfg.total_budget_sec
+            if self.cfg.total_budget_sec > 0
+            else None
+        )
+
+        ok = self._summarize_general(posts_by_source, shared_deadline)
 
         # 일반 경로에서 '다시 불러도 같은 결과'인 실패가 확정됐다면, 같은 자격증명·
         # 같은 설정으로 도는 의안 배치도 부를 이유가 없다. 남은 의안은 제안이유
@@ -495,16 +514,33 @@ class Summarizer:
             )
             return ok
 
+        # 일반 단계가 공유 예산을 거의 다 썼다면 의안 호출을 억지로 시작하지 않는다.
+        # 연결조차 못 맺고 끝날 호출로 남은 시간을 태우느니 발췌로 보내는 편이 낫다.
+        # 시간예산 소진은 실행 실패가 아니다 — 메일은 그대로 나간다.
+        if shared_deadline is not None and (
+            shared_deadline - time.monotonic() < _MIN_CALL_SEC
+        ):
+            log.warning(
+                "공유 LLM 시간예산(%.0f초) 소진 — 의안 배치 요약을 건너뜁니다. "
+                "의안은 제안이유 발췌로 발송됩니다.",
+                self.cfg.total_budget_sec,
+            )
+            return ok
+
         try:
             # 지연 임포트: assembly_summary 는 이 모듈을 임포트한다(순환 방지).
             from .assembly_summary import summarize_assembly_bills
 
-            ok += summarize_assembly_bills(self, posts_by_source)
+            ok += summarize_assembly_bills(self, posts_by_source, shared_deadline)
         except Exception as e:  # noqa: BLE001 — 의안 요약 실패가 메일을 막지 않는다
             log.warning("의안 배치 요약 단계 실패 — 발췌로 발송합니다: %s", e)
         return ok
 
-    def _summarize_general(self, posts_by_source: dict[str, list[Post]]) -> int:
+    def _summarize_general(
+        self,
+        posts_by_source: dict[str, list[Post]],
+        shared_deadline: float | None = None,
+    ) -> int:
         """일반 게시물 전용 경로 — 기존 동작 그대로 1건당 1회 요약한다.
 
         의안(assembly_bill)은 여기서 반드시 제외한다. 배치 경로가 따로 처리하므로
@@ -543,8 +579,11 @@ class Summarizer:
         # 서킷 브레이커: Gemini 가 통째로 죽었을 때 모든 글에 같은 실패를 반복하면
         # (타임아웃 × 재시도 × 건수) 메일이 크게 지연된다. 연속 실패가 쌓이거나 총
         # 시간예산을 넘기면 남은 글은 호출 없이 원문 발췌로 넘긴다.
-        deadline = (
-            time.monotonic() + self.cfg.budget_sec if self.cfg.budget_sec > 0 else None
+        # 이 단계의 마감과 공유 마감 중 **이른 쪽**이 실제 마감이다. 공유 마감이
+        # 없으면(total_budget_sec=0) 기존 동작 그대로다.
+        deadline = _earlier_deadline(
+            time.monotonic() + self.cfg.budget_sec if self.cfg.budget_sec > 0 else None,
+            shared_deadline,
         )
         breaker = self.cfg.max_consecutive_failures
 

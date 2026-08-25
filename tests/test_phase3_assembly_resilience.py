@@ -33,9 +33,11 @@ from src.main import _source_new_cap
 from src.models import ASSEMBLY_SOURCE_KEY, Post
 from src.summarizer import (
     _CONNECT_TIMEOUT_CAP,
+    _MIN_CALL_SEC,
     _MAX_OUTPUT_TOKENS_THINKING,
     _SCHEMA,
     LLMErrorKind,
+    LLMCallError,
     RequestDeadlineExceeded,
     Summarizer,
     classify_error,
@@ -869,3 +871,217 @@ def test_S18_404_fallback_to_an_unsupported_model_sends_no_thinking_level():
     }
     assert "thinkingConfig" not in s.session.sent[1]["generationConfig"]
     assert s._thinking_unsupported == set()               # 404 는 thinking 문제가 아니다
+
+
+# ==========================================================================
+# PR #26 Codex follow-up #3 — 공유 LLM 시간예산 (llm.total_budget_sec)
+#
+# 일반(240)과 의안(300)은 연달아 실행되므로 단순 합 540초가 최악값이 된다. 의안
+# 상세수집 360초까지 더하면 15분 monitor 주기를 통째로 먹고(워크플로는
+# cancel-in-progress:false 라) 다음 실행이 큐에 쌓인다. 두 단계가 **같은 절대
+# 마감**을 공유하게 해서 합계를 360초에서 자른다.
+# ==========================================================================
+def _general_post(i: int) -> Post:
+    return Post(
+        source_key="fsc_press", source_name="금융위 · 보도자료", post_id=f"g{i}",
+        title="보도자료", url=f"https://www.fsc.go.kr/no010101/{i}",
+        date="2026-08-01", body="가나다라마바사아자차카타파하 " * 10,
+    )
+
+
+class _StageSpy:
+    """_generate 대역. 호출별 deadline 을 기록하고 clock 을 원하는 만큼 흘린다."""
+
+    def __init__(self, clock, posts, spend=0.0):
+        self.clock = clock
+        self.posts = posts
+        self.spend = spend
+        self.deadlines: list[float | None] = []
+        self.windows: list[float | None] = []
+
+    def __call__(self, prompt, deadline=None, *, telemetry=None, **kw):
+        self.deadlines.append(deadline)
+        self.windows.append(None if deadline is None else deadline - time.monotonic())
+        if "[의안 목록]" in prompt:
+            # 의안 호출은 시간을 쓰지 않는다 — 이 spy 는 '일반 단계가 공유 예산을
+            # 얼마나 먹었을 때 의안이 무엇을 받는가'만 재기 위한 것이다.
+            return _reply_for(_ids_in(prompt, self.posts))
+        if self.spend:
+            self.clock.advance(self.spend)
+        return _envelope('{"summary": ["첫째임", "둘째임", "셋째임"]}')
+
+
+def _run_both_stages(clock, *, total, general_spend=0.0, general_posts=1, bills=3,
+                     terminal=None):
+    """일반 → 의안 두 단계를 한 번의 summarize_all 로 돌리고 spy 를 돌려준다."""
+    posts = [_bill(i) for i in range(bills)]
+    generals = [_general_post(i) for i in range(general_posts)]
+    s = Summarizer(_llm(total_budget_sec=total, batch=_batch_cfg()))
+    spy = _StageSpy(clock, posts, spend=general_spend)
+    if terminal is not None:
+        def _fail(prompt, deadline=None, *, telemetry=None, **kw):
+            spy(prompt, deadline, telemetry=telemetry, **kw)
+            raise LLMCallError("boom", kind=terminal, status=401)
+        s._generate = _fail
+    else:
+        s._generate = spy
+    ok = s.summarize_all({"금융위 · 보도자료": generals, _SOURCE: posts})
+    return ok, spy
+
+
+def test_BUD1_no_shared_budget_keeps_per_stage_semantics(clock):
+    """total_budget_sec=0 이면 공유 마감이 없다 — 각 단계 예산만 적용된다."""
+    _, spy = _run_both_stages(clock, total=0.0)
+    assert len(spy.windows) == 2                    # 일반 1건 + 의안 1배치
+    assert 239.0 <= spy.windows[0] <= 240.0         # 일반은 자기 240초
+    assert 89.0 <= spy.windows[1] <= 90.0           # 의안은 자기 배치 window
+
+
+def test_BUD2_general_only_still_gets_its_full_stage_budget(clock):
+    _, spy = _run_both_stages(clock, total=360.0)
+    assert 239.0 <= spy.windows[0] <= 240.0         # min(240, 360) = 240
+
+
+def test_BUD3_assembly_only_still_gets_its_full_stage_budget(clock):
+    """일반이 없으면 의안은 공유 예산 안에서 자기 300초 상한을 그대로 쓴다."""
+    posts = [_bill(i) for i in range(75)]           # 3 batches
+    s = Summarizer(_llm(total_budget_sec=360.0, batch=_batch_cfg()))
+    calls = _Calls(posts)
+    s._generate = calls
+    s.summarize_all({_SOURCE: posts})
+    # 300/3=100 이지만 요청 타임아웃 90 이 상한 — 기존 배분 그대로다
+    assert [round(w) for w in calls.windows] == [90, 90, 90]
+
+
+def test_BUD4_slow_general_shrinks_the_assembly_envelope(clock):
+    """일반이 200초를 쓰면 의안에는 약 160초만 남는다(새 300초를 만들지 않는다)."""
+    _, spy = _run_both_stages(clock, total=360.0, general_spend=200.0)
+    assembly_window = spy.windows[1]
+    assert assembly_window < 300.0
+    assert 89.0 <= assembly_window <= 90.0          # 1배치라 요청 타임아웃이 상한
+    # 의안 마감이 공유 마감을 넘지 않는다
+    assert spy.deadlines[1] <= spy.deadlines[0] + 240.0
+
+
+def test_BUD5_general_using_its_full_budget_leaves_the_remainder(clock):
+    posts = [_bill(i) for i in range(75)]           # 3 batches
+    generals = [_general_post(0)]
+    s = Summarizer(_llm(total_budget_sec=360.0, batch=_batch_cfg()))
+    spy = _StageSpy(clock, posts, spend=240.0)
+    s._generate = spy
+    s.summarize_all({"금융위 · 보도자료": generals, _SOURCE: posts})
+    # 공유 잔여 ≈120초 안에서 3배치가 공정 분배된다 — 새 300초가 생기지 않는다.
+    # (앞 배치가 자기 몫을 다 쓰지 않으면 남은 몫은 뒤 배치로 넘어가므로 뒤 window
+    #  가 더 클 수 있다. 중요한 것은 첫 몫과 '공유 잔여를 넘지 않는다'는 상한이다.)
+    assembly_windows = spy.windows[1:]
+    assert len(assembly_windows) == 3
+    assert assembly_windows[0] == pytest.approx(40.0)      # 120 / 3
+    assert all(w <= 120.0 for w in assembly_windows), assembly_windows
+
+
+def test_BUD6_fast_general_leaves_the_assembly_stage_cap_intact(clock):
+    posts = [_bill(i) for i in range(75)]
+    generals = [_general_post(0)]
+    s = Summarizer(_llm(total_budget_sec=360.0, batch=_batch_cfg()))
+    spy = _StageSpy(clock, posts, spend=30.0)
+    s._generate = spy
+    s.summarize_all({"금융위 · 보도자료": generals, _SOURCE: posts})
+    # 공유 잔여 ≈330 > 의안 상한 300 이므로 기존 배분(90/90/90) 그대로
+    assert [round(w) for w in spy.windows[1:]] == [90, 90, 90]
+
+
+def test_BUD7_exhausted_shared_budget_skips_the_assembly_stage(clock, caplog):
+    """공유 예산이 한 번의 호출도 담지 못하면 의안 API 를 부르지 않는다."""
+    caplog.set_level(logging.WARNING, logger="src.summarizer")
+    _, spy = _run_both_stages(clock, total=360.0, general_spend=359.0)
+    assert len(spy.windows) == 1                    # 일반 1회뿐 — 의안 호출 없음
+    assert any("공유 LLM 시간예산" in r.getMessage() for r in caplog.records)
+
+
+def test_BUD8_terminal_general_failure_still_skips_assembly(clock):
+    """Phase 1 계약 — 종료성 실패면 공유 예산과 무관하게 의안을 건너뛴다."""
+    _, spy = _run_both_stages(clock, total=360.0, terminal=LLMErrorKind.AUTH)
+    assert len(spy.windows) == 1
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_BUD9_boolean_total_budget_is_rejected(tmp_path, value):
+    path = _yaml_config(tmp_path, lambda raw: raw["llm"].__setitem__("total_budget_sec", value))
+    with pytest.raises(ValueError) as e:
+        load_config(path)
+    assert "total_budget_sec" in str(e.value)
+
+
+def test_BUD_production_config_declares_the_shared_envelope():
+    llm = load_config("config.yaml").llm
+    assert llm.total_budget_sec == 360.0
+    assert llm.budget_sec == 240.0                  # 단계 ceiling 은 그대로
+    assert llm.assembly_batch.budget_sec == 300.0
+
+
+# ==========================================================================
+# PR #26 Codex follow-up #3 — 호출 가능한 window 를 보장하고 진행한다
+#
+# fair share 가 _MIN_CALL_SEC 미만이면 첫 배치는 호출 없이 버려지는데, 배치가
+# 줄어 몫이 커진 뒤 배치는 실제로 호출됐다 — 앞 배치의 시간을 뒤가 가져간 셈이다.
+# ==========================================================================
+def _run_with_budget(budget, bills=75, **over):
+    return _run_batches([_bill(i) for i in range(bills)], _batch_cfg(budget_sec=budget, **over))
+
+
+def test_FAIR1_unusable_fair_share_stops_every_remaining_batch(clock, caplog):
+    caplog.set_level(logging.WARNING, logger="src.assembly_summary")
+    ok, calls = _run_with_budget(5.0)               # 5/3 ≈ 1.67 < 2.0
+    assert calls.calls == []                        # 어떤 배치도 호출되지 않는다
+    assert ok == 0
+    assert any("호출 없이 발췌" in r.getMessage() for r in caplog.records)
+
+
+def test_FAIR2_fair_share_exactly_at_the_threshold_is_callable(clock):
+    _, calls = _run_with_budget(6.0)                # 6/3 = 2.0 == _MIN_CALL_SEC
+    assert len(calls.calls) == 3
+    assert calls.windows[0] == pytest.approx(2.0)
+
+
+def test_FAIR3_two_batches_at_the_threshold_are_callable(clock):
+    _, calls = _run_with_budget(4.0, bills=50)      # 4/2 = 2.0
+    assert len(calls.calls) == 2
+
+
+def test_FAIR4_just_below_the_threshold_stops_both_batches(clock):
+    _, calls = _run_with_budget(3.9, bills=50)      # 3.9/2 = 1.95 < 2.0
+    assert calls.calls == []
+
+
+def test_FAIR5_many_char_split_batches_stop_together(clock):
+    """max_batch_chars 로 배치가 늘어난 경우에도 첫 배치부터 전체를 중단한다."""
+    posts = [_bill(i, body="가" * 300) for i in range(40)]
+    ok, calls = _run_batches(posts, _batch_cfg(budget_sec=15.0, max_batch_chars=1300))
+    assert len(calls.calls) == 0                    # 15/10 = 1.5 < 2.0
+    assert ok == 0
+
+
+def test_FAIR6_unlimited_budget_is_not_affected_by_the_guard(clock):
+    _, calls = _run_with_budget(0.0)                # budget_sec=0 → 무제한
+    assert len(calls.calls) == 3
+    assert all(w is None for w in calls.windows)
+
+
+def test_FAIR7_production_allocation_regression_is_unchanged(clock):
+    _, calls = _run_with_budget(300.0)
+    assert [round(w) for w in calls.windows] == [90, 90, 90]
+
+
+def test_FAIR8_shared_envelope_shrinks_windows_but_keeps_them_callable(clock):
+    """공유 마감으로 의안 잔여가 120초여도 3배치가 각각 호출 가능한 몫을 받는다."""
+    posts = [_bill(i) for i in range(75)]
+    s = Summarizer(_llm(batch=_batch_cfg()))
+    calls = _Calls(posts)
+    s._generate = calls
+    outer = time.monotonic() + 120.0
+    summarize_assembly_bills(s, {_SOURCE: posts}, outer)
+    assert len(calls.calls) == 3
+    assert all(w >= _MIN_CALL_SEC for w in calls.windows)
+    assert calls.windows[0] == pytest.approx(40.0)         # 120 / 3
+    # 어떤 배치도 공유 잔여(120초)를 넘겨 받지 않는다
+    assert all(w <= 120.0 for w in calls.windows), calls.windows

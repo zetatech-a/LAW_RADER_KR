@@ -31,6 +31,7 @@ from .summarizer import (
     _STOP_CALLING_KINDS,
     CallTelemetry,
     LLMErrorKind,
+    _earlier_deadline,
     _unfence,
     classify_error,
 )
@@ -138,10 +139,35 @@ class _BatchContext:
         return max(0.0, self.overall_deadline - time.monotonic())
 
 
+def _fair_share_sec(
+    overall_deadline: float | None, remaining_top_level_batches: int, now: float
+) -> float | None:
+    """남은 top-level 배치가 하나씩 나눠 가질 시간(초). 마감이 없으면 None."""
+    if overall_deadline is None:
+        return None
+    return max(0.0, overall_deadline - now) / max(1, remaining_top_level_batches)
+
+
+def _has_callable_window(
+    overall_deadline: float | None, remaining_top_level_batches: int, now: float
+) -> bool:
+    """남은 배치에 공정 분배했을 때 한 번의 호출을 담을 수 있는가.
+
+    False 면 **남은 top-level 배치 전체**를 포기해야 한다. 첫 배치만 건너뛰고 다음으로
+    넘어가면, 배치 수가 줄어 몫이 커진 뒤 배치가 앞 배치의 시간을 가져가는 불공정한
+    동작이 된다(앞 배치는 호출 기회를 한 번도 받지 못한 채 발췌로 떨어진다).
+
+    마감이 없으면(budget_sec=0 = 무제한) 이 판정을 적용하지 않는다.
+    """
+    share = _fair_share_sec(overall_deadline, remaining_top_level_batches, now)
+    return share is None or share >= _MIN_CALL_SEC
+
+
 def _allocate_batch_deadline(
     overall_deadline: float | None,
     remaining_top_level_batches: int,
     request_timeout_sec: float,
+    now: float | None = None,
 ) -> float | None:
     """이 배치가 쓸 수 있는 마감시각. overall_deadline 을 절대 넘지 않는다.
 
@@ -157,7 +183,7 @@ def _allocate_batch_deadline(
     """
     if overall_deadline is None:
         return None
-    now = time.monotonic()
+    now = time.monotonic() if now is None else now
     remaining = overall_deadline - now
     if remaining <= 0:
         return overall_deadline
@@ -177,9 +203,16 @@ def _request_timeout_sec(summarizer: "Summarizer", cfg: "AssemblyBatchConfig") -
 
 # --- 공개 진입점 ---
 def summarize_assembly_bills(
-    summarizer: "Summarizer", posts_by_source: dict[str, list[Post]]
+    summarizer: "Summarizer",
+    posts_by_source: dict[str, list[Post]],
+    outer_deadline: float | None = None,
 ) -> int:
-    """의안 게시물을 배치로 요약하고 성공 건수를 돌려준다."""
+    """의안 게시물을 배치로 요약하고 성공 건수를 돌려준다.
+
+    outer_deadline 은 일반 요약 단계와 **함께 쓰는** 상위 마감(llm.total_budget_sec).
+    주어지면 이 단계의 예산과 둘 중 이른 쪽이 실제 마감이 된다. 생략하면 기존처럼
+    assembly_batch.budget_sec 만 적용된다.
+    """
     cfg = summarizer.cfg.assembly_batch
     if not cfg.enabled:
         log.info("의안 배치 요약 비활성(llm.assembly_batch.enabled=false)")
@@ -189,7 +222,10 @@ def summarize_assembly_bills(
     if not items:
         return 0
 
-    overall_deadline = time.monotonic() + cfg.budget_sec if cfg.budget_sec > 0 else None
+    overall_deadline = _earlier_deadline(
+        time.monotonic() + cfg.budget_sec if cfg.budget_sec > 0 else None,
+        outer_deadline,
+    )
     request_timeout = _request_timeout_sec(summarizer, cfg)
     batches = _batches(items, cfg.batch_size, cfg.max_batch_chars)
     # 배치 구성을 운영 로그에서 그대로 볼 수 있어야 batch_size 를 데이터로 튜닝할 수 있다.
@@ -211,26 +247,30 @@ def summarize_assembly_bills(
 
     ok = 0
     for i, batch in enumerate(batches):
-        if overall_deadline is not None and (
-            overall_deadline - time.monotonic() < _MIN_CALL_SEC
-        ):
+        remaining_batches = len(batches) - i
+        # 시계는 이 배치를 판정하는 동안 한 번만 읽는다 — 배분과 검사가 서로 다른
+        # now 를 쓰면 경계값(정확히 2.000초)에서 결과가 흔들린다.
+        now = time.monotonic()
+        if not _has_callable_window(overall_deadline, remaining_batches, now):
+            # 남은 배치에 **공정하게** 나눠도 한 번의 호출을 담지 못한다. 여기서
+            # 멈추지 않고 진행하면 앞 배치는 호출 기회를 못 받은 채 버려지고, 배치가
+            # 줄어 몫이 커진 뒤 배치만 호출된다 — 앞 배치의 몫을 뒤가 가져가는 셈이다.
             log.warning(
-                "의안 요약 시간예산(%.0f초) 소진 — 남은 %d개 배치는 발췌로 발송됩니다.",
+                "의안 요약 시간예산(%.0f초) 소진 — 남은 %d개 배치는 호출 없이 발췌로 "
+                "발송됩니다.",
                 cfg.budget_sec,
-                len(batches) - i,
+                remaining_batches,
             )
             break
         # 이 배치의 몫을 여기서 확정한다. 앞 배치가 느렸어도 뒤 배치가 몇 초짜리
         # window 로 시작하지 않도록, 남은 시간을 남은 배치 수로 공정 분배한다.
         batch_deadline = _allocate_batch_deadline(
-            overall_deadline, len(batches) - i, request_timeout
+            overall_deadline, remaining_batches, request_timeout, now
         )
         ctx = _BatchContext(
             index=i + 1,
             total=len(batches),
-            window_sec=(
-                None if batch_deadline is None else batch_deadline - time.monotonic()
-            ),
+            window_sec=(None if batch_deadline is None else batch_deadline - now),
             overall_deadline=overall_deadline,
         )
         log.info(
