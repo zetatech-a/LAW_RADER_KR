@@ -14,6 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.models import Post
 from src.notifier import build_html, build_text
 from src.snippet import (
+    ASSEMBLY_FALLBACK_CHARS,
+    ELLIPSIS,
+    OMISSION_MARK,
+    SNIPPET_LIMIT,
+    build_assembly_fallback_lines,
     build_fallback_snippet,
     is_duplicate_title,
     is_label_line,
@@ -668,3 +673,107 @@ def test_email_ignores_fallback_snippet_when_summary_exists():
         assert "첫째 요약함" in rendered
         assert BODY_SENTENCE not in rendered
     assert "[원문 발췌]" not in text
+
+
+# ==========================================================================
+# 의안 전용 발췌 (build_assembly_fallback_lines)
+#
+# 의안 본문은 '제안이유 및 주요내용' 한 덩어리라 앞 220자에는 거의 항상 현행 제도
+# 설명만 실린다. AI 요약이 실패한 날 그 메일이 쓸모없어지지 않도록, 의안만 원문에서
+# 서로 다른 의미 구간을 골라 여러 줄로 싣는다. **원문 그대로의 결정적 발췌**이며
+# 새 문장을 만들지 않는다.
+# ==========================================================================
+_BACKGROUND = "현행법은 가상자산사업자의 이용자 예치금 보호 의무를 명확히 규정하고 있지 아니함."
+_MIDDLE = "그 결과 사업자 도산 시 이용자가 예치금을 회수하지 못하는 사례가 발생하고 있음."
+_AMENDMENT = "이에 예치금을 은행에 별도 예치하도록 의무화하고 위반 시 과태료를 신설하려는 것임."
+
+
+def _assembly_body(*sentences: str) -> str:
+    return " ".join(sentences)
+
+
+def test_assembly_fallback_empty_text_gives_no_lines():
+    for empty in ("", "   \n\t", None, "···---···"):
+        assert build_assembly_fallback_lines(empty) == []
+
+
+def test_assembly_fallback_keeps_short_bodies_as_is():
+    """한두 문장뿐인 본문은 그대로 싣는다(억지로 채우지 않는다)."""
+    assert build_assembly_fallback_lines(_BACKGROUND) == [_BACKGROUND]
+    assert build_assembly_fallback_lines(
+        _assembly_body(_BACKGROUND, _AMENDMENT)
+    ) == [_BACKGROUND, _AMENDMENT]
+
+
+def test_assembly_fallback_returns_at_most_three_lines():
+    body = _assembly_body(*([_MIDDLE] * 8), _AMENDMENT)
+    lines = build_assembly_fallback_lines(body)
+    assert 1 <= len(lines) <= 3
+
+
+def test_assembly_fallback_picks_background_amendment_and_conclusion():
+    filler = "관련 통계에 따르면 예치금 규모는 매년 증가하고 있음."
+    body = _assembly_body(_BACKGROUND, filler, filler, _MIDDLE, filler, _AMENDMENT)
+    lines = build_assembly_fallback_lines(body)
+    assert lines[0] == _BACKGROUND          # 배경 / 현행 제도
+    assert lines[-1] == _AMENDMENT          # "이에 … 하려는 것임" 계열 결론
+    assert len(lines) == 3
+    # 원문 순서를 보존한다
+    assert [body.index(line) for line in lines] == sorted(body.index(l) for l in lines)
+
+
+def test_assembly_fallback_dedupes_when_roles_collide():
+    """첫 문장이 곧 입법행위 문장인 본문에서 같은 줄이 두 번 실리지 않는다."""
+    tail = "관련 통계에 따르면 예치금 규모는 매년 증가하고 있음."
+    body = _assembly_body(_AMENDMENT, tail, tail, tail)
+    lines = build_assembly_fallback_lines(body)
+    assert len(lines) == len(set(lines))
+    assert lines[0] == _AMENDMENT
+
+
+def test_assembly_fallback_respects_the_total_char_cap():
+    body = _assembly_body(*[f"{i}번 문장으로서 " + "가" * 400 + "임." for i in range(5)])
+    lines = build_assembly_fallback_lines(body)
+    assert sum(len(line) for line in lines) <= ASSEMBLY_FALLBACK_CHARS
+    # 상한을 직접 지정해도 지켜진다
+    small = build_assembly_fallback_lines(body, max_total_chars=200)
+    assert sum(len(line) for line in small) <= 200
+
+
+def test_assembly_fallback_splits_a_single_giant_sentence():
+    """문장 분리가 안 되는 한 덩어리는 머리 + 중략 표시 + 꼬리로 보여준다."""
+    body = "머리부분 " * 60 + "중간내용 " * 200 + "결론부분 " * 40
+    lines = build_assembly_fallback_lines(body)
+    assert len(lines) == 2
+    assert lines[0].startswith("머리부분")
+    assert lines[0].endswith(ELLIPSIS)
+    assert lines[1].startswith(OMISSION_MARK)
+    assert lines[1].endswith("결론부분")
+    assert sum(len(line) for line in lines) <= ASSEMBLY_FALLBACK_CHARS
+
+
+def test_assembly_fallback_avoids_cutting_mid_word():
+    body = "가나다라마바사아자차 " * 300
+    lines = build_assembly_fallback_lines(body)
+    head = lines[0][: -len(ELLIPSIS)].rstrip()
+    assert head.endswith("가나다라마바사아자차")     # 어절 중간에서 끊기지 않는다
+    tail = lines[1][len(OMISSION_MARK) :].strip()
+    assert tail.startswith("가나다라마바사아자차")
+
+
+def test_assembly_fallback_does_not_emit_markup():
+    """원문에 태그가 섞여 있어도 헬퍼가 마크업을 만들어 내지 않는다(이스케이프는 notifier)."""
+    body = "<p>현행법은 규정하지 아니함.</p><script>alert(1)</script><p>이에 개정하려는 것임.</p>"
+    lines = build_assembly_fallback_lines(body)
+    joined = " ".join(lines)
+    assert "<" not in joined and ">" not in joined
+    assert "현행법은 규정하지 아니함." in joined
+
+
+def test_generic_fallback_snippet_behavior_is_unchanged():
+    """일반 소스의 220자 한 줄 발췌 계약은 그대로다."""
+    body = "가나다라마바사아자차 " * 60
+    out = build_fallback_snippet(body, TITLE)
+    assert out.endswith(f" {ELLIPSIS}")
+    assert len(out) == SNIPPET_LIMIT + 2
+    assert build_fallback_snippet(BODY_SENTENCE, TITLE) == BODY_SENTENCE

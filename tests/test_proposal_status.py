@@ -285,7 +285,7 @@ def test_pending_bills_are_excluded_from_batch():
     s = Summarizer(_cfg())
     seen = []
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         seen.append(_ids_in(prompt, posts))
         return _reply(seen[-1])
 

@@ -262,3 +262,89 @@ def test_send_digest_keeps_attachments(monkeypatch):
     send_digest(_Cfg(), {PRESS: [p]})
     names = [part.get_filename() for part in sent[0].iter_attachments()]
     assert "붙임.pdf" in names
+
+
+# ==========================================================================
+# Phase 3 — 의안 발췌 폴백 렌더링
+#
+# AI 요약이 실패한 날에도 '무엇을 바꾸는 법안인가'가 메일에서 보여야 한다. 다만
+# 그 발췌는 **AI 요약이 아니다** — 라벨은 반드시 '발췌'를 유지한다.
+# ==========================================================================
+_BG = "현행법은 가상자산사업자의 이용자 예치금 보호 의무를 명확히 규정하고 있지 아니함."
+_MID = "그 결과 사업자 도산 시 이용자가 예치금을 회수하지 못하는 사례가 발생하고 있음."
+_AMD = "이에 예치금을 은행에 별도 예치하도록 의무화하고 위반 시 과태료를 신설하려는 것임."
+_LONG_REASON = " ".join([_BG] + ["관련 통계에 따르면 예치금 규모는 증가하고 있음."] * 6 + [_MID, _AMD])
+
+
+def test_assembly_with_ai_summary_renders_the_existing_ai_block():
+    bill = _bill(body=_LONG_REASON, summary=["첫째 요약함", "둘째 요약함", "셋째 요약함"])
+    grouped = {ASSEMBLY: [bill]}
+    html, text = build_html(grouped), build_text(grouped)
+    for rendered in (html, text):
+        assert "제안이유 및 주요내용 · AI 3줄 요약" in rendered
+        assert "첫째 요약함" in rendered
+        assert "제안이유 및 주요내용 발췌" not in rendered
+
+
+def test_assembly_without_ai_summary_uses_the_extractive_fallback():
+    """220자 한 줄이 아니라 원문에서 고른 여러 구간이 실린다."""
+    bill = _bill(body=_LONG_REASON, summary=[])
+    grouped = {ASSEMBLY: [bill]}
+    html, text = build_html(grouped), build_text(grouped)
+    for rendered in (html, text):
+        assert _BG in rendered
+        assert _AMD in rendered            # 220자 발췌였다면 잘려 나갔을 결론 문장
+
+
+def test_assembly_fallback_label_says_excerpt_not_ai():
+    bill = _bill(body=_LONG_REASON, summary=[])
+    grouped = {ASSEMBLY: [bill]}
+    for rendered in (build_html(grouped), build_text(grouped)):
+        assert "제안이유 및 주요내용 발췌" in rendered
+        assert "AI" not in rendered.replace("LAW RADER", "")
+
+
+def test_assembly_pending_ui_is_unchanged():
+    bill = _bill(body="", summary=[])
+    grouped = {ASSEMBLY: [bill]}
+    for rendered in (build_html(grouped), build_text(grouped)):
+        assert "제안이유 및 주요내용 · 등록 대기" in rendered
+        assert "아직 공개되지 않았습니다" in rendered
+
+
+def test_detail_update_without_ai_uses_the_same_improved_fallback():
+    """Phase 2 상세 업데이트도 같은 렌더러를 쓰므로 자동으로 개선된 발췌를 받는다."""
+    bill = _bill(body=_LONG_REASON, summary=[])
+    html, text = build_html({}, {ASSEMBLY: [bill]}), build_text({}, {ASSEMBLY: [bill]})
+    for rendered in (html, text):
+        assert "의안 상세 업데이트" in rendered
+        assert _BG in rendered
+        assert _AMD in rendered
+
+
+def test_general_post_fallback_is_still_the_220_char_snippet():
+    from src.snippet import build_fallback_snippet
+
+    post = _press()
+    post.body = "가나다라마바사아자차 " * 60
+    grouped = {PRESS: [post]}
+    expected = build_fallback_snippet(post.body, post.title)
+    assert expected in build_html(grouped)
+    assert f"      {expected}" in build_text(grouped)
+
+
+def test_assembly_fallback_escapes_html():
+    bill = _bill(body='현행법은 <b>규정</b>하지 아니함. 이에 "개정"하려는 것임 & 부칙 신설.')
+    html = build_html({ASSEMBLY: [bill]})
+    assert "<b>규정</b>" not in html
+    assert "&lt;b&gt;규정&lt;/b&gt;" in html
+    assert "&amp;" in html
+
+
+def test_assembly_fallback_text_part_lists_each_line():
+    bill = _bill(body=_LONG_REASON, summary=[])
+    lines = build_text({ASSEMBLY: [bill]}).splitlines()
+    start = lines.index("    [제안이유 및 주요내용 발췌]")
+    excerpt = [l.strip() for l in lines[start + 1 : start + 4] if l.startswith("      ")]
+    assert excerpt[0] == _BG
+    assert excerpt[-1] == _AMD

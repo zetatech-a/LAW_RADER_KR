@@ -529,3 +529,165 @@ def build_fallback_snippet(
     if not is_meaningful(text):
         text = " ".join(lines)
     return truncate_snippet(text, limit)
+
+
+# ── 6) 의안 전용 발췌 ───────────────────────────────────────────────────────
+#
+# 일반 게시물의 발췌(build_fallback_snippet)는 220자 한 줄이다. 상세 페이지 머리말을
+# 걷어내고 '무슨 글인지'만 알리면 되기 때문이다. 의안은 사정이 다르다 — 본문이
+# '제안이유 및 주요내용' 한 덩어리이고, 앞부분은 거의 항상 현행 제도 설명이라
+# 220자에서는 "현행법은 …을 규정하고 있음."만 실리고 정작 **무엇을 바꾸는지**가
+# 통째로 잘린다. AI 요약이 실패한 날 그 메일은 사실상 쓸모가 없다.
+#
+# 그래서 의안만 원문에서 서로 다른 의미 구간을 골라 여러 줄로 싣는다. **AI 요약이
+# 아니다** — 원문 문장을 그대로 옮기는 결정적(deterministic) 발췌이고, 메일 라벨도
+# '발췌'를 유지한다. 문장을 새로 쓰거나 번역·재작성하지 않는다.
+
+# 의안 발췌 기본값. 카드 레이아웃을 무너뜨리지 않는 선에서 220자보다 넉넉하게 잡는다.
+ASSEMBLY_FALLBACK_LINES = 3
+ASSEMBLY_FALLBACK_CHARS = 900
+
+# 생략 표시. 한 곳에서만 정의해 HTML/텍스트 파트가 같은 표기를 쓰게 한다.
+ELLIPSIS = "…"
+OMISSION_MARK = "[중략]"
+
+# 문장 경계: '글자 + 문장부호 + 공백'일 때만 자른다.
+# 앞에 글자를 요구하는 이유는 날짜·조문 번호("2026. 1. 1.", "제3조의2.")에서 잘못
+# 끊지 않기 위함이다. 그런 자리는 마침표 앞이 숫자다.
+_SENTENCE_SPLIT = re.compile(r"(?<=[^\W\d_][.!?…])\s+")
+
+# 입법행위를 나타낼 가능성이 높은 표현. 의안 본문에서 '현행 제도 설명'과 '무엇을
+# 바꾸는가'를 가르는 최소한의 단서만 둔다 — 목록을 키우면 첫 문장에서 바로 걸려
+# 구간 선택이 무의미해진다.
+_AMENDMENT_KEYWORDS = (
+    "이에", "따라서", "개정", "신설", "삭제", "하도록", "하려는",
+    "필요", "주요내용", "규정", "도입", "확대", "제한", "의무",
+)
+
+# 문장 분리가 통째로 실패했을 때(마침표 없는 한 덩어리) 쓰는 머리/꼬리 길이.
+# 꼬리를 더 길게 잡는 이유는 의안 본문의 결론("이에 … 하려는 것임")이 끝에 있기 때문이다.
+_GIANT_HEAD_CHARS = 350
+_GIANT_TAIL_CHARS = 550
+
+
+def _cut_at_word(text: str, limit: int, *, from_end: bool = False) -> str:
+    """limit 자 이내로 자르되 가능하면 단어 중간을 끊지 않는다.
+
+    한국어 본문에도 어절 공백이 있으므로 마지막(또는 첫) 공백까지만 취한다. 공백이
+    없거나 너무 앞/뒤에서만 나오면 그냥 자른다 — 발췌가 비는 것보다는 낫다.
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text if len(text) <= limit else text[: max(limit, 0)]
+    if from_end:
+        piece = text[-limit:]
+        space = piece.find(" ")
+        # 잘린 앞부분이 통째로 사라지지 않을 정도로만 어절을 맞춘다.
+        if 0 <= space <= limit // 4:
+            return piece[space + 1 :]
+        return piece
+    piece = text[:limit]
+    space = piece.rfind(" ")
+    if space >= limit * 3 // 4:
+        return piece[:space]
+    return piece
+
+
+def _assembly_sentences(text: str) -> list[str]:
+    """의안 본문을 의미 있는 문장 단위로 나눈다(내용이 없는 조각은 버린다)."""
+    return [
+        s for s in (part.strip() for part in _SENTENCE_SPLIT.split(text)) if is_meaningful(s)
+    ]
+
+
+def _giant_sentence_lines(text: str, max_total_chars: int) -> list[str]:
+    """문장 분리가 안 되는 한 덩어리 본문의 머리 + 중략 표시 + 꼬리."""
+    marker = f"{OMISSION_MARK} "
+    head_limit = min(_GIANT_HEAD_CHARS, max(max_total_chars - len(marker) - 1, 0))
+    head = _cut_at_word(text, head_limit)
+    used = len(head) + len(ELLIPSIS) + 1 + len(marker)
+    tail_limit = min(_GIANT_TAIL_CHARS, max(max_total_chars - used, 0))
+    if tail_limit <= 0:
+        return [f"{head} {ELLIPSIS}"]
+    tail = _cut_at_word(text, tail_limit, from_end=True)
+    return [f"{head} {ELLIPSIS}", f"{marker}{tail}"]
+
+
+def _pick_assembly_indexes(sentences: list[str], max_lines: int) -> list[int]:
+    """싣을 문장의 위치를 고른다(원문 순서 보존, 중복 제거).
+
+    1) 첫 의미 문장          — 배경 / 현행 제도
+    2) 입법행위 문장         — 없으면 가운데 문장(서로 다른 구간을 확보하기 위함)
+    3) 마지막 의미 문장      — "이에 … 하려는 것임" 계열 결론
+
+    세 역할이 같은 문장을 가리키면 그만큼 줄 수가 줄어든다(억지로 채우지 않는다).
+    """
+    last = len(sentences) - 1
+    picks = {0, last}
+    middle = range(1, last)
+    keyword_at = next(
+        (
+            i
+            for i in middle
+            if any(word in sentences[i] for word in _AMENDMENT_KEYWORDS)
+        ),
+        None,
+    )
+    if keyword_at is None and last >= 2:
+        keyword_at = last // 2
+    if keyword_at is not None:
+        picks.add(keyword_at)
+    return sorted(picks)[:max_lines]
+
+
+def build_assembly_fallback_lines(
+    text: str,
+    *,
+    max_lines: int = ASSEMBLY_FALLBACK_LINES,
+    max_total_chars: int = ASSEMBLY_FALLBACK_CHARS,
+) -> list[str]:
+    """의안 '제안이유 및 주요내용'에서 뽑은 원문 발췌 줄들.
+
+    **AI 요약이 아니다.** 원문 문장을 그대로 옮기는 결정적 발췌이므로 같은 입력에는
+    항상 같은 출력이 나온다. 반환값은 이스케이프되지 않은 평문이다 — HTML 이스케이프는
+    기존과 같이 notifier 의 책임으로 남긴다.
+    """
+    if max_lines <= 0 or max_total_chars <= 0:
+        return []
+    lines = normalize_lines(text)
+    if not lines:
+        return []
+    body = " ".join(lines)
+    if not is_meaningful(body):
+        return []
+
+    sentences = _assembly_sentences(body)
+    if not sentences:
+        return []
+    if len(sentences) == 1 and len(sentences[0]) > max_total_chars:
+        return _giant_sentence_lines(sentences[0], max_total_chars)
+
+    if len(sentences) <= max_lines:
+        chosen = sentences
+    else:
+        chosen = [sentences[i] for i in _pick_assembly_indexes(sentences, max_lines)]
+    # 위치가 달라도 글자가 같으면 같은 줄이다. 메일에 같은 문장이 두 번 실리면 발췌가
+    # 고장난 것처럼 보인다(원문이 같은 문구를 반복하는 의안은 드물지 않다).
+    chosen = list(dict.fromkeys(chosen))
+
+    out: list[str] = []
+    used = 0
+    for sentence in chosen:
+        remaining = max_total_chars - used
+        if remaining <= 0:
+            break
+        if len(sentence) <= remaining:
+            out.append(sentence)
+            used += len(sentence)
+            continue
+        # 마지막으로 담는 줄만 잘린다. 잘렸다는 사실을 표시해 원문 확인을 유도한다.
+        room = remaining - len(ELLIPSIS) - 1
+        if room <= 0:
+            break
+        out.append(f"{_cut_at_word(sentence, room)} {ELLIPSIS}")
+        break
+    return out

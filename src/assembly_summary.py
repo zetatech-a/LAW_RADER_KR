@@ -29,6 +29,7 @@ from .summarizer import (
     _LIST_PREFIX,
     _MIN_CALL_SEC,
     _STOP_CALLING_KINDS,
+    CallTelemetry,
     LLMErrorKind,
     _unfence,
     classify_error,
@@ -116,6 +117,64 @@ class _Item:
         return len(self.bill_id) + len(self.title) + len(self.text)
 
 
+@dataclass
+class _BatchContext:
+    """한 top-level 배치의 실행 맥락(로그·시간 배분용).
+
+    분할·누락 재요청 같은 배치 내부 복구도 **같은 맥락**을 그대로 물려받는다 —
+    그래야 로그에서 "몇 번째 배치의 몇 번째 호출인가"가 드러나고, 시간도 그 배치에
+    할당된 window 안에서만 쓰인다.
+    """
+
+    index: int = 1                       # 1-based
+    total: int = 1
+    window_sec: float | None = None      # 이 배치에 배분된 시간(초). None=무제한
+    overall_deadline: float | None = None
+
+    @property
+    def overall_remaining_sec(self) -> float | None:
+        if self.overall_deadline is None:
+            return None
+        return max(0.0, self.overall_deadline - time.monotonic())
+
+
+def _allocate_batch_deadline(
+    overall_deadline: float | None,
+    remaining_top_level_batches: int,
+    request_timeout_sec: float,
+) -> float | None:
+    """이 배치가 쓸 수 있는 마감시각. overall_deadline 을 절대 넘지 않는다.
+
+    하나의 절대 마감만 공유하면 첫 배치가 뒤 배치의 시간을 전부 먹는다(실제 장애:
+    첫 25건이 타임아웃을 반복하며 예산을 소진해 뒤 배치가 몇 초짜리 window 로 시작).
+    남은 시간을 남은 배치 수로 나눈 공정 몫과 요청 타임아웃 중 **작은 쪽**을 준다.
+
+      overall=300, 3배치 → 300/3=100 → min(90,100)=90초
+      첫 배치가 90초를 다 써도 → 210/2=105 → 다시 90초
+      max_batch_chars 때문에 4배치가 됐다면 → 300/4=75 → 75초씩
+
+    반환값이 None 이면 마감 없음(budget_sec=0 = 무제한이라는 기존 의미 유지).
+    """
+    if overall_deadline is None:
+        return None
+    now = time.monotonic()
+    remaining = overall_deadline - now
+    if remaining <= 0:
+        return overall_deadline
+    fair_share = remaining / max(1, remaining_top_level_batches)
+    window = min(request_timeout_sec, fair_share) if request_timeout_sec > 0 else fair_share
+    # overall 은 최종 안전 상한이다 — 어떤 배분도 이보다 뒤로 갈 수 없다.
+    return min(now + window, overall_deadline)
+
+
+def _request_timeout_sec(summarizer: "Summarizer", cfg: "AssemblyBatchConfig") -> float:
+    """의안 배치 요청 하나에 허용할 시간. 미지정이면 기존 llm.timeout_sec."""
+    configured = cfg.request_timeout_sec
+    if configured and configured > 0:
+        return float(configured)
+    return float(summarizer.cfg.timeout_sec)
+
+
 # --- 공개 진입점 ---
 def summarize_assembly_bills(
     summarizer: "Summarizer", posts_by_source: dict[str, list[Post]]
@@ -130,14 +189,17 @@ def summarize_assembly_bills(
     if not items:
         return 0
 
-    deadline = time.monotonic() + cfg.budget_sec if cfg.budget_sec > 0 else None
+    overall_deadline = time.monotonic() + cfg.budget_sec if cfg.budget_sec > 0 else None
+    request_timeout = _request_timeout_sec(summarizer, cfg)
     batches = _batches(items, cfg.batch_size, cfg.max_batch_chars)
     # 배치 구성을 운영 로그에서 그대로 볼 수 있어야 batch_size 를 데이터로 튜닝할 수 있다.
     log.info(
-        "Assembly AI — target=%d batches=%d sizes=%s",
+        "Assembly AI — target=%d batches=%d sizes=%s budget_sec=%.0f request_timeout_sec=%.0f",
         len(items),
         len(batches),
         [len(b) for b in batches],
+        cfg.budget_sec,
+        request_timeout,
     )
 
     # 서킷 브레이커: 일시 장애(TRANSIENT)가 **연속으로** 쌓일 때만 남은 배치를 포기한다.
@@ -149,16 +211,39 @@ def summarize_assembly_bills(
 
     ok = 0
     for i, batch in enumerate(batches):
-        if deadline is not None and deadline - time.monotonic() < _MIN_CALL_SEC:
+        if overall_deadline is not None and (
+            overall_deadline - time.monotonic() < _MIN_CALL_SEC
+        ):
             log.warning(
                 "의안 요약 시간예산(%.0f초) 소진 — 남은 %d개 배치는 발췌로 발송됩니다.",
                 cfg.budget_sec,
                 len(batches) - i,
             )
             break
-        log.info("Assembly AI batch — batch=%d/%d items=%d", i + 1, len(batches), len(batch))
+        # 이 배치의 몫을 여기서 확정한다. 앞 배치가 느렸어도 뒤 배치가 몇 초짜리
+        # window 로 시작하지 않도록, 남은 시간을 남은 배치 수로 공정 분배한다.
+        batch_deadline = _allocate_batch_deadline(
+            overall_deadline, len(batches) - i, request_timeout
+        )
+        ctx = _BatchContext(
+            index=i + 1,
+            total=len(batches),
+            window_sec=(
+                None if batch_deadline is None else batch_deadline - time.monotonic()
+            ),
+            overall_deadline=overall_deadline,
+        )
+        log.info(
+            "Assembly AI batch — batch=%d/%d items=%d window_sec=%s overall_remaining_sec=%s",
+            ctx.index,
+            ctx.total,
+            len(batch),
+            _fmt_sec(ctx.window_sec),
+            _fmt_sec(ctx.overall_remaining_sec),
+        )
         result = _run(
-            summarizer, batch, deadline, cfg, allow_split=True, allow_retry=True
+            summarizer, batch, batch_deadline, cfg, ctx,
+            allow_split=True, allow_retry=True,
         )
         ok += result.ok
 
@@ -299,19 +384,26 @@ def _run(
     items: list[_Item],
     deadline: float | None,
     cfg: "AssemblyBatchConfig",
+    ctx: "_BatchContext | None" = None,
     *,
     allow_split: bool,
     allow_retry: bool,
 ) -> _Result:
-    """배치 하나를 요약해 결과를 돌려준다. 예외를 밖으로 내보내지 않는다."""
+    """배치 하나를 요약해 결과를 돌려준다. 예외를 밖으로 내보내지 않는다.
+
+    deadline 은 **이 top-level 배치에 배분된 마감**이다. 분할·누락 재요청 같은 내부
+    복구도 같은 값을 그대로 물려받는다 — 중첩 복구가 새로운 window 를 만들어 다음
+    배치의 몫을 먹지 않도록 하기 위함이다.
+    """
     if not items:
         return _Result()
+    ctx = ctx or _BatchContext()
     if deadline is not None and deadline - time.monotonic() < _MIN_CALL_SEC:
         log.warning("의안 요약 시간예산 소진 — 의안 %d건은 발췌로 발송됩니다.", len(items))
         return _Result()
 
     try:
-        mapping = _call(summarizer, items, deadline, cfg)
+        mapping = _call(summarizer, items, deadline, cfg, ctx)
     except _Splittable as e:
         if allow_split and len(items) > 1:
             mid = len(items) // 2
@@ -324,7 +416,7 @@ def _run(
             )
             # 분할한 조각은 다시 분할하지 않는다(한 번만 분할).
             first = _run(
-                summarizer, items[:mid], deadline, cfg,
+                summarizer, items[:mid], deadline, cfg, ctx,
                 allow_split=False, allow_retry=allow_retry,
             )
             # 앞 조각에서 호출이 죽었으면 뒤 조각도 같은 실패를 반복한다.
@@ -332,7 +424,7 @@ def _run(
                 log.warning("분할 앞 조각에서 호출이 실패 — 뒤 조각은 호출하지 않습니다.")
                 return first
             return first + _run(
-                summarizer, items[mid:], deadline, cfg,
+                summarizer, items[mid:], deadline, cfg, ctx,
                 allow_split=False, allow_retry=allow_retry,
             )
         log.warning("의안 배치(%d건) 요약 실패 — 발췌로 발송합니다: %s", len(items), e)
@@ -363,7 +455,8 @@ def _run(
     if missing and cfg.retry_missing_once and allow_retry:
         log.info("의안 %d건이 응답에서 빠짐 — 해당 ID 만 한 번 다시 요청합니다.", len(missing))
         result = result + _run(
-            summarizer, missing, deadline, cfg, allow_split=False, allow_retry=False
+            summarizer, missing, deadline, cfg, ctx,
+            allow_split=False, allow_retry=False,
         )
     elif missing:
         log.info("의안 %d건은 요약을 받지 못함 — 발췌로 발송됩니다.", len(missing))
@@ -375,15 +468,94 @@ def _call(
     items: list[_Item],
     deadline: float | None,
     cfg: "AssemblyBatchConfig",
+    ctx: "_BatchContext | None" = None,
 ) -> dict[str, list[str]]:
     """한 번 호출하고 bill_id → 문장 리스트로 검증된 결과만 돌려준다."""
-    data = summarizer._generate(
-        _prompt(summarizer, items),
-        deadline,
-        schema=BATCH_SCHEMA,
-        max_output_tokens=cfg.max_output_tokens,
-    )
+    ctx = ctx or _BatchContext()
+    prompt = _prompt(summarizer, items)
+    _log_call(items, prompt, ctx)
+
+    telemetry = CallTelemetry()
+    started = time.monotonic()
+    try:
+        data = summarizer._generate(
+            prompt,
+            deadline,
+            schema=BATCH_SCHEMA,
+            max_output_tokens=cfg.max_output_tokens,
+            request_timeout_sec=cfg.request_timeout_sec,
+            retry_response_timeout=cfg.retry_response_timeout,
+            thinking_level=cfg.thinking_level,
+            telemetry=telemetry,
+        )
+    except BaseException as e:
+        # 실패도 계측한다 — "몇 초를 쓰고 어떤 이유로 죽었나"가 없으면 다음 튜닝을
+        # 추측으로 하게 된다. 프롬프트·본문·자격증명은 절대 남기지 않는다.
+        log.warning(
+            "Assembly AI call failed — batch=%d/%d items=%d elapsed_sec=%.1f "
+            "error_kind=%s error_type=%s response_retry=%s",
+            ctx.index,
+            ctx.total,
+            len(items),
+            time.monotonic() - started,
+            classify_error(e).value,
+            type(e).__name__,
+            str(bool(cfg.retry_response_timeout)).lower(),
+        )
+        raise
+    _log_usage(items, ctx, telemetry)
     return _parse(summarizer, data, {it.bill_id for it in items})
+
+
+def _fmt_sec(value: float | None) -> str:
+    """시간 로그용 표기. 마감이 없으면 'none'."""
+    return "none" if value is None else f"{value:.1f}"
+
+
+def _log_call(items: list[_Item], prompt: str, ctx: "_BatchContext") -> None:
+    """호출 직전 입력 규모를 남긴다(추가 API 호출 없음).
+
+    입력을 추측으로 줄이는 대신 실제 분포를 기록해 둔다 — 다음에 batch_size 나
+    max_input_chars_per_bill 을 조정한다면 이 로그가 근거가 되어야 한다.
+    **프롬프트 전문과 제안이유 본문은 절대 남기지 않는다**(길이만 남긴다).
+    """
+    sizes = [len(it.text) for it in items] or [0]
+    log.info(
+        "Assembly AI call — batch=%d/%d items=%d body_chars=%d prompt_chars=%d "
+        "min_bill_chars=%d avg_bill_chars=%d max_bill_chars=%d "
+        "allocated_window_sec=%s overall_remaining_sec=%s",
+        ctx.index,
+        ctx.total,
+        len(items),
+        sum(sizes),
+        len(prompt),
+        min(sizes),
+        round(sum(sizes) / len(sizes)),
+        max(sizes),
+        _fmt_sec(ctx.window_sec),
+        _fmt_sec(ctx.overall_remaining_sec),
+    )
+
+
+def _log_usage(
+    items: list[_Item], ctx: "_BatchContext", telemetry: "CallTelemetry"
+) -> None:
+    """성공한 호출의 소요시간·토큰 사용량. 응답에 없는 값은 None 으로 남는다."""
+    log.info(
+        "Assembly AI call ok — batch=%d/%d items=%d elapsed_sec=%.1f model=%s "
+        "model_version=%s prompt_tokens=%s candidate_tokens=%s thought_tokens=%s "
+        "total_tokens=%s",
+        ctx.index,
+        ctx.total,
+        len(items),
+        telemetry.elapsed_sec,
+        telemetry.model or "unknown",
+        telemetry.model_version,
+        telemetry.prompt_tokens,
+        telemetry.candidate_tokens,
+        telemetry.thought_tokens,
+        telemetry.total_tokens,
+    )
 
 
 def _summary_example(lines: int) -> str:

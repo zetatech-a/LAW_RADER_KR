@@ -9,7 +9,7 @@ from email.utils import formataddr
 
 from .config import EmailConfig
 from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
-from .snippet import build_fallback_snippet
+from .snippet import build_assembly_fallback_lines, build_fallback_snippet
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +112,20 @@ def _has_summary(*groups: "dict[str, list[Post]] | None") -> bool:
 _DETAILS_LABEL = "주요 정보"
 
 
+def _assembly_excerpt(p: Post) -> list[str]:
+    """의안 카드의 원문 발췌 줄들(HTML·텍스트 파트가 함께 쓴다).
+
+    AI 요약이 실패한 날에도 '무엇을 바꾸는 법안인가'가 메일에서 보여야 한다. 220자
+    한 줄로는 앞부분의 현행 제도 설명만 실리므로 의안만 여러 구간을 뽑는다.
+    발췌 규칙이 아무것도 못 고르면 기존 220자 발췌로 되돌아간다.
+    """
+    lines = build_assembly_fallback_lines(p.body)
+    if lines:
+        return lines
+    fallback = build_fallback_snippet(p.body, p.title)
+    return [fallback] if fallback else []
+
+
 def _details_block(p: Post) -> str:
     """상세 페이지에서 그대로 가져온 (라벨, 값) 표.
 
@@ -167,18 +181,24 @@ def _summary_block(p: Post, accent: str) -> str:
         )
 
     if p.body:
-        snippet = (
+        # 의안은 발췌의 출처(제안이유 및 주요내용)를 밝히고, 220자 한 줄 대신 원문에서
+        # 고른 여러 구간을 싣는다. 그 외 소스는 기존과 같이 라벨 없이 한 줄 발췌만.
+        if p.source_key == ASSEMBLY_SOURCE_KEY:
+            lines = _assembly_excerpt(p)
+            body_html = "".join(
+                "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;"
+                f"color:#475569'>{_esc(line)}</div>"
+                for line in lines
+            )
+            return (
+                f"<div style='margin:10px 0 0;font-size:10px;letter-spacing:.8px;"
+                f"font-weight:700;color:{accent}'>{_esc(_body_label(p))}</div>"
+                f"{body_html}"
+            )
+        return (
             "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
             f"{_esc(build_fallback_snippet(p.body, p.title))}</div>"
         )
-        # 의안은 발췌의 출처(제안이유 및 주요내용)를 밝힌다. 그 외 소스는 기존과 같이
-        # 라벨 없이 발췌만 싣는다.
-        if p.source_key == ASSEMBLY_SOURCE_KEY:
-            return (
-                f"<div style='margin:10px 0 0;font-size:10px;letter-spacing:.8px;"
-                f"font-weight:700;color:{accent}'>{_esc(_body_label(p))}</div>{snippet}"
-            )
-        return snippet
 
     # 원문이 아직 공개되지 않은 의안. 빈 카드로 두면 수집이 깨진 것처럼 보인다.
     if _is_pending(p):
@@ -378,7 +398,10 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
                     lines.append(f"      · {s}")
             elif p.body:
                 lines.append(f"    [{_body_label(p)}]")
-                lines.append(f"      {build_fallback_snippet(p.body, p.title)}")
+                if p.source_key == ASSEMBLY_SOURCE_KEY:
+                    lines.extend(f"      {line}" for line in _assembly_excerpt(p))
+                else:
+                    lines.append(f"      {build_fallback_snippet(p.body, p.title)}")
             elif _is_pending(p):
                 lines.append(f"    [{_PENDING_LABEL}]")
                 lines.append(f"      {_PENDING_TEXT}")

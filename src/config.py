@@ -96,8 +96,26 @@ class AssemblyBatchConfig:
     max_batch_chars: int = 250000
     # 배치 응답은 의안 수만큼 길어지므로 단건보다 큰 출력 상한이 필요하다.
     max_output_tokens: int = 16384
-    # 의안 배치 요약 단계 전체 시간예산(초, 0=무제한)
+    # 의안 배치 요약 단계 전체 시간예산(초, 0=무제한). 이 값은 **전체 상한**이지
+    # "이만큼 계속 재시도한다"는 뜻이 아니다. top-level 배치마다 아래
+    # request_timeout_sec 안에서 공정 분배된 window 를 받는다(assembly_summary).
     budget_sec: float = 120.0
+    # 의안 배치 요청 하나에 허용할 시간(초). None/미지정이면 llm.timeout_sec 을 쓴다
+    # (Phase 2 까지의 동작). 의안 배치는 25건을 한 번에 보내므로 일반 단건 요약보다
+    # 응답이 오래 걸린다 — 일반 경로의 45초를 늘리지 않고 여기만 늘리기 위한 값이다.
+    request_timeout_sec: float | None = None
+    # 응답 생성 단계의 타임아웃(requests.ReadTimeout · 자체 wall-clock 마감)에서
+    # **같은 요청을 다시 보낼지**. 기본 True 는 Phase 2 까지의 재시도 계약 그대로다.
+    #
+    # False 로 두면 그 호출은 즉시 실패로 접는다(실패 종류는 여전히 TRANSIENT 다 —
+    # 배치 브레이커의 의미를 바꾸지 않는다). 25건짜리 요청이 90초를 넘겼다면 같은
+    # 25건을 다시 보내도 또 넘길 뿐이고, 그 사이 뒤 배치의 시간을 통째로 먹는다.
+    # 연결 실패·5xx 같은 진짜 일시 장애의 bounded retry 는 이 값과 무관하게 유지된다.
+    retry_response_timeout: bool = True
+    # 의안 배치 요청에만 붙일 thinking 수준(예: "minimal"). None/미지정이면 기존
+    # generation payload 를 그대로 보낸다. 실제 전송 여부는 모델이 그 값을 지원하는
+    # 것으로 확인된 경우로 한정된다(src/summarizer.py 의 allowlist).
+    thinking_level: str | None = None
     # 응답에서 빠진 의안이 있으면 그 ID 만 한 번 다시 요청할지
     retry_missing_once: bool = True
     # 서킷 브레이커 — 일시 장애(TRANSIENT: 5xx·타임아웃 등)로 배치 호출이 **연속으로**
@@ -174,6 +192,77 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
+# Gemini 가 정의한 thinking 수준. 여기 없는 값은 설정 오타로 보고 즉시 실패한다 —
+# 모르는 값을 그대로 보내면 400 INVALID_ARGUMENT 가 되어 그날 의안 요약이 통째로
+# 발췌로 떨어진다(설정 한 줄의 오타가 조용히 기능을 끄면 안 된다).
+_THINKING_LEVELS = frozenset({"minimal", "low", "medium", "high"})
+
+# YAML 이 아닌 경로(.env·환경변수 주입 등)로 들어온 문자열 불리언까지 받아 준다.
+_TRUE_WORDS = frozenset({"true", "yes", "on", "1"})
+_FALSE_WORDS = frozenset({"false", "no", "off", "0"})
+
+
+def _as_bool(raw, key: str, default: bool) -> bool:
+    """불리언 설정값. 지정되지 않았으면 default.
+
+    기존 키들은 bool(...) 을 그대로 쓰지만(호환), 새 키는 "false" 같은 문자열이
+    조용히 True 가 되지 않도록 명시적으로 해석한다. 해석할 수 없는 값은 설정 오타이므로
+    조용히 기본값으로 넘어가지 않고 즉시 알린다.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        word = raw.strip().lower()
+        if word in _TRUE_WORDS:
+            return True
+        if word in _FALSE_WORDS:
+            return False
+    raise ValueError(f"{key} 는 true/false 여야 합니다 — 받은 값: {raw!r}")
+
+
+def _as_optional_positive_float(raw, key: str) -> float | None:
+    """양수 설정값. 미지정(None)이면 None — 호출부가 기존 기본값으로 되돌아간다."""
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} 는 숫자여야 합니다 — 받은 값: {raw!r}") from None
+    if value != value or value <= 0:   # NaN 또는 0 이하
+        raise ValueError(f"{key} 는 0보다 커야 합니다 — 받은 값: {raw!r}")
+    return value
+
+
+def _as_non_negative_float(raw, key: str, default: float) -> float:
+    """0 이상 설정값(0 = 무제한이라는 기존 의미를 유지)."""
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} 는 숫자여야 합니다 — 받은 값: {raw!r}") from None
+    if value != value or value < 0:
+        raise ValueError(f"{key} 는 0 이상이어야 합니다 — 받은 값: {raw!r}")
+    return value
+
+
+def _as_thinking_level(raw, key: str) -> str | None:
+    """thinking 수준. 미지정이면 None(= 기존 generation payload 유지)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"{key} 는 문자열이어야 합니다 — 받은 값: {raw!r}")
+    level = raw.strip().lower()
+    if not level:
+        return None
+    if level not in _THINKING_LEVELS:
+        allowed = ", ".join(sorted(_THINKING_LEVELS))
+        raise ValueError(f"{key} 는 {allowed} 중 하나여야 합니다 — 받은 값: {raw!r}")
+    return level
+
+
 def load_config(path: str | Path = "config.yaml") -> Config:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
 
@@ -225,7 +314,20 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         ),
         max_batch_chars=int(ab.get("max_batch_chars", _ab_default.max_batch_chars)),
         max_output_tokens=int(ab.get("max_output_tokens", _ab_default.max_output_tokens)),
-        budget_sec=float(ab.get("budget_sec", _ab_default.budget_sec)),
+        budget_sec=_as_non_negative_float(
+            ab.get("budget_sec"), "llm.assembly_batch.budget_sec", _ab_default.budget_sec
+        ),
+        request_timeout_sec=_as_optional_positive_float(
+            ab.get("request_timeout_sec"), "llm.assembly_batch.request_timeout_sec"
+        ),
+        retry_response_timeout=_as_bool(
+            ab.get("retry_response_timeout"),
+            "llm.assembly_batch.retry_response_timeout",
+            _ab_default.retry_response_timeout,
+        ),
+        thinking_level=_as_thinking_level(
+            ab.get("thinking_level"), "llm.assembly_batch.thinking_level"
+        ),
         retry_missing_once=bool(
             ab.get("retry_missing_once", _ab_default.retry_missing_once)
         ),
