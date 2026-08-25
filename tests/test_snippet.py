@@ -833,3 +833,65 @@ def test_tiny_char_cap_never_overflows_or_raises():
         assert all(line for line in lines), cap  # 빈 줄을 만들지 않는다
     assert build_assembly_fallback_lines(body, max_total_chars=0) == []
     assert build_assembly_fallback_lines(body, max_lines=0) == []
+
+
+# --- 한글 항목 표식은 본문과 붙어 있어야 한다 (PR #26 Codex follow-up #2) ---
+#
+# "가. 현행법은 …" 은 문장 경계 규칙상 "가." 와 본문으로 쪼개진다. 그대로 두면 구간
+# 선택이 내용 대신 라벨을 골라, 발췌가 "가. / 나. / 이에 …" 처럼 배경과 개정 내용을
+# 통째로 잃는다.
+_ENUM_BODY = (
+    "가. 현행법은 기존 제도를 규정하고 있음. "
+    "나. 최근 피해가 확대되고 있음. "
+    "다. 이에 보호조치를 신설하려는 것임."
+)
+_BARE_LABELS = ("가.", "나.", "다.", "라.", "마.")
+
+
+def test_enumeration_labels_are_never_standalone_lines():
+    lines = build_assembly_fallback_lines(_ENUM_BODY)
+    assert lines
+    for line in lines:
+        assert line not in _BARE_LABELS, line
+    assert lines[0].startswith("가. 현행법은")
+
+
+def test_enumeration_excerpt_keeps_background_amendment_and_conclusion():
+    lines = build_assembly_fallback_lines(_ENUM_BODY)
+    joined = " ".join(lines)
+    assert "현행법은 기존 제도를 규정하고 있음" in joined       # 배경
+    assert "최근 피해가 확대되고 있음" in joined                # 문제 상황
+    assert "이에 보호조치를 신설하려는 것임" in joined          # 결론
+    assert len(lines) == 3
+
+
+def test_dates_are_still_not_split_mid_number():
+    lines = build_assembly_fallback_lines(
+        "2026. 1. 1. 시행되었음. 그 결과 혼선이 발생하고 있음. 이에 개정하려는 것임."
+    )
+    assert lines[0] == "2026. 1. 1. 시행되었음."
+
+
+def test_article_numbers_are_still_protected():
+    lines = build_assembly_fallback_lines(
+        "제3조의2. 규정에 따라 적용함. 그 적용범위가 불명확함. 이에 개정하려는 것임."
+    )
+    assert lines[0] == "제3조의2. 규정에 따라 적용함."
+
+
+def test_consecutive_enumeration_markers_do_not_raise_or_leak():
+    lines = build_assembly_fallback_lines("가. 나. 실제 주요내용임. 다. 이에 개정하려는 것임.")
+    assert all(line not in _BARE_LABELS for line in lines)
+    assert "실제 주요내용임" in " ".join(lines)
+    assert "이에 개정하려는 것임" in " ".join(lines)
+
+
+def test_dangling_enumeration_marker_is_dropped():
+    lines = build_assembly_fallback_lines("현행법은 규정하고 있음. 가.")
+    assert lines == ["현행법은 규정하고 있음."]
+
+
+def test_single_syllable_sentence_endings_are_not_treated_as_labels():
+    """표식 목록을 한글 한 글자 전체로 넓히면 멀쩡한 문장이 합쳐진다."""
+    lines = build_assembly_fallback_lines("그러하다. 이에 개정하려는 것임.")
+    assert lines == ["그러하다.", "이에 개정하려는 것임."]

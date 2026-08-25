@@ -556,6 +556,14 @@ OMISSION_MARK = "[중략]"
 # 끊지 않기 위함이다. 그런 자리는 마침표 앞이 숫자다.
 _SENTENCE_SPLIT = re.compile(r"(?<=[^\W\d_][.!?…])\s+")
 
+# 한국 법령·의안 문서의 항목 표식("가. 현행법은 …", "나. …"). 이 규칙 하나만으로는
+# 위 문장 경계에서 "가." 가 독립 조각이 되어, 구간 선택이 내용 대신 **라벨**을 고른다.
+# regex 를 가변 lookbehind 로 복잡하게 만드는 대신 쪼갠 뒤 다시 붙인다.
+#
+# 목록을 한글 한 글자 전체로 넓히지 않는다 — "그러하다.", "…한 바.", "…할 수.", 처럼
+# 실제 한 글자로 끝나는 문장을 표식으로 오인해 다음 문장과 합쳐 버리기 때문이다.
+_ENUMERATION_LABEL = re.compile(r"^(?:[가나다라마바사아자차카타파하])\.$")
+
 # 입법행위를 나타낼 가능성이 높은 표현. 의안 본문에서 '현행 제도 설명'과 '무엇을
 # 바꾸는가'를 가르는 최소한의 단서만 둔다 — 목록을 키우면 첫 문장에서 바로 걸려
 # 구간 선택이 무의미해진다.
@@ -593,10 +601,28 @@ def _cut_at_word(text: str, limit: int, *, from_end: bool = False) -> str:
 
 
 def _assembly_sentences(text: str) -> list[str]:
-    """의안 본문을 의미 있는 문장 단위로 나눈다(내용이 없는 조각은 버린다)."""
-    return [
-        s for s in (part.strip() for part in _SENTENCE_SPLIT.split(text)) if is_meaningful(s)
-    ]
+    """의안 본문을 의미 있는 문장 단위로 나눈다(내용이 없는 조각은 버린다).
+
+    항목 표식("가.", "나.")은 그 자체로 의미 문장이 아니므로 **뒤따르는 내용에 붙여**
+    하나의 논리 문장으로 돌려준다. 그러지 않으면 구간 선택이 라벨만 골라, 발췌가
+    "가. / 나. / 이에 …" 처럼 배경과 개정 내용을 통째로 잃는다.
+
+    표식이 연달아 오면("가. 나. 실제 내용") 모아 두었다가 함께 붙이고, 뒤에 내용이
+    없이 끝나는 표식은 버린다(라벨만 실린 줄을 만들지 않는다).
+    """
+    out: list[str] = []
+    pending: list[str] = []
+    for part in _SENTENCE_SPLIT.split(text):
+        part = part.strip()
+        if not is_meaningful(part):
+            continue
+        if _ENUMERATION_LABEL.match(part):
+            pending.append(part)
+            continue
+        out.append(" ".join([*pending, part]) if pending else part)
+        pending.clear()
+    # 남은 pending 은 뒤에 붙일 내용이 없는 표식이다 — 버린다.
+    return out
 
 
 def _giant_sentence_lines(text: str, max_total_chars: int) -> list[str]:

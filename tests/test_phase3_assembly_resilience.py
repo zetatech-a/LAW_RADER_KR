@@ -298,6 +298,53 @@ def test_C5_invalid_values_fail_explicitly(tmp_path, key, value):
     assert key in str(e.value)
 
 
+# --- 숫자 설정의 불리언 거절 (PR #26 Codex follow-up #2) --------------------
+#
+# bool 은 int 의 하위형이라 float(True) == 1.0, float(False) == 0.0 으로 조용히
+# 통과한다. `request_timeout_sec: true` 는 25건 배치를 1초 타임아웃으로 만들고,
+# `budget_sec: false` 는 0 = '무제한'과 겹쳐 전체 시간 상한을 없앤다.
+@pytest.mark.parametrize("key", ["request_timeout_sec", "budget_sec"])
+@pytest.mark.parametrize("value", [True, False])
+def test_C12toC15_boolean_numeric_settings_are_rejected(tmp_path, key, value):
+    path = _yaml_config(
+        tmp_path, lambda raw: raw["llm"]["assembly_batch"].__setitem__(key, value)
+    )
+    with pytest.raises(ValueError) as e:
+        load_config(path)
+    assert key in str(e.value)
+
+
+def test_C15b_budget_sec_false_is_not_silently_unlimited(tmp_path):
+    """`budget_sec: false` 가 0(무제한)으로 통하면 오타 하나가 시간 상한을 없앤다."""
+    path = _yaml_config(
+        tmp_path, lambda raw: raw["llm"]["assembly_batch"].__setitem__("budget_sec", False)
+    )
+    with pytest.raises(ValueError):
+        load_config(path)
+    # 반면 명시적인 0 은 기존 의미(무제한) 그대로 허용된다.
+    zero = _yaml_config(
+        tmp_path, lambda raw: raw["llm"]["assembly_batch"].__setitem__("budget_sec", 0)
+    )
+    assert load_config(zero).llm.assembly_batch.budget_sec == 0.0
+
+
+@pytest.mark.parametrize(
+    "key,value,expected",
+    [
+        ("request_timeout_sec", "90", 90.0),
+        ("request_timeout_sec", 90, 90.0),
+        ("request_timeout_sec", 90.0, 90.0),
+        ("budget_sec", "300", 300.0),
+        ("budget_sec", 300, 300.0),
+    ],
+)
+def test_C16_numeric_string_compatibility_is_unchanged(tmp_path, key, value, expected):
+    path = _yaml_config(
+        tmp_path, lambda raw: raw["llm"]["assembly_batch"].__setitem__(key, value)
+    )
+    assert getattr(load_config(path).llm.assembly_batch, key) == expected
+
+
 def test_C6_global_new_cap_is_unchanged():
     assert load_config("config.yaml").fetch.max_new_per_source == 50
 

@@ -222,10 +222,23 @@ def _as_bool(raw, key: str, default: bool) -> bool:
     raise ValueError(f"{key} 는 true/false 여야 합니다 — 받은 값: {raw!r}")
 
 
+def _reject_bool(raw, key: str) -> None:
+    """숫자 설정에 들어온 불리언을 거절한다.
+
+    bool 은 int 의 하위형이라 float(True) == 1.0, float(False) == 0.0 으로 조용히
+    통과한다. 그러면 `request_timeout_sec: true` 오타가 '1초 타임아웃'이 되어 25건
+    배치가 매번 죽고, `budget_sec: false` 는 0 = '무제한'과 겹쳐 Assembly AI 전체
+    시간 상한을 통째로 없앤다. 새 설정은 잘못된 값을 즉시 알린다는 계약을 지킨다.
+    """
+    if isinstance(raw, bool):
+        raise ValueError(f"{key} 는 숫자여야 합니다(true/false 불가) — 받은 값: {raw!r}")
+
+
 def _as_optional_positive_float(raw, key: str) -> float | None:
     """양수 설정값. 미지정(None)이면 None — 호출부가 기존 기본값으로 되돌아간다."""
     if raw is None:
         return None
+    _reject_bool(raw, key)
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -239,6 +252,7 @@ def _as_non_negative_float(raw, key: str, default: float) -> float:
     """0 이상 설정값(0 = 무제한이라는 기존 의미를 유지)."""
     if raw is None:
         return default
+    _reject_bool(raw, key)
     try:
         value = float(raw)
     except (TypeError, ValueError):
