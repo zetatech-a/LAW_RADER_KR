@@ -559,7 +559,17 @@ class AssemblyBillScraper(BaseScraper):
         self.page_size = int(ex.get("page_size", 100))
         # LINK_URL 이 없는 레코드에만 쓰는 상세 URL 폴백. 사이트가 경로를 옮기면
         # 코드 배포 없이 config 로 고칠 수 있게 덮어쓰기를 허용한다.
-        self.detail_url = str(ex.get("detail_url") or _DETAIL)
+        #
+        # '운영자가 명시적으로 지정했는지'를 따로 기억한다. 상세 재조회 큐에는 과거에
+        # **그 시점에는 정상이었던** 상세 URL 이 저장돼 있는데, 사이트가 경로를 옮겨
+        # 운영자가 detail_url 을 고쳐도 저장된 URL 이 유효한 http(s) 이면
+        # _canonical_detail_url 은 그것을 그대로 보존한다(아는 죽은 경로만 갈아끼우는
+        # 계약). 그러면 큐 항목만 은퇴한 경로를 계속 두드려 영영 ERROR 로 남는다.
+        # 그래서 '명시적 override 가 있을 때만' 큐의 저장 URL보다 현재 template 을
+        # 우선하도록 재조회 경로에 이 플래그를 넘긴다.
+        raw_detail_url = str(ex.get("detail_url") or "").strip()
+        self.detail_url = raw_detail_url or _DETAIL
+        self.detail_url_overridden = bool(raw_detail_url)
         self.api_key = os.environ.get("ASSEMBLY_API_KEY", "")
 
         # 상세 수집 단계의 안전장치. 사이트나 billInfo.do 가 통째로 죽으면 신규 의안
@@ -594,6 +604,8 @@ class AssemblyBillScraper(BaseScraper):
         self._detail_deadline: float | None = None
         self._consecutive_failures = 0
         self._breaker_note = ""
+        # 마지막 상세 작업(enrich)이 끝난 monotonic 시각. 아직 한 번도 하지 않았으면 None.
+        self._detail_last_activity_at: float | None = None
 
     def fetch_list(self, limit: int, page: int = 1) -> list[Post]:
         if not self.api_key:
@@ -751,6 +763,10 @@ class AssemblyBillScraper(BaseScraper):
         else:
             self._consecutive_failures = 0
 
+        # 상세 작업이 마지막으로 끝난 시각. 다음 상세 작업이 시작될 때 그 사이의
+        # '상세가 아닌 시간'을 시간예산에서 빼기 위해 쓴다(resume_detail_budget).
+        self._detail_last_activity_at = time.monotonic()
+
     def _detail_blocked(self) -> str:
         """상세 수집을 더 시도하지 말아야 하면 그 사유, 계속해도 되면 빈 문자열.
 
@@ -781,16 +797,43 @@ class AssemblyBillScraper(BaseScraper):
                 return self._breaker_note
         return ""
 
+    def resume_detail_budget(self) -> None:
+        """마지막 상세 작업 이후 흘러간 '상세가 아닌 시간' 전체를 예산에서 뺀다.
+
+        신규 의안 상세수집과 큐 재조회 사이에는 상세 작업이 아닌 일이 얼마든지 끼어들 수
+        있다 — config 순서에 따라 **뒤 소스의 목록/상세 수집**, 집계 로깅, 큐 선정, SMTP
+        선점검 등. 그 시간이 예산을 갉아먹으면 LIKMS 요청을 한 번도 보내지 않았는데 예산이
+        소진되어, 선택된 큐 항목이 전부 '요청 없이 ERROR' 가 되고 시도 횟수만 소모한 채
+        다음 간격까지 미뤄진다.
+
+        특정 활동(예: SMTP)만 골라 재는 대신 **마지막 상세 작업 이후의 간격 전체**를 한 번에
+        뺀다. 그래서 중간에 무엇이 끼어들든 빠짐없이 제외되고, 같은 시간을 두 번 빼는 일도
+        구조적으로 생기지 않는다.
+
+        상세 작업을 한 번도 하지 않았으면(예산 마감시각이 아직 없으면) no-op 이다 — 큐
+        재조회의 첫 요청에서 예산이 정상적으로 시작되어야 한다.
+        """
+        if self._detail_last_activity_at is None:
+            return
+        now = time.monotonic()
+        self.exclude_detail_idle_time(now - self._detail_last_activity_at)
+        # 기준점을 지금으로 옮긴다 — 같은 간격을 두 번 빼지 않기 위해서다(이 함수는
+        # 여러 번 불려도 안전해야 한다).
+        self._detail_last_activity_at = now
+
     def exclude_detail_idle_time(self, elapsed_sec: float) -> None:
         """상세 수집과 무관하게 흘려보낸 시간을 시간예산에서 제외한다.
 
         detail_budget_sec 는 첫 enrich 에서 **절대 마감시각**으로 고정된다
-        (_detail_blocked 참고). 그런데 신규 의안 상세수집과 큐 재조회 사이에는
-        SMTP 선점검 같은 '상세 수집이 아닌' 대기가 끼어들 수 있다. 그 대기가 길면
-        LIKMS 요청을 한 번도 하지 않았는데 예산이 소진되어, 선택된 큐 항목들이
-        요청 없이 ERROR 로 떨어지고 시도 횟수만 소모한 채 다음 간격까지 미뤄진다.
-        detail_budget_sec 의 의미는 '실제 의안 상세 작업이 폭주하는 것을 제한'이므로
-        그런 대기는 예산에서 빠져야 한다.
+        (_detail_blocked 참고). 그런데 신규 의안 상세수집과 큐 재조회 사이에는 뒤 소스의
+        수집, 집계 로깅, 큐 선정, SMTP 선점검처럼 '상세 수집이 아닌' 시간이 끼어들 수
+        있다. 그 시간이 길면 LIKMS 요청을 한 번도 하지 않았는데 예산이 소진되어, 선택된
+        큐 항목들이 요청 없이 ERROR 로 떨어지고 시도 횟수만 소모한 채 다음 간격까지
+        미뤄진다. detail_budget_sec 의 의미는 '실제 의안 상세 작업이 폭주하는 것을 제한'
+        이므로 그런 시간은 예산에서 빠져야 한다.
+
+        보통은 이 함수를 직접 부르지 않고 resume_detail_budget() 을 쓴다 — 마지막 상세
+        작업 이후의 간격을 스스로 재므로 빠뜨리거나 두 번 빼는 일이 없다.
 
         마감시각을 **뒤로 미루기만** 한다 — 예산을 다시 시작하지 않는다. 그래서 신규
         수집과 재조회가 하나의 누적 예산을 공유한다는 성질이 그대로 유지된다.

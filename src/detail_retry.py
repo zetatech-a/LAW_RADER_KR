@@ -152,18 +152,35 @@ def build_post(
     source_key: str,
     source_name: str,
     detail_url_template: str = _DETAIL,
+    prefer_template: bool = False,
 ) -> Post:
     """저장된 스냅샷으로 상세 재조회용 Post 를 최소 재구성한다.
 
     url 이 비어 있거나 죽은 구 경로면 BILL_ID 로 현재 상세 경로를 다시 만든다
     (scraper 가 목록 수집에서 쓰는 것과 **같은** canonicalize 함수).
+
+    prefer_template 은 운영자가 config 로 detail_url 을 **명시적으로 지정**했을 때만
+    참이다. 그때는 저장된 URL 대신 현재 template 으로 BILL_ID URL 을 만든다.
+    큐에는 등록 당시에는 정상이었던 상세 URL 이 남아 있는데, 사이트가 경로를 옮겨
+    운영자가 detail_url 을 고쳐도 그 URL 이 유효한 http(s) 이면 canonicalize 계약상
+    그대로 보존되어(아는 죽은 경로만 갈아끼운다) 큐 항목만 은퇴한 경로를 계속 두드리게
+    되기 때문이다.
+
+    **검증은 어떤 경우에도 먼저 한다.** 저장된 URL 이 손상돼 있으면(예: "http://[")
+    canonicalize 단계에서 예외가 나고, 그 항목은 호출자에서 ERROR 로 격리된다.
+    override 가 있다고 해서 손상된 state 를 조용히 정상 URL 로 갈아치워 '복구 성공'처럼
+    보이게 하지 않는다(fail-closed 유지).
     """
+    validated = _canonical_detail_url(item.url, item.bill_id, detail_url_template)
+    url = (
+        detail_url_template.format(bill_id=item.bill_id) if prefer_template else validated
+    )
     return Post(
         source_key=source_key,
         source_name=source_name,
         post_id=item.bill_id,
         title=item.title or item.bill_id,
-        url=_canonical_detail_url(item.url, item.bill_id, detail_url_template),
+        url=url,
         date=item.date,
     )
 
@@ -251,6 +268,10 @@ def retry_bills(
         selection.deferred_by_interval,
     )
     detail_url = getattr(scraper, "detail_url", _DETAIL) or _DETAIL
+    # 운영자가 config 로 상세 URL 을 명시했을 때만 저장된 스냅샷 URL 보다 우선한다.
+    prefer_template = bool(getattr(scraper, "detail_url_overridden", False))
+    if prefer_template:
+        log.info("의안 상세 재조회 — config 의 detail_url override 를 큐 항목에도 적용")
 
     for item in selection.selected:
         # **Post 재구성부터 enrich 까지가 한 항목의 실패 경계다.**
@@ -265,6 +286,7 @@ def retry_bills(
                 source_key=source_key,
                 source_name=source_name,
                 detail_url_template=detail_url,
+                prefer_template=prefer_template,
             )
             log.info(
                 "의안 상세 재조회 — bill=%s previous=%s attempt=%d",

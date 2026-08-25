@@ -1109,20 +1109,25 @@ def test_B3_all_entries_malformed_still_completes_the_run(tmp_path, monkeypatch)
 
 
 # ==========================================================================
-# SMTP 선점검 시간은 의안 상세 시간예산에서 제외된다 (PR #25 Codex P2)
+# 의안 상세 시간예산은 **의안 상세 작업**만 센다 (PR #25 Codex P2)
+#
+# 신규 의안 상세수집과 큐 재조회 사이에는 뒤 소스의 수집, 집계 로깅, 큐 선정,
+# SMTP 선점검이 끼어든다. 그 시간이 예산을 갉아먹으면 LIKMS 요청을 한 번도 보내지
+# 않았는데 큐 항목이 전부 ERROR 로 떨어진다.
 # ==========================================================================
-def test_smtp_preflight_time_is_excluded_from_the_detail_budget(tmp_path, monkeypatch):
-    """느린 SMTP 핸드셰이크가 큐 재조회의 예산을 갉아먹으면 안 된다."""
+def test_detail_budget_is_resumed_before_queued_retry(tmp_path, monkeypatch):
+    """재조회 직전에 '상세가 아닌 간격'을 예산에서 빼는 보정이 실제로 일어난다."""
+    import src.main as main_mod
+
     path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)])
-    excluded = []
+    resumed = []
 
     class _BudgetScraper(_FakeScraper):
         """실제 스크래퍼처럼 예산 보정 API 를 노출하는 대역."""
 
-        def exclude_detail_idle_time(self, elapsed_sec):
-            excluded.append(elapsed_sec)
-
-    import src.main as main_mod
+        def resume_detail_budget(self):
+            # 보정은 반드시 재조회 요청 **전에** 일어나야 한다.
+            resumed.append(tuple(self.enrich_calls))
 
     made = {}
 
@@ -1131,55 +1136,74 @@ def test_smtp_preflight_time_is_excluded_from_the_detail_budget(tmp_path, monkey
         made[src.key] = sc
         return sc
 
-    calls = {"verify": 0}
-
-    def _verify(cfg):
-        calls["verify"] += 1
-
     monkeypatch.setenv("SMTP_USER", "s@example.com")
     monkeypatch.setenv("SMTP_PASSWORD", "pw")
     monkeypatch.setenv("MAIL_TO", "to@example.com")
     monkeypatch.setattr(main_mod, "build_scraper", _factory)
-    monkeypatch.setattr(main_mod, "verify_smtp_login", _verify)
+    monkeypatch.setattr(main_mod, "verify_smtp_login", lambda cfg: None)
     monkeypatch.setattr(main_mod, "send_digest", lambda *a, **k: None)
     monkeypatch.setattr(main_mod, "summarize_posts", lambda *a, **k: 0)
 
     rc = main_mod.run(["--state", str(path), "--only", "assembly_bill"])
     assert rc == 0
-    assert calls["verify"] == 1
-    # 선점검이 성공했으므로 그 대기시간이 상세 예산에서 제외되도록 호출된다.
-    assert len(excluded) == 1
-    assert excluded[0] >= 0
-    # 재조회는 정상 수행되었다.
+    assert resumed == [()]                     # 정확히 한 번, 재조회 요청 전에
     assert made["assembly_bill"].enrich_calls == ["PRC_Q"]
 
 
-def test_smtp_failure_does_not_adjust_the_detail_budget(tmp_path, monkeypatch):
-    """실패하면 재조회 자체를 하지 않으므로 예산을 손볼 이유가 없다."""
+def test_no_budget_resume_when_nothing_is_due(tmp_path, monkeypatch):
+    """재조회할 것이 없으면 예산을 건드리지 않는다."""
+    import src.main as main_mod
+
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", JUST_NOW)])
+    resumed = []
+
+    class _BudgetScraper(_FakeScraper):
+        def resume_detail_budget(self):
+            resumed.append(1)
+
+    monkeypatch.setattr(
+        main_mod, "build_scraper",
+        lambda src, fetcher: _BudgetScraper(src.key, src.name, [], {}),
+    )
+    monkeypatch.setattr(main_mod, "send_digest", lambda *a, **k: None)
+    assert main_mod.run(["--state", str(path), "--only", "assembly_bill"]) == 0
+    assert resumed == []
+
+
+def test_smtp_failure_does_not_resume_the_detail_budget(tmp_path, monkeypatch):
+    """선점검이 실패하면 재조회 자체를 하지 않으므로 예산을 손볼 이유가 없다."""
     import smtplib
 
     import src.main as main_mod
 
     path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)])
-    excluded = []
+    resumed = []
 
     class _BudgetScraper(_FakeScraper):
-        def exclude_detail_idle_time(self, elapsed_sec):
-            excluded.append(elapsed_sec)
-
-    def _factory(src, fetcher):
-        return _BudgetScraper(src.key, src.name, [], {"PRC_Q": (S.AVAILABLE, "본문")})
+        def resume_detail_budget(self):
+            resumed.append(1)
 
     monkeypatch.setenv("SMTP_USER", "s@example.com")
     monkeypatch.setenv("SMTP_PASSWORD", "pw")
     monkeypatch.setenv("MAIL_TO", "to@example.com")
-    monkeypatch.setattr(main_mod, "build_scraper", _factory)
+    monkeypatch.setattr(
+        main_mod, "build_scraper",
+        lambda src, fetcher: _BudgetScraper(src.key, src.name, [], {"PRC_Q": (S.AVAILABLE, "본문")}),
+    )
     monkeypatch.setattr(
         main_mod, "verify_smtp_login",
         lambda cfg: (_ for _ in ()).throw(smtplib.SMTPAuthenticationError(535, b"bad")),
     )
     monkeypatch.setattr(main_mod, "send_digest", lambda *a, **k: None)
 
-    rc = main_mod.run(["--state", str(path), "--only", "assembly_bill"])
-    assert rc == 1
-    assert excluded == []
+    assert main_mod.run(["--state", str(path), "--only", "assembly_bill"]) == 1
+    assert resumed == []
+
+
+def test_run_works_with_a_scraper_without_the_budget_api(tmp_path, monkeypatch):
+    """예산 보정 API 가 없는 스크래퍼여도 재조회는 정상 동작해야 한다."""
+    path = _seed_state(tmp_path, seen=["PRC_Q"], queue=[("PRC_Q", OLD)])
+    ctx = _run(tmp_path, monkeypatch, state_path=path,
+               statuses={"PRC_Q": (S.AVAILABLE, "본문")})
+    assert ctx.rc == 0
+    assert ctx.enriched == ["PRC_Q"]

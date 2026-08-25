@@ -378,3 +378,107 @@ def test_malformed_entry_is_logged_without_the_raw_exception_dump(caplog):
     assert "PRC_BAD" in caplog.text
     assert "요청을 만들지 못함" in caplog.text
     assert "Traceback" not in caplog.text
+
+
+# --- 저장된 큐 URL vs 현재 detail_url override (PR #25 Codex P2) -------------
+#
+# 큐에는 등록 당시에는 정상이었던 상세 URL 이 남는다. 사이트가 경로를 옮겨 운영자가
+# config 의 detail_url 을 고쳐도, 저장된 URL 이 유효한 http(s) 이면 canonicalize 계약상
+# 그대로 보존되어 큐 항목만 은퇴한 경로를 계속 두드린다.
+
+NEW_TEMPLATE = "https://likms.assembly.go.kr/bill/bi/newDetailPage.do?billId={bill_id}"
+OLD_VALID = "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_1"
+LEGACY = "https://likms.assembly.go.kr/bill/billDetail.do?billId=PRC_1"
+
+
+class _OverrideScraper(_Scraper):
+    """운영자가 config 로 detail_url 을 명시한 스크래퍼."""
+
+    def __init__(self, results, template=NEW_TEMPLATE, overridden=True):
+        super().__init__(results)
+        self.detail_url = template
+        self.detail_url_overridden = overridden
+        self.urls = []
+
+    def enrich(self, post):
+        self.urls.append(post.url)
+        super().enrich(post)
+
+
+def test_B1_explicit_override_supersedes_a_stale_queued_url():
+    sc = _OverrideScraper({"PRC_1": (S.AVAILABLE, "본문")})
+    retry_bills(sc, _sel(_q("PRC_1", url=OLD_VALID)),
+                source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME)
+    assert sc.urls == [NEW_TEMPLATE.format(bill_id="PRC_1")]
+
+
+def test_B2_without_override_a_valid_stored_url_is_preserved():
+    """override 가 없으면 우리가 모르는 공식 URL 을 임의로 갈아끼우지 않는다(기존 계약)."""
+    unknown_official = "https://likms.assembly.go.kr/bill/bi/somethingNew.do?billId=PRC_1"
+    sc = _OverrideScraper({"PRC_1": (S.AVAILABLE, "본문")}, overridden=False)
+    retry_bills(sc, _sel(_q("PRC_1", url=unknown_official)),
+                source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME)
+    assert sc.urls == [unknown_official]
+
+
+def test_B3_override_does_not_rescue_a_malformed_stored_url():
+    """손상된 state 를 조용히 정상 URL 로 갈아치워 '복구 성공'처럼 만들지 않는다."""
+    sc = _OverrideScraper({"PRC_GOOD": (S.AVAILABLE, "본문")})
+    out = retry_bills(
+        sc, _sel(_q("PRC_BAD", url=BAD_URL), _q("PRC_GOOD")),
+        source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME,
+    )
+    # 손상 항목은 요청 0회 + ERROR + 큐 유지, 뒤 항목은 계속 처리된다.
+    assert [p.post_id for p in out.still_queued] == ["PRC_BAD"]
+    assert out.still_queued[0].proposal_status is S.ERROR
+    assert [p.post_id for p in out.recovered] == ["PRC_GOOD"]
+    assert sc.urls == [NEW_TEMPLATE.format(bill_id="PRC_GOOD")]
+
+
+def test_B4_override_replaces_a_known_legacy_route():
+    sc = _OverrideScraper({"PRC_1": (S.PENDING, "")})
+    retry_bills(sc, _sel(_q("PRC_1", url=LEGACY)),
+                source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME)
+    assert sc.urls == [NEW_TEMPLATE.format(bill_id="PRC_1")]
+
+
+def test_B5_override_is_used_for_an_empty_stored_url():
+    sc = _OverrideScraper({"PRC_1": (S.PENDING, "")})
+    retry_bills(sc, _sel(_q("PRC_1", url="")),
+                source_key=ASSEMBLY_SOURCE_KEY, source_name=NAME)
+    assert sc.urls == [NEW_TEMPLATE.format(bill_id="PRC_1")]
+
+
+def test_build_post_prefer_template_validates_before_substituting():
+    """prefer_template 이어도 검증이 먼저다 — 손상된 URL 은 여전히 예외를 던진다."""
+    import pytest
+
+    with pytest.raises(ValueError):
+        build_post(_q("PRC_1", url=BAD_URL), source_key=ASSEMBLY_SOURCE_KEY,
+                   source_name=NAME, detail_url_template=NEW_TEMPLATE,
+                   prefer_template=True)
+
+
+def test_build_post_default_does_not_prefer_the_template():
+    """기본값은 기존 동작 — 저장된 정상 URL 보존."""
+    p = build_post(_q("PRC_1", url=OLD_VALID), source_key=ASSEMBLY_SOURCE_KEY,
+                   source_name=NAME, detail_url_template=NEW_TEMPLATE)
+    assert p.url == OLD_VALID
+
+
+def test_scraper_reports_whether_detail_url_was_overridden():
+    from src.config import SourceConfig
+    from src.scrapers.assembly import AssemblyBillScraper, _DETAIL
+
+    def _make(**extra):
+        src = SourceConfig(key=ASSEMBLY_SOURCE_KEY, name=NAME, type="assembly_bill",
+                           list_url="https://likms.assembly.go.kr/", extra=extra)
+        return AssemblyBillScraper(src, fetcher=None)
+
+    default = _make()
+    assert default.detail_url == _DETAIL and default.detail_url_overridden is False
+    # 빈 문자열/공백은 '지정 안 함'으로 본다(기존 config 관용).
+    blank = _make(detail_url="   ")
+    assert blank.detail_url == _DETAIL and blank.detail_url_overridden is False
+    over = _make(detail_url=NEW_TEMPLATE)
+    assert over.detail_url == NEW_TEMPLATE and over.detail_url_overridden is True

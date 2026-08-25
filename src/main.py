@@ -353,12 +353,6 @@ def run(argv=None) -> int:
             return 1
         # 값이 채워져 있어도 앱 비밀번호 폐기·호스트 도달 불가면 발송은 실패한다.
         # 요약에 할당량을 쓰기 전에 실제로 로그인해 본다.
-        #
-        # 이 핸드셰이크에 걸린 시간은 의안 상세 시간예산에서 빼야 한다. 예산은 신규
-        # 의안의 첫 상세 요청에서 절대 마감시각으로 고정되는데, 여기서 오래 기다리면
-        # LIKMS 요청을 한 번도 하지 않았는데 예산이 소진되어 뒤따르는 큐 재조회가
-        # 요청 없이 전부 ERROR 로 떨어진다(시도 횟수만 소모하고 다음 간격까지 미뤄짐).
-        smtp_started = time.monotonic()
         try:
             verify_smtp_login(cfg.email)
         except Exception as e:  # noqa: BLE001
@@ -371,18 +365,23 @@ def run(argv=None) -> int:
                 total,
                 len(selection.selected),
             )
-            # 실패하면 이 실행은 큐 재조회를 하지 않고 끝나므로 예산을 손볼 이유가 없다.
             return 1
-        # 성공한 선점검의 대기시간만 마감시각을 뒤로 민다(예산 재시작이 아니다).
-        # 스크래퍼가 교체되어 이 API 가 없으면(테스트 대역 등) 조용히 건너뛴다 —
-        # 시간예산 보정이 없다고 실행을 실패시킬 이유는 없다.
-        exclude_idle = getattr(assembly_scraper, "exclude_detail_idle_time", None)
-        if callable(exclude_idle):
-            exclude_idle(time.monotonic() - smtp_started)
 
     # ── 큐 재조회 실행 ─────────────────────────────────────────────────────────
     retry = RetryOutcome()
     if selection.selected:
+        # 신규 의안 상세수집이 끝난 뒤 여기까지 흘러간 시간은 의안 상세 작업이 아니다 —
+        # config 순서에 따라 뒤 소스의 목록/상세 수집, 집계 로깅, 큐 선정, SMTP 선점검이
+        # 끼어든다. 그 시간이 상세 시간예산을 갉아먹으면 LIKMS 요청을 한 번도 보내지
+        # 않았는데 예산이 소진되어 큐 항목이 전부 요청 없이 ERROR 로 떨어진다.
+        # 마지막 상세 작업 이후의 간격 전체를 여기서 한 번에 뺀다(예산 재시작이 아니라
+        # 마감시각을 그만큼 뒤로 미는 것이며, 실제 상세 작업 시간은 그대로 누적된다).
+        #
+        # 스크래퍼가 교체되어 이 API 가 없으면(테스트 대역 등) 조용히 건너뛴다 —
+        # 시간예산 보정이 없다고 실행을 실패시킬 이유는 없다.
+        resume_budget = getattr(assembly_scraper, "resume_detail_budget", None)
+        if callable(resume_budget):
+            resume_budget()
         retry = retry_bills(
             assembly_scraper,
             selection,
