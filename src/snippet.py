@@ -674,20 +674,43 @@ def build_assembly_fallback_lines(
     # 고장난 것처럼 보인다(원문이 같은 문구를 반복하는 의안은 드물지 않다).
     chosen = list(dict.fromkeys(chosen))
 
+    return _assemble(chosen, max_total_chars)
+
+
+def _assemble(chosen: list[str], max_total_chars: int) -> list[str]:
+    """고른 문장들을 전체 상한 안에서 조립한다. **뒤 문장의 몫을 남긴다.**
+
+    앞 문장에 남은 예산을 통째로 주면, 배경 문장 하나가 아주 긴 의안에서 그 문장이
+    900자를 독점하고 개정 내용·결론이 통째로 사라진다 — Phase 3 이전의 '앞부분만
+    보이는 발췌' 문제가 그대로 돌아온다. 그래서 줄마다 '남은 예산 ÷ 남은 줄 수'의
+    공정 몫만 쓰게 하고, **잘린 뒤에도 다음 문장으로 계속 간다**.
+
+    짧은 문장이 쓰지 않은 예산은 그대로 뒤 문장에게 넘어간다(고정 분할이 아니다):
+
+      900자 / 3줄 → 첫 줄 상한 300
+      첫 줄이 100자뿐이면 → 남은 800을 2줄이 나눠 각 400까지 가능
+
+    말줄임표도 그 줄의 몫 안에서 센다. 전체 합은 언제나 max_total_chars 이하다.
+    """
     out: list[str] = []
     used = 0
-    for sentence in chosen:
+    for i, sentence in enumerate(chosen):
         remaining = max_total_chars - used
         if remaining <= 0:
             break
-        if len(sentence) <= remaining:
+        # 마지막 줄(또는 한 줄짜리 발췌)에는 남은 예산을 전부 준다 — 남겨 둘 뒤 줄이
+        # 없는데 아껴 봐야 발췌만 짧아진다.
+        fair_cap = remaining // (len(chosen) - i)
+        if len(sentence) <= fair_cap:
             out.append(sentence)
             used += len(sentence)
             continue
-        # 마지막으로 담는 줄만 잘린다. 잘렸다는 사실을 표시해 원문 확인을 유도한다.
-        room = remaining - len(ELLIPSIS) - 1
+        # 잘렸다는 사실을 표시해 원문 확인을 유도한다. 표식(공백 + …)도 이 줄의 몫이다.
+        room = fair_cap - len(ELLIPSIS) - 1
         if room <= 0:
-            break
-        out.append(f"{_cut_at_word(sentence, room)} {ELLIPSIS}")
-        break
+            # 이 줄에 실을 만한 몫이 없다 — 건너뛰고 다음 줄에 기회를 준다.
+            continue
+        line = f"{_cut_at_word(sentence, room)} {ELLIPSIS}"
+        out.append(line)
+        used += len(line)
     return out

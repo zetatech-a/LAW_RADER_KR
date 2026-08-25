@@ -485,10 +485,17 @@ def _source_new_cap(src: SourceConfig, global_cap: int) -> int:
     raw = src.extra.get("max_new_per_run")
     if raw is None:
         return global_cap
-    try:
-        cap = int(raw)
-    except (TypeError, ValueError):
+    if isinstance(raw, bool):
+        # bool 은 int 의 하위형이라 int(True) == 1 이 된다. 이대로 두면 YAML 의
+        # `max_new_per_run: true` 오타가 '상한 1건'으로 조용히 받아들여져, 신규가
+        # 여러 건인 날 1건만 발송되고 나머지 ID 는 기존 overflow 규칙에 따라 seen
+        # 처리된다 — 설정 오타 하나가 영구 알림 누락이 된다. 명시적으로 거절한다.
         cap = 0
+    else:
+        try:
+            cap = int(raw)
+        except (TypeError, ValueError):
+            cap = 0
     if cap <= 0:
         log.warning(
             "[%s] max_new_per_run 값이 올바르지 않아 무시합니다(%r) — 전역 상한 %d 사용",

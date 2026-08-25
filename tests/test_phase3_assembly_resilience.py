@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import time
+from copy import deepcopy
 
 import pytest
 import requests
@@ -192,7 +193,9 @@ class _Session:
 
     def post(self, url, headers=None, json=None, timeout=None):
         self.models.append(url.rstrip("/").split("/")[-1].split(":")[0])
-        self.sent.append(json)
+        # 교정 재시도는 payload 를 그 자리에서 갈아끼우므로 스냅샷으로 남긴다
+        # (같은 dict 를 두 번 담으면 '무엇을 보냈는가'를 검증할 수 없다).
+        self.sent.append(deepcopy(json))
         self.timeouts.append(timeout)
         if self._delay:
             time.sleep(self._delay)
@@ -714,3 +717,108 @@ def test_T5_logs_never_contain_secrets_prompt_or_body(clock, caplog):
         assert secret not in text
     assert body[:40] not in text          # 본문 전문/조각이 실리지 않는다
     assert "[의안 목록]" not in text       # 프롬프트 전문도 실리지 않는다
+
+
+# ==========================================================================
+# PR #26 Codex follow-up — 소스별 cap 의 bool 거절
+#
+# bool 은 int 의 하위형이라 int(True) == 1 이다. `max_new_per_run: true` 오타가
+# '상한 1건'으로 통하면, 신규가 여러 건인 날 1건만 발송되고 나머지 ID 는 기존
+# overflow 규칙에 따라 seen 처리된다 — 설정 오타가 영구 알림 누락이 된다.
+# ==========================================================================
+def _src(value):
+    from src.config import SourceConfig
+
+    return SourceConfig(
+        key=ASSEMBLY_SOURCE_KEY, name="n", type="t", list_url="u",
+        extra={"max_new_per_run": value},
+    )
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_C8_C9_boolean_source_cap_falls_back_to_the_global_cap(value):
+    assert _source_new_cap(_src(value), 50) == 50
+
+
+def test_C10_boolean_source_cap_logs_a_warning(caplog):
+    caplog.set_level(logging.WARNING, logger="src.main")
+    assert _source_new_cap(_src(True), 50) == 50
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("max_new_per_run" in m and ASSEMBLY_SOURCE_KEY in m for m in warnings)
+
+
+@pytest.mark.parametrize("value,expected", [(75, 75), ("75", 75), (60, 60)])
+def test_C11_valid_source_cap_compatibility_is_unchanged(value, expected):
+    """숫자·숫자문자열의 기존 호환성을 이번 수정으로 좁히지 않는다."""
+    assert _source_new_cap(_src(value), 50) == expected
+
+
+# ==========================================================================
+# PR #26 Codex follow-up — 보내지도 않은 thinking 옵션 때문에 400 을 재시도하지 않는다
+#
+# 요청된 수준(thinking_level)과 실제로 payload 에 들어간 수준(effective)이 다르면,
+# allowlist 밖 모델의 진짜 400(스키마 오류 등)이 'thinking 교정' 분기로 들어가
+# **완전히 같은 요청**을 한 번 더 보낸다(max_retries=0 에서도).
+# ==========================================================================
+def _schema_400():
+    return _err(400, "INVALID_ARGUMENT", 'Unknown name "responseSchemaX".')
+
+
+@pytest.mark.parametrize("model", [_ALIAS, _LITE, "gemini-9-ultra"])
+def test_S14_genuine_400_on_unsupported_model_is_not_retried_as_thinking(model):
+    s = Summarizer(_llm(model=model, max_retries=0, batch=_batch_cfg()))
+    s.session = _Session([_schema_400(), _ok_resp()])
+    with pytest.raises(Exception) as e:
+        _assembly_generate(s, s.cfg.assembly_batch)
+
+    assert len(s.session.sent) == 1                       # 동일 요청을 두 번 보내지 않는다
+    assert "thinkingConfig" not in s.session.sent[0]["generationConfig"]
+    assert classify_error(e.value) is LLMErrorKind.BAD_REQUEST   # 기존 terminal 분류 유지
+
+
+def test_S15_supported_model_keeps_the_one_shot_thinking_correction():
+    s = Summarizer(_llm(model=_MODEL_36, max_retries=0, batch=_batch_cfg()))
+    s.session = _Session([_schema_400(), _ok_resp()])
+    _assembly_generate(s, s.cfg.assembly_batch)           # 교정 재시도로 성공
+
+    assert len(s.session.sent) == 2                       # max_retries=0 이어도 1회 교정
+    assert s.session.sent[0]["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "minimal"
+    }
+    assert "thinkingConfig" not in s.session.sent[1]["generationConfig"]
+
+
+def test_S16_gemini25_thinking_budget_correction_is_unchanged():
+    s = Summarizer(_llm(model=_M25, max_retries=0, batch=_batch_cfg()))
+    s.session = _Session([_schema_400(), _ok_resp()])
+    _assembly_generate(s, s.cfg.assembly_batch)
+
+    assert len(s.session.sent) == 2
+    assert s.session.sent[0]["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
+    assert "thinkingConfig" not in s.session.sent[1]["generationConfig"]
+
+
+def test_S17_unsupported_model_is_not_cached_as_thinking_unsupported():
+    """보낸 적 없는 옵션 때문에 모델을 '미지원'으로 기억하면 안 된다."""
+    s = Summarizer(_llm(model=_ALIAS, max_retries=0, batch=_batch_cfg()))
+    s.session = _Session([_schema_400(), _ok_resp()])
+    with pytest.raises(Exception):
+        _assembly_generate(s, s.cfg.assembly_batch)
+    assert s._thinking_unsupported == set()
+
+
+def test_S18_404_fallback_to_an_unsupported_model_sends_no_thinking_level():
+    """지원 모델이 404 로 사라져도 대체 모델에 미지원 thinkingLevel 을 보내지 않는다."""
+    s = Summarizer(_llm(model=_MODEL_36, fallback_models=[_LITE], max_retries=0,
+                        batch=_batch_cfg()))
+    s.session = _Session(
+        [_err(404, "NOT_FOUND", "This model models/x is no longer available"), _ok_resp()]
+    )
+    _assembly_generate(s, s.cfg.assembly_batch)
+
+    assert s.session.models == [_MODEL_36, _LITE]
+    assert s.session.sent[0]["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "minimal"
+    }
+    assert "thinkingConfig" not in s.session.sent[1]["generationConfig"]
+    assert s._thinking_unsupported == set()               # 404 는 thinking 문제가 아니다

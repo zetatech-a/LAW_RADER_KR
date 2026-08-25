@@ -831,6 +831,32 @@ def test_O3_assembly_processes_up_to_75(tmp_path, monkeypatch):
     assert len(ctx.news) == 75
 
 
+def test_O3b_boolean_source_override_does_not_become_a_cap_of_one(tmp_path, monkeypatch):
+    """`max_new_per_run: true` 오타가 '상한 1건'이 되면 나머지가 영구 누락된다.
+
+    bool 은 int 의 하위형이라 int(True) == 1 이다. 잘못된 override 는 경고를 남기고
+    전역 상한으로 되돌아가야 한다(PR #26 Codex P2).
+    """
+    import yaml
+
+    raw = yaml.safe_load(open("config.yaml", encoding="utf-8"))
+    for src in raw["sources"]:
+        if src["key"] == ASSEMBLY_SOURCE_KEY:
+            src["max_new_per_run"] = True
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+
+    bills = [_bill(f"PRC_{i:03d}") for i in range(12)]
+    path = _seed_state(tmp_path, seen=["seed"])
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path, config=cfg_path,
+        new_assembly=bills,
+        statuses={b.post_id: (S.AVAILABLE, "제안이유 본문") for b in bills},
+    )
+    assert ctx.rc == 0
+    assert len(ctx.news) == 12          # 1건으로 잘리지 않는다(전역 상한 50 적용)
+
+
 # ==========================================================================
 # A. 목록 전면 실패가 due 상세 재조회를 막으면 안 된다 (PR #25 Codex P1)
 #

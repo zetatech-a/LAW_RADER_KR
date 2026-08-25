@@ -786,15 +786,27 @@ class Summarizer:
         send_thinking = (
             _is_gemini_25(model) and model not in self._thinking_unsupported
         )
-        level = (
+        # '요청된 수준'과 '실제로 보낸 수준'을 구분한다. allowlist 밖 모델에서는
+        # _generation_config 가 thinkingConfig 를 빼는데, 여기서 요청값만 들고 있으면
+        # 아래 400 교정 분기가 "thinking 때문이겠지"라고 오판해 **완전히 같은 요청을**
+        # 한 번 더 보낸다(max_retries=0 에서도). 성공 가능성 0인 호출이 한도와 배치
+        # window 를 먹고, 진짜 400 원인도 가린다.
+        #
+        # 그래서 지원 여부 판정을 여기서 한 번만 하고, 그 결과(effective_level)를
+        # payload 생성과 400 교정 자격 판단이 **함께** 쓴다.
+        effective_level = (
             thinking_level
-            if thinking_level and model not in self._thinking_unsupported
+            if (
+                thinking_level
+                and model not in self._thinking_unsupported
+                and supports_thinking_level(model, thinking_level)
+            )
             else None
         )
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": self._generation_config(
-                model, send_thinking, schema, max_output_tokens, level
+                model, send_thinking, schema, max_output_tokens, effective_level
             ),
         }
         # 이 호출 한 번에 허용할 시간. 지정이 없으면 기존 llm.timeout_sec 그대로다.
@@ -898,11 +910,13 @@ class Summarizer:
             # 대신 '우리가 이 요청에 붙인 유일한 선택 옵션이 thinkingConfig 이고 400 을
             # 받았다'는 사실만으로 그 옵션을 떼고 한 번만 재시도한다(send_thinking 이
             # False 가 되므로 두 번은 없다). 400 에서 다른 모델로 넘어가지는 않는다.
-            if resp.status_code == 400 and (send_thinking or level):
+            # **실제로 thinkingConfig 를 보낸 요청**에서만 교정 재시도를 한다. 보내지도
+            # 않은 옵션을 '떼고' 다시 보내면 같은 요청의 반복일 뿐이다.
+            if resp.status_code == 400 and (send_thinking or effective_level):
                 log.info("모델 %s 는 thinkingConfig 미지원 — 제외하고 재시도", model)
                 self._thinking_unsupported.add(model)
                 send_thinking = False
-                level = None
+                effective_level = None
                 payload["generationConfig"] = self._generation_config(
                     model, False, schema, max_output_tokens, None
                 )

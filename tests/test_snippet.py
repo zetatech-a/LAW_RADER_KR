@@ -777,3 +777,59 @@ def test_generic_fallback_snippet_behavior_is_unchanged():
     assert out.endswith(f" {ELLIPSIS}")
     assert len(out) == SNIPPET_LIMIT + 2
     assert build_fallback_snippet(BODY_SENTENCE, TITLE) == BODY_SENTENCE
+
+
+# --- 선택된 구간 사이의 문자 예산 예약 (PR #26 Codex P2) -------------------
+#
+# 앞 문장에 남은 예산을 통째로 주면, 배경 문장이 아주 긴 의안에서 그 한 문장이
+# 상한을 독점하고 개정 내용·결론이 사라진다 — Phase 3 이전의 '앞부분만 보이는
+# 발췌' 문제가 그대로 돌아온다.
+_LONG_BACKGROUND = (
+    "현행법은 " + "각종 금융투자상품 및 관련 제도에 관한 사항을 " * 60 + "규정하고 있음."
+)
+_CONCLUSION = "부칙에서 시행일을 공포 후 6개월로 정함."
+
+
+def test_long_first_sentence_does_not_starve_later_sections():
+    body = _assembly_body(_LONG_BACKGROUND, _MIDDLE, _AMENDMENT, _CONCLUSION)
+    lines = build_assembly_fallback_lines(body)
+
+    assert len(lines) == 3                      # 배경 한 줄로 끝나면 안 된다
+    assert lines[0].startswith("현행법은")
+    assert lines[0].endswith(ELLIPSIS)          # 배경은 자기 몫만큼만 잘려 실린다
+    assert _AMENDMENT in lines                  # 개정 내용이 살아남는다
+    assert _CONCLUSION in lines                 # 결론도 살아남는다
+    assert sum(len(line) for line in lines) <= ASSEMBLY_FALLBACK_CHARS
+
+
+def test_unused_budget_is_redistributed_to_later_sentences():
+    """짧은 앞 문장이 쓰지 않은 예산은 뒤 문장이 쓴다(고정 분할이 아니다)."""
+    short_first = "짧은 배경임."
+    long_amendment = "이에 " + "매우 긴 개정 내용을 " * 80 + "규정하려는 것임."
+    body = _assembly_body(short_first, _MIDDLE, long_amendment, _CONCLUSION)
+    lines = build_assembly_fallback_lines(body)
+
+    assert lines[0] == short_first               # 짧은 문장은 잘리지 않는다
+    assert lines[-1] == _CONCLUSION              # 마지막 구간도 유지된다
+    # 900/3=300 을 넘겨, 첫 줄이 남긴 예산을 실제로 물려받았다
+    assert len(lines[1]) > ASSEMBLY_FALLBACK_CHARS // 3
+    assert sum(len(line) for line in lines) <= ASSEMBLY_FALLBACK_CHARS
+
+
+def test_single_line_request_still_uses_the_whole_budget():
+    """max_lines=1 에서는 남겨 둘 뒤 줄이 없으므로 기존 한 줄 절단 의미 그대로."""
+    body = _assembly_body(_LONG_BACKGROUND, _MIDDLE, _AMENDMENT)
+    lines = build_assembly_fallback_lines(body, max_lines=1, max_total_chars=500)
+    assert len(lines) == 1
+    assert lines[0].endswith(ELLIPSIS)
+    assert 400 < len(lines[0]) <= 500            # 예산을 아껴 짧아지지 않는다
+
+
+def test_tiny_char_cap_never_overflows_or_raises():
+    body = _assembly_body(_LONG_BACKGROUND, _MIDDLE, _AMENDMENT, _CONCLUSION)
+    for cap in range(1, 40):
+        lines = build_assembly_fallback_lines(body, max_total_chars=cap)
+        assert sum(len(line) for line in lines) <= cap, cap
+        assert all(line for line in lines), cap  # 빈 줄을 만들지 않는다
+    assert build_assembly_fallback_lines(body, max_total_chars=0) == []
+    assert build_assembly_fallback_lines(body, max_lines=0) == []
