@@ -14,6 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.models import Post
 from src.notifier import build_html, build_text
 from src.snippet import (
+    ASSEMBLY_FALLBACK_CHARS,
+    ELLIPSIS,
+    OMISSION_MARK,
+    SNIPPET_LIMIT,
+    build_assembly_fallback_lines,
     build_fallback_snippet,
     is_duplicate_title,
     is_label_line,
@@ -668,3 +673,304 @@ def test_email_ignores_fallback_snippet_when_summary_exists():
         assert "첫째 요약함" in rendered
         assert BODY_SENTENCE not in rendered
     assert "[원문 발췌]" not in text
+
+
+# ==========================================================================
+# 의안 전용 발췌 (build_assembly_fallback_lines)
+#
+# 의안 본문은 '제안이유 및 주요내용' 한 덩어리라 앞 220자에는 거의 항상 현행 제도
+# 설명만 실린다. AI 요약이 실패한 날 그 메일이 쓸모없어지지 않도록, 의안만 원문에서
+# 서로 다른 의미 구간을 골라 여러 줄로 싣는다. **원문 그대로의 결정적 발췌**이며
+# 새 문장을 만들지 않는다.
+# ==========================================================================
+_BACKGROUND = "현행법은 가상자산사업자의 이용자 예치금 보호 의무를 명확히 규정하고 있지 아니함."
+_MIDDLE = "그 결과 사업자 도산 시 이용자가 예치금을 회수하지 못하는 사례가 발생하고 있음."
+_AMENDMENT = "이에 예치금을 은행에 별도 예치하도록 의무화하고 위반 시 과태료를 신설하려는 것임."
+
+
+def _assembly_body(*sentences: str) -> str:
+    return " ".join(sentences)
+
+
+def test_assembly_fallback_empty_text_gives_no_lines():
+    for empty in ("", "   \n\t", None, "···---···"):
+        assert build_assembly_fallback_lines(empty) == []
+
+
+def test_assembly_fallback_keeps_short_bodies_as_is():
+    """한두 문장뿐인 본문은 그대로 싣는다(억지로 채우지 않는다)."""
+    assert build_assembly_fallback_lines(_BACKGROUND) == [_BACKGROUND]
+    assert build_assembly_fallback_lines(
+        _assembly_body(_BACKGROUND, _AMENDMENT)
+    ) == [_BACKGROUND, _AMENDMENT]
+
+
+def test_assembly_fallback_returns_at_most_three_lines():
+    body = _assembly_body(*([_MIDDLE] * 8), _AMENDMENT)
+    lines = build_assembly_fallback_lines(body)
+    assert 1 <= len(lines) <= 3
+
+
+def test_assembly_fallback_picks_background_amendment_and_conclusion():
+    filler = "관련 통계에 따르면 예치금 규모는 매년 증가하고 있음."
+    body = _assembly_body(_BACKGROUND, filler, filler, _MIDDLE, filler, _AMENDMENT)
+    lines = build_assembly_fallback_lines(body)
+    assert lines[0] == _BACKGROUND          # 배경 / 현행 제도
+    assert lines[-1] == _AMENDMENT          # "이에 … 하려는 것임" 계열 결론
+    assert len(lines) == 3
+    # 원문 순서를 보존한다
+    assert [body.index(line) for line in lines] == sorted(body.index(l) for l in lines)
+
+
+def test_assembly_fallback_dedupes_when_roles_collide():
+    """첫 문장이 곧 입법행위 문장인 본문에서 같은 줄이 두 번 실리지 않는다."""
+    tail = "관련 통계에 따르면 예치금 규모는 매년 증가하고 있음."
+    body = _assembly_body(_AMENDMENT, tail, tail, tail)
+    lines = build_assembly_fallback_lines(body)
+    assert len(lines) == len(set(lines))
+    assert lines[0] == _AMENDMENT
+
+
+def test_assembly_fallback_respects_the_total_char_cap():
+    body = _assembly_body(*[f"{i}번 문장으로서 " + "가" * 400 + "임." for i in range(5)])
+    lines = build_assembly_fallback_lines(body)
+    assert sum(len(line) for line in lines) <= ASSEMBLY_FALLBACK_CHARS
+    # 상한을 직접 지정해도 지켜진다
+    small = build_assembly_fallback_lines(body, max_total_chars=200)
+    assert sum(len(line) for line in small) <= 200
+
+
+def test_assembly_fallback_splits_a_single_giant_sentence():
+    """문장 분리가 안 되는 한 덩어리는 머리 + 중략 표시 + 꼬리로 보여준다."""
+    body = "머리부분 " * 60 + "중간내용 " * 200 + "결론부분 " * 40
+    lines = build_assembly_fallback_lines(body)
+    assert len(lines) == 2
+    assert lines[0].startswith("머리부분")
+    assert lines[0].endswith(ELLIPSIS)
+    assert lines[1].startswith(OMISSION_MARK)
+    assert lines[1].endswith("결론부분")
+    assert sum(len(line) for line in lines) <= ASSEMBLY_FALLBACK_CHARS
+
+
+def test_assembly_fallback_avoids_cutting_mid_word():
+    body = "가나다라마바사아자차 " * 300
+    lines = build_assembly_fallback_lines(body)
+    head = lines[0][: -len(ELLIPSIS)].rstrip()
+    assert head.endswith("가나다라마바사아자차")     # 어절 중간에서 끊기지 않는다
+    tail = lines[1][len(OMISSION_MARK) :].strip()
+    assert tail.startswith("가나다라마바사아자차")
+
+
+def test_assembly_fallback_does_not_emit_markup():
+    """원문에 태그가 섞여 있어도 헬퍼가 마크업을 만들어 내지 않는다(이스케이프는 notifier)."""
+    body = "<p>현행법은 규정하지 아니함.</p><script>alert(1)</script><p>이에 개정하려는 것임.</p>"
+    lines = build_assembly_fallback_lines(body)
+    joined = " ".join(lines)
+    assert "<" not in joined and ">" not in joined
+    assert "현행법은 규정하지 아니함." in joined
+
+
+def test_generic_fallback_snippet_behavior_is_unchanged():
+    """일반 소스의 220자 한 줄 발췌 계약은 그대로다."""
+    body = "가나다라마바사아자차 " * 60
+    out = build_fallback_snippet(body, TITLE)
+    assert out.endswith(f" {ELLIPSIS}")
+    assert len(out) == SNIPPET_LIMIT + 2
+    assert build_fallback_snippet(BODY_SENTENCE, TITLE) == BODY_SENTENCE
+
+
+# --- 선택된 구간 사이의 문자 예산 예약 (PR #26 Codex P2) -------------------
+#
+# 앞 문장에 남은 예산을 통째로 주면, 배경 문장이 아주 긴 의안에서 그 한 문장이
+# 상한을 독점하고 개정 내용·결론이 사라진다 — Phase 3 이전의 '앞부분만 보이는
+# 발췌' 문제가 그대로 돌아온다.
+_LONG_BACKGROUND = (
+    "현행법은 " + "각종 금융투자상품 및 관련 제도에 관한 사항을 " * 60 + "규정하고 있음."
+)
+_CONCLUSION = "부칙에서 시행일을 공포 후 6개월로 정함."
+
+
+def test_long_first_sentence_does_not_starve_later_sections():
+    body = _assembly_body(_LONG_BACKGROUND, _MIDDLE, _AMENDMENT, _CONCLUSION)
+    lines = build_assembly_fallback_lines(body)
+
+    assert len(lines) == 3                      # 배경 한 줄로 끝나면 안 된다
+    assert lines[0].startswith("현행법은")
+    assert lines[0].endswith(ELLIPSIS)          # 배경은 자기 몫만큼만 잘려 실린다
+    assert _AMENDMENT in lines                  # 개정 내용이 살아남는다
+    assert _CONCLUSION in lines                 # 결론도 살아남는다
+    assert sum(len(line) for line in lines) <= ASSEMBLY_FALLBACK_CHARS
+
+
+def test_unused_budget_is_redistributed_to_later_sentences():
+    """짧은 앞 문장이 쓰지 않은 예산은 뒤 문장이 쓴다(고정 분할이 아니다)."""
+    short_first = "짧은 배경임."
+    long_amendment = "이에 " + "매우 긴 개정 내용을 " * 80 + "규정하려는 것임."
+    body = _assembly_body(short_first, _MIDDLE, long_amendment, _CONCLUSION)
+    lines = build_assembly_fallback_lines(body)
+
+    assert lines[0] == short_first               # 짧은 문장은 잘리지 않는다
+    assert lines[-1] == _CONCLUSION              # 마지막 구간도 유지된다
+    # 900/3=300 을 넘겨, 첫 줄이 남긴 예산을 실제로 물려받았다
+    assert len(lines[1]) > ASSEMBLY_FALLBACK_CHARS // 3
+    assert sum(len(line) for line in lines) <= ASSEMBLY_FALLBACK_CHARS
+
+
+def test_single_line_request_still_uses_the_whole_budget():
+    """max_lines=1 에서는 남겨 둘 뒤 줄이 없으므로 기존 한 줄 절단 의미 그대로."""
+    body = _assembly_body(_LONG_BACKGROUND, _MIDDLE, _AMENDMENT)
+    lines = build_assembly_fallback_lines(body, max_lines=1, max_total_chars=500)
+    assert len(lines) == 1
+    assert lines[0].endswith(ELLIPSIS)
+    assert 400 < len(lines[0]) <= 500            # 예산을 아껴 짧아지지 않는다
+
+
+def test_tiny_char_cap_never_overflows_or_raises():
+    body = _assembly_body(_LONG_BACKGROUND, _MIDDLE, _AMENDMENT, _CONCLUSION)
+    for cap in range(1, 40):
+        lines = build_assembly_fallback_lines(body, max_total_chars=cap)
+        assert sum(len(line) for line in lines) <= cap, cap
+        assert all(line for line in lines), cap  # 빈 줄을 만들지 않는다
+    assert build_assembly_fallback_lines(body, max_total_chars=0) == []
+    assert build_assembly_fallback_lines(body, max_lines=0) == []
+
+
+# --- 한글 항목 표식은 본문과 붙어 있어야 한다 (PR #26 Codex follow-up #2) ---
+#
+# "가. 현행법은 …" 은 문장 경계 규칙상 "가." 와 본문으로 쪼개진다. 그대로 두면 구간
+# 선택이 내용 대신 라벨을 골라, 발췌가 "가. / 나. / 이에 …" 처럼 배경과 개정 내용을
+# 통째로 잃는다.
+_ENUM_BODY = (
+    "가. 현행법은 기존 제도를 규정하고 있음. "
+    "나. 최근 피해가 확대되고 있음. "
+    "다. 이에 보호조치를 신설하려는 것임."
+)
+_BARE_LABELS = ("가.", "나.", "다.", "라.", "마.")
+
+
+def test_enumeration_labels_are_never_standalone_lines():
+    lines = build_assembly_fallback_lines(_ENUM_BODY)
+    assert lines
+    for line in lines:
+        assert line not in _BARE_LABELS, line
+    assert lines[0].startswith("가. 현행법은")
+
+
+def test_enumeration_excerpt_keeps_background_amendment_and_conclusion():
+    lines = build_assembly_fallback_lines(_ENUM_BODY)
+    joined = " ".join(lines)
+    assert "현행법은 기존 제도를 규정하고 있음" in joined       # 배경
+    assert "최근 피해가 확대되고 있음" in joined                # 문제 상황
+    assert "이에 보호조치를 신설하려는 것임" in joined          # 결론
+    assert len(lines) == 3
+
+
+def test_dates_are_still_not_split_mid_number():
+    lines = build_assembly_fallback_lines(
+        "2026. 1. 1. 시행되었음. 그 결과 혼선이 발생하고 있음. 이에 개정하려는 것임."
+    )
+    assert lines[0] == "2026. 1. 1. 시행되었음."
+
+
+def test_article_numbers_are_still_protected():
+    lines = build_assembly_fallback_lines(
+        "제3조의2. 규정에 따라 적용함. 그 적용범위가 불명확함. 이에 개정하려는 것임."
+    )
+    assert lines[0] == "제3조의2. 규정에 따라 적용함."
+
+
+def test_consecutive_enumeration_markers_do_not_raise_or_leak():
+    lines = build_assembly_fallback_lines("가. 나. 실제 주요내용임. 다. 이에 개정하려는 것임.")
+    assert all(line not in _BARE_LABELS for line in lines)
+    assert "실제 주요내용임" in " ".join(lines)
+    assert "이에 개정하려는 것임" in " ".join(lines)
+
+
+def test_dangling_enumeration_marker_is_dropped():
+    lines = build_assembly_fallback_lines("현행법은 규정하고 있음. 가.")
+    assert lines == ["현행법은 규정하고 있음."]
+
+
+def test_single_syllable_sentence_endings_are_not_treated_as_labels():
+    """표식 목록을 한글 한 글자 전체로 넓히면 멀쩡한 문장이 합쳐진다."""
+    lines = build_assembly_fallback_lines("그러하다. 이에 개정하려는 것임.")
+    assert lines == ["그러하다.", "이에 개정하려는 것임."]
+
+
+# --- 구체적 개정 문장을 배경 설명보다 우선한다 (PR #26 Codex follow-up #4) ---
+#
+# 키워드를 한 tuple 에 섞어 두고 '먼저 걸리는 문장'을 고르면, 앞쪽 배경 문장의
+# 약한 단서("규정"·"필요")가 뒤의 구체적 개정 문장("신설"·"개정")을 가린다.
+# tuple 순서를 바꿔도 소용없다 — 앞 문장에서 이미 any() 가 참이 되기 때문이다.
+_OPENER = "이 법률안은 전자금융거래의 안전성 확보를 목적으로 함."
+_CLOSER = "부칙에서 시행일을 공포 후 6개월로 정함."
+
+
+def test_strong_amendment_wins_over_earlier_generic_context():
+    lines = build_assembly_fallback_lines(
+        _assembly_body(
+            _OPENER,
+            "현행법은 신고 절차를 규정하고 있음.",        # weak '규정' (앞쪽)
+            "제도 개선이 필요하다는 의견이 있음.",        # weak '필요'
+            "신고 의무를 신설함.",                        # strong '신설'
+            _CLOSER,
+        )
+    )
+    assert "신고 의무를 신설함." in lines
+    assert "현행법은 신고 절차를 규정하고 있음." not in lines
+    assert lines[0] == _OPENER and lines[-1] == _CLOSER   # 첫/마지막 역할은 그대로
+
+
+def test_medium_keyword_is_used_when_no_strong_one_exists():
+    middle = "이에 신고 절차를 조정하도록 하려는 것임."
+    lines = build_assembly_fallback_lines(
+        _assembly_body(_OPENER, "관련 통계가 증가하고 있음.", middle, _CLOSER)
+    )
+    assert middle in lines
+
+
+def test_weak_keyword_still_serves_as_a_last_resort():
+    """weak tier 를 지워 버리면 단서가 약한 의안에서 가운데 구간을 잃는다."""
+    middle = "현행 절차를 규정하고 있음."
+    lines = build_assembly_fallback_lines(
+        _assembly_body(_OPENER, middle, "관련 통계가 증가하고 있음.", _CLOSER)
+    )
+    assert middle in lines
+
+
+def test_no_keyword_falls_back_to_the_middle_sentence():
+    lines = build_assembly_fallback_lines(
+        _assembly_body(_OPENER, "둘째 문장임.", "셋째 문장임.", _CLOSER)
+    )
+    assert len(lines) == 3
+    assert lines[0] == _OPENER and lines[-1] == _CLOSER
+    assert lines[1] in ("둘째 문장임.", "셋째 문장임.")
+
+
+def test_earliest_sentence_wins_within_the_same_tier():
+    """같은 단계 안에서는 원문 순서를 따른다("신설 > 개정" 같은 세부 순위 없음)."""
+    lines = build_assembly_fallback_lines(
+        _assembly_body(
+            _OPENER,
+            "등록 제도를 개정함.",       # strong, 먼저
+            "관련 통계가 증가하고 있음.",
+            "별도 의무를 신설함.",       # strong, 나중
+            _CLOSER,
+        )
+    )
+    assert "등록 제도를 개정함." in lines
+    assert "별도 의무를 신설함." not in lines
+
+
+def test_strong_keyword_is_detected_through_an_enumeration_label():
+    """지난 표식 병합 수정과 함께 동작해야 한다 — 라벨이 붙어도 '신설'을 찾는다."""
+    lines = build_assembly_fallback_lines(
+        _assembly_body(
+            "가. 현행 제도를 규정하고 있음.",
+            "나. 개선이 필요하다는 의견이 있음.",
+            "다. 신고 의무를 신설함.",
+            "라. 이에 제도를 정비하려는 것임.",
+        )
+    )
+    assert "다. 신고 의무를 신설함." in lines
+    assert all(line not in _BARE_LABELS for line in lines)

@@ -765,12 +765,15 @@ def test_baseline_run_does_not_queue_anything(tmp_path, monkeypatch):
 
 
 # ==========================================================================
-# §5. max_new_per_source 초과분은 이번 Phase 의 큐 대상이 아니다
+# §5. 신규 상한 초과분은 이번 Phase 의 큐 대상이 아니다
+#
+# 의안의 상한은 Phase 3 에서 소스별 override(max_new_per_run=75)로 올라갔다. 상한이
+# 무엇이든 '초과분은 seen 처리하되 큐에는 넣지 않는다'는 계약은 그대로다.
 # ==========================================================================
 def test_overflow_items_are_not_queued(tmp_path, monkeypatch):
     from src import main as main_mod
 
-    bills = [_bill(f"PRC_{i:03d}") for i in range(60)]
+    bills = [_bill(f"PRC_{i:03d}") for i in range(90)]
     path = _seed_state(tmp_path, seen=["seed"])
     ctx = _run(
         tmp_path, monkeypatch, state_path=path,
@@ -778,12 +781,80 @@ def test_overflow_items_are_not_queued(tmp_path, monkeypatch):
         statuses={b.post_id: (S.PENDING, "") for b in bills},
     )
     assert ctx.rc == 0
-    # 상한(50)까지만 발송·상세수집되고, 그 50건만 큐에 들어간다.
-    assert len(ctx.news) == 50
-    assert len(ctx.queue) == 50
-    assert len(ctx.seen) == 61                   # seed + 60건 전부 seen 처리(기존 동작)
-    overflow = {b.post_id for b in bills[50:]}
+    # 의안 상한(75)까지만 발송·상세수집되고, 그 75건만 큐에 들어간다.
+    assert len(ctx.news) == 75
+    assert len(ctx.queue) == 75
+    assert len(ctx.seen) == 91                   # seed + 90건 전부 seen 처리(기존 동작)
+    overflow = {b.post_id for b in bills[75:]}
     assert overflow.isdisjoint(set(ctx.queue))
+
+
+# ==========================================================================
+# §5-1. Phase 3 — 소스별 신규 상한(max_new_per_run)
+#
+# 전역 fetch.max_new_per_source(50)는 다른 소스의 폭주 안전장치라 그대로 두고,
+# 계류의안만 75 로 올린다. 대량 등록일의 60건대가 정상 처리 범위에 들어와야 한다.
+# ==========================================================================
+def test_O1_assembly_60_new_bills_are_all_processed(tmp_path, monkeypatch):
+    bills = [_bill(f"PRC_{i:03d}") for i in range(60)]
+    path = _seed_state(tmp_path, seen=["seed"])
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        new_assembly=bills,
+        statuses={b.post_id: (S.AVAILABLE, "제안이유 본문") for b in bills},
+    )
+    assert ctx.rc == 0
+    assert len(ctx.news) == 60          # 전역 50 에서 잘리지 않는다
+    assert len(ctx.enriched) == 60
+
+
+def test_O2_other_sources_are_still_capped_at_the_global_50(tmp_path, monkeypatch):
+    path = _seed_state(tmp_path, seen=["seed"], press_seen=["old"])
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        only=PRESS_KEY,
+        new_press=[_press(f"p{i:03d}") for i in range(60)],
+    )
+    assert ctx.rc == 0
+    assert len(ctx.news) == 50
+
+
+def test_O3_assembly_processes_up_to_75(tmp_path, monkeypatch):
+    bills = [_bill(f"PRC_{i:03d}") for i in range(75)]
+    path = _seed_state(tmp_path, seen=["seed"])
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path,
+        new_assembly=bills,
+        statuses={b.post_id: (S.AVAILABLE, "제안이유 본문") for b in bills},
+    )
+    assert ctx.rc == 0
+    assert len(ctx.news) == 75
+
+
+def test_O3b_boolean_source_override_does_not_become_a_cap_of_one(tmp_path, monkeypatch):
+    """`max_new_per_run: true` 오타가 '상한 1건'이 되면 나머지가 영구 누락된다.
+
+    bool 은 int 의 하위형이라 int(True) == 1 이다. 잘못된 override 는 경고를 남기고
+    전역 상한으로 되돌아가야 한다(PR #26 Codex P2).
+    """
+    import yaml
+
+    raw = yaml.safe_load(open("config.yaml", encoding="utf-8"))
+    for src in raw["sources"]:
+        if src["key"] == ASSEMBLY_SOURCE_KEY:
+            src["max_new_per_run"] = True
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+
+    bills = [_bill(f"PRC_{i:03d}") for i in range(12)]
+    path = _seed_state(tmp_path, seen=["seed"])
+    ctx = _run(
+        tmp_path, monkeypatch, state_path=path, config=cfg_path,
+        new_assembly=bills,
+        statuses={b.post_id: (S.AVAILABLE, "제안이유 본문") for b in bills},
+    )
+    assert ctx.rc == 0
+    assert len(ctx.news) == 12          # 1건으로 잘리지 않는다(전역 상한 50 적용)
 
 
 # ==========================================================================

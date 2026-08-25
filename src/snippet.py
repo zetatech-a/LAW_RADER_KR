@@ -529,3 +529,240 @@ def build_fallback_snippet(
     if not is_meaningful(text):
         text = " ".join(lines)
     return truncate_snippet(text, limit)
+
+
+# ── 6) 의안 전용 발췌 ───────────────────────────────────────────────────────
+#
+# 일반 게시물의 발췌(build_fallback_snippet)는 220자 한 줄이다. 상세 페이지 머리말을
+# 걷어내고 '무슨 글인지'만 알리면 되기 때문이다. 의안은 사정이 다르다 — 본문이
+# '제안이유 및 주요내용' 한 덩어리이고, 앞부분은 거의 항상 현행 제도 설명이라
+# 220자에서는 "현행법은 …을 규정하고 있음."만 실리고 정작 **무엇을 바꾸는지**가
+# 통째로 잘린다. AI 요약이 실패한 날 그 메일은 사실상 쓸모가 없다.
+#
+# 그래서 의안만 원문에서 서로 다른 의미 구간을 골라 여러 줄로 싣는다. **AI 요약이
+# 아니다** — 원문 문장을 그대로 옮기는 결정적(deterministic) 발췌이고, 메일 라벨도
+# '발췌'를 유지한다. 문장을 새로 쓰거나 번역·재작성하지 않는다.
+
+# 의안 발췌 기본값. 카드 레이아웃을 무너뜨리지 않는 선에서 220자보다 넉넉하게 잡는다.
+ASSEMBLY_FALLBACK_LINES = 3
+ASSEMBLY_FALLBACK_CHARS = 900
+
+# 생략 표시. 한 곳에서만 정의해 HTML/텍스트 파트가 같은 표기를 쓰게 한다.
+ELLIPSIS = "…"
+OMISSION_MARK = "[중략]"
+
+# 문장 경계: '글자 + 문장부호 + 공백'일 때만 자른다.
+# 앞에 글자를 요구하는 이유는 날짜·조문 번호("2026. 1. 1.", "제3조의2.")에서 잘못
+# 끊지 않기 위함이다. 그런 자리는 마침표 앞이 숫자다.
+_SENTENCE_SPLIT = re.compile(r"(?<=[^\W\d_][.!?…])\s+")
+
+# 한국 법령·의안 문서의 항목 표식("가. 현행법은 …", "나. …"). 이 규칙 하나만으로는
+# 위 문장 경계에서 "가." 가 독립 조각이 되어, 구간 선택이 내용 대신 **라벨**을 고른다.
+# regex 를 가변 lookbehind 로 복잡하게 만드는 대신 쪼갠 뒤 다시 붙인다.
+#
+# 목록을 한글 한 글자 전체로 넓히지 않는다 — "그러하다.", "…한 바.", "…할 수.", 처럼
+# 실제 한 글자로 끝나는 문장을 표식으로 오인해 다음 문장과 합쳐 버리기 때문이다.
+_ENUMERATION_LABEL = re.compile(r"^(?:[가나다라마바사아자차카타파하])\.$")
+
+# 입법행위를 나타낼 가능성이 높은 표현. 의안 본문에서 '현행 제도 설명'과 '무엇을
+# 바꾸는가'를 가르는 최소한의 단서만 둔다 — 목록을 키우면 첫 문장에서 바로 걸려
+# 구간 선택이 무의미해진다.
+#
+# 표현마다 '실제로 무엇을 바꾸는가'를 말해 주는 정도가 다르므로 세 단계로 나눈다.
+# 한 tuple 에 섞어 두고 **먼저 걸리는 문장**을 고르면, 앞쪽 배경 문장의 약한 단서
+# ("현행법은 … 규정하고 있음")가 뒤의 구체적 개정 문장("신고 의무를 신설함")을
+# 가린다. tuple 안의 순서를 바꿔도 소용없다 — 앞 문장에서 이미 any() 가 참이 된다.
+# 그래서 문장 단위로 **어느 단계에 걸리는지**를 비교한다.
+#
+# 형태소 분석이나 점수 모델을 들이지 않는다. 이 정도 우선순위면 충분하다.
+_STRONG_AMENDMENT_KEYWORDS = ("개정", "신설", "삭제", "도입", "확대", "제한")
+_MEDIUM_AMENDMENT_KEYWORDS = ("이에", "따라서", "하도록", "하려는", "주요내용", "의무")
+# 배경 설명에도 흔하지만, 아무 단서도 없는 것보다는 낫다(마지막 순위로 남긴다).
+_WEAK_AMENDMENT_KEYWORDS = ("규정", "필요")
+
+# 강한 쪽부터 본다. 같은 단계 안에서는 원문상 먼저 나온 문장을 고른다
+# (같은 단계에서 "신설 > 개정" 같은 세부 순위는 만들지 않는다).
+_AMENDMENT_TIERS = (
+    _STRONG_AMENDMENT_KEYWORDS,
+    _MEDIUM_AMENDMENT_KEYWORDS,
+    _WEAK_AMENDMENT_KEYWORDS,
+)
+
+# 문장 분리가 통째로 실패했을 때(마침표 없는 한 덩어리) 쓰는 머리/꼬리 길이.
+# 꼬리를 더 길게 잡는 이유는 의안 본문의 결론("이에 … 하려는 것임")이 끝에 있기 때문이다.
+_GIANT_HEAD_CHARS = 350
+_GIANT_TAIL_CHARS = 550
+
+
+def _cut_at_word(text: str, limit: int, *, from_end: bool = False) -> str:
+    """limit 자 이내로 자르되 가능하면 단어 중간을 끊지 않는다.
+
+    한국어 본문에도 어절 공백이 있으므로 마지막(또는 첫) 공백까지만 취한다. 공백이
+    없거나 너무 앞/뒤에서만 나오면 그냥 자른다 — 발췌가 비는 것보다는 낫다.
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text if len(text) <= limit else text[: max(limit, 0)]
+    if from_end:
+        piece = text[-limit:]
+        space = piece.find(" ")
+        # 잘린 앞부분이 통째로 사라지지 않을 정도로만 어절을 맞춘다.
+        if 0 <= space <= limit // 4:
+            return piece[space + 1 :]
+        return piece
+    piece = text[:limit]
+    space = piece.rfind(" ")
+    if space >= limit * 3 // 4:
+        return piece[:space]
+    return piece
+
+
+def _assembly_sentences(text: str) -> list[str]:
+    """의안 본문을 의미 있는 문장 단위로 나눈다(내용이 없는 조각은 버린다).
+
+    항목 표식("가.", "나.")은 그 자체로 의미 문장이 아니므로 **뒤따르는 내용에 붙여**
+    하나의 논리 문장으로 돌려준다. 그러지 않으면 구간 선택이 라벨만 골라, 발췌가
+    "가. / 나. / 이에 …" 처럼 배경과 개정 내용을 통째로 잃는다.
+
+    표식이 연달아 오면("가. 나. 실제 내용") 모아 두었다가 함께 붙이고, 뒤에 내용이
+    없이 끝나는 표식은 버린다(라벨만 실린 줄을 만들지 않는다).
+    """
+    out: list[str] = []
+    pending: list[str] = []
+    for part in _SENTENCE_SPLIT.split(text):
+        part = part.strip()
+        if not is_meaningful(part):
+            continue
+        if _ENUMERATION_LABEL.match(part):
+            pending.append(part)
+            continue
+        out.append(" ".join([*pending, part]) if pending else part)
+        pending.clear()
+    # 남은 pending 은 뒤에 붙일 내용이 없는 표식이다 — 버린다.
+    return out
+
+
+def _giant_sentence_lines(text: str, max_total_chars: int) -> list[str]:
+    """문장 분리가 안 되는 한 덩어리 본문의 머리 + 중략 표시 + 꼬리."""
+    marker = f"{OMISSION_MARK} "
+    head_limit = min(_GIANT_HEAD_CHARS, max(max_total_chars - len(marker) - 1, 0))
+    head = _cut_at_word(text, head_limit)
+    used = len(head) + len(ELLIPSIS) + 1 + len(marker)
+    tail_limit = min(_GIANT_TAIL_CHARS, max(max_total_chars - used, 0))
+    if tail_limit <= 0:
+        return [f"{head} {ELLIPSIS}"]
+    tail = _cut_at_word(text, tail_limit, from_end=True)
+    return [f"{head} {ELLIPSIS}", f"{marker}{tail}"]
+
+
+def _amendment_index(sentences: list[str], candidates) -> int | None:
+    """가장 구체적인 입법행위 문장의 위치. 단서가 하나도 없으면 None.
+
+    **가장 강한 단계를 먼저** 보고, 그 단계 안에서 원문상 가장 이른 문장을 고른다.
+    "먼저 걸리는 문장"이 아니다 — 그러면 앞쪽 배경 문장의 "규정"·"필요" 같은 약한
+    단서가 뒤의 "신설"·"개정" 문장을 가려, 발췌에서 정작 무엇을 바꾸는지가 빠진다.
+    """
+    for tier in _AMENDMENT_TIERS:
+        hit = next(
+            (i for i in candidates if any(word in sentences[i] for word in tier)),
+            None,
+        )
+        if hit is not None:
+            return hit
+    return None
+
+
+def _pick_assembly_indexes(sentences: list[str], max_lines: int) -> list[int]:
+    """싣을 문장의 위치를 고른다(원문 순서 보존, 중복 제거).
+
+    1) 첫 의미 문장          — 배경 / 현행 제도
+    2) 입법행위 문장         — 가장 구체적인 것(_amendment_index). 단서가 없으면
+                               가운데 문장(서로 다른 구간을 확보하기 위함)
+    3) 마지막 의미 문장      — "이에 … 하려는 것임" 계열 결론
+
+    세 역할이 같은 문장을 가리키면 그만큼 줄 수가 줄어든다(억지로 채우지 않는다).
+    """
+    last = len(sentences) - 1
+    picks = {0, last}
+    keyword_at = _amendment_index(sentences, range(1, last))
+    if keyword_at is None and last >= 2:
+        keyword_at = last // 2
+    if keyword_at is not None:
+        picks.add(keyword_at)
+    return sorted(picks)[:max_lines]
+
+
+def build_assembly_fallback_lines(
+    text: str,
+    *,
+    max_lines: int = ASSEMBLY_FALLBACK_LINES,
+    max_total_chars: int = ASSEMBLY_FALLBACK_CHARS,
+) -> list[str]:
+    """의안 '제안이유 및 주요내용'에서 뽑은 원문 발췌 줄들.
+
+    **AI 요약이 아니다.** 원문 문장을 그대로 옮기는 결정적 발췌이므로 같은 입력에는
+    항상 같은 출력이 나온다. 반환값은 이스케이프되지 않은 평문이다 — HTML 이스케이프는
+    기존과 같이 notifier 의 책임으로 남긴다.
+    """
+    if max_lines <= 0 or max_total_chars <= 0:
+        return []
+    lines = normalize_lines(text)
+    if not lines:
+        return []
+    body = " ".join(lines)
+    if not is_meaningful(body):
+        return []
+
+    sentences = _assembly_sentences(body)
+    if not sentences:
+        return []
+    if len(sentences) == 1 and len(sentences[0]) > max_total_chars:
+        return _giant_sentence_lines(sentences[0], max_total_chars)
+
+    if len(sentences) <= max_lines:
+        chosen = sentences
+    else:
+        chosen = [sentences[i] for i in _pick_assembly_indexes(sentences, max_lines)]
+    # 위치가 달라도 글자가 같으면 같은 줄이다. 메일에 같은 문장이 두 번 실리면 발췌가
+    # 고장난 것처럼 보인다(원문이 같은 문구를 반복하는 의안은 드물지 않다).
+    chosen = list(dict.fromkeys(chosen))
+
+    return _assemble(chosen, max_total_chars)
+
+
+def _assemble(chosen: list[str], max_total_chars: int) -> list[str]:
+    """고른 문장들을 전체 상한 안에서 조립한다. **뒤 문장의 몫을 남긴다.**
+
+    앞 문장에 남은 예산을 통째로 주면, 배경 문장 하나가 아주 긴 의안에서 그 문장이
+    900자를 독점하고 개정 내용·결론이 통째로 사라진다 — Phase 3 이전의 '앞부분만
+    보이는 발췌' 문제가 그대로 돌아온다. 그래서 줄마다 '남은 예산 ÷ 남은 줄 수'의
+    공정 몫만 쓰게 하고, **잘린 뒤에도 다음 문장으로 계속 간다**.
+
+    짧은 문장이 쓰지 않은 예산은 그대로 뒤 문장에게 넘어간다(고정 분할이 아니다):
+
+      900자 / 3줄 → 첫 줄 상한 300
+      첫 줄이 100자뿐이면 → 남은 800을 2줄이 나눠 각 400까지 가능
+
+    말줄임표도 그 줄의 몫 안에서 센다. 전체 합은 언제나 max_total_chars 이하다.
+    """
+    out: list[str] = []
+    used = 0
+    for i, sentence in enumerate(chosen):
+        remaining = max_total_chars - used
+        if remaining <= 0:
+            break
+        # 마지막 줄(또는 한 줄짜리 발췌)에는 남은 예산을 전부 준다 — 남겨 둘 뒤 줄이
+        # 없는데 아껴 봐야 발췌만 짧아진다.
+        fair_cap = remaining // (len(chosen) - i)
+        if len(sentence) <= fair_cap:
+            out.append(sentence)
+            used += len(sentence)
+            continue
+        # 잘렸다는 사실을 표시해 원문 확인을 유도한다. 표식(공백 + …)도 이 줄의 몫이다.
+        room = fair_cap - len(ELLIPSIS) - 1
+        if room <= 0:
+            # 이 줄에 실을 만한 몫이 없다 — 건너뛰고 다음 줄에 기회를 준다.
+            continue
+        line = f"{_cut_at_word(sentence, room)} {ELLIPSIS}"
+        out.append(line)
+        used += len(line)
+    return out

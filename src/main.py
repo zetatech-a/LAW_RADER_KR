@@ -29,12 +29,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 import time
 
 from dataclasses import dataclass
 
-from .config import load_config
+from .config import SourceConfig, load_config
 from .detail_retry import (
     NOTE_MAX_CHARS,
     DueSelection,
@@ -218,7 +219,7 @@ def run(argv=None) -> int:
         # 폭주 안전장치: 한 번에 비정상적으로 많은 신규가 잡히면(상태 불일치 등) 수백 건의
         # 상세/첨부를 내려받아 실행이 폭주하는 것을 막는다. 최신 cap 건만 상세수집·발송하고,
         # 나머지는 seen 처리한다(전부 seen 처리하므로 다음 실행에 재발생하지 않음).
-        cap = cfg.fetch.max_new_per_source
+        cap = _source_new_cap(src, cfg.fetch.max_new_per_source)
         all_new_ids = [p.post_id for p in new_posts]
         if len(new_posts) > cap:
             log.warning(
@@ -469,6 +470,58 @@ def run(argv=None) -> int:
     # 상세 재조회·업데이트 발송이 성공했더라도 목록 전면 장애는 그대로 실패로 보고한다
     # (Actions 를 초록불로 만들어 list 쪽 장애를 숨기지 않는다).
     return 1 if collection_failed_globally else 0
+
+
+def _positive_int_or_zero(raw) -> int:
+    """설정값을 양의 정수로 해석한다. 정수가 아니면 0(= 무효)을 돌려준다.
+
+    int(raw) 에만 맡기면 안 되는 이유가 세 가지다.
+      - bool 은 int 의 하위형이라 int(True) == 1 이 '상한 1건'으로 통한다.
+      - int() 는 실수를 **절단**하므로 1.9 가 1 이 된다.
+      - int(float("inf")) 는 OverflowError 를 던지는데, 이는 ValueError 도
+        TypeError 도 아니라서 기존 핸들러를 그대로 통과해 실행을 죽인다.
+    이 상한은 '몇 건을 발송할지'를 정하고 초과분은 seen 으로 확정되므로, 잘못
+    해석된 값 하나가 곧바로 영구 알림 누락이 된다. 그래서 정수임이 분명할 때만
+    받아들인다(문자열 해석 범위는 넓히지 않는다 — 기존과 같이 int() 에 맡긴다).
+    """
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, float):
+        # 75.0 처럼 값이 실제로 정수인 실수는 기존처럼 받아들이고, 1.9·inf·NaN 은
+        # 거절한다. 절단은 하지 않는다.
+        if not math.isfinite(raw) or not raw.is_integer():
+            return 0
+        return int(raw)
+    try:
+        return int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _source_new_cap(src: SourceConfig, global_cap: int) -> int:
+    """이 소스의 신규 상한. 소스별 max_new_per_run 이 있으면 그것, 없으면 전역값.
+
+    전역 fetch.max_new_per_source 는 '어느 게시판이든 갑자기 수백 건이 잡히면
+    비정상'이라는 안전장치라 낮게 유지해야 한다. 반면 계류의안은 대량 등록일에
+    하루 60건대가 **정상**이라 같은 상한을 쓰면 매번 잘려 나간다. 그래서 소스가
+    자기 상한을 선언할 수 있게 하되, 다른 소스의 기본값은 건드리지 않는다.
+
+    값이 정수·양수가 아니면 설정 오타로 보고 전역값으로 되돌린다(잘못된 한 줄 때문에
+    수집이 통째로 멈추는 것보다, 기존 안전장치로 계속 도는 편이 낫다).
+    """
+    raw = src.extra.get("max_new_per_run")
+    if raw is None:
+        return global_cap
+    cap = _positive_int_or_zero(raw)
+    if cap <= 0:
+        log.warning(
+            "[%s] max_new_per_run 값이 올바르지 않아 무시합니다(%r) — 전역 상한 %d 사용",
+            src.key,
+            raw,
+            global_cap,
+        )
+        return global_cap
+    return cap
 
 
 def _known_ids(state: State, source_key: str, assembly_queue: list) -> set[str]:

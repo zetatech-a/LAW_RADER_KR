@@ -26,6 +26,7 @@ import random
 import re
 import threading
 import time
+from dataclasses import dataclass
 from enum import Enum
 from itertools import zip_longest
 
@@ -43,6 +44,16 @@ _MIN_CALL_SEC = 2.0
 
 # 연결 단계에 몰아줄 시간 상한(초). 연결이 막힌 환경에서 오래 매달리지 않게 한다.
 _CONNECT_TIMEOUT_CAP = 8.0
+
+
+def _earlier_deadline(*deadlines: float | None) -> float | None:
+    """마감시각 여럿 중 가장 이른 것. 전부 None(무제한)이면 None.
+
+    단계별 마감과 공유 마감을 합칠 때 쓴다 — 어느 한쪽이 없어도 나머지가 그대로
+    적용되어야 하므로 min() 을 직접 부르지 않는다.
+    """
+    real = [d for d in deadlines if d is not None]
+    return min(real) if real else None
 
 
 def _split_timeout(budget: float) -> tuple[float, float]:
@@ -238,6 +249,37 @@ def _is_gemini_25(model: str) -> bool:
     return bool(_GEMINI_25.match((model or "").strip().lower()))
 
 
+# thinkingLevel 을 보내도 되는 것으로 **확인된** 모델만 좁게 적는다.
+#
+# Gemini 3 계열은 thinkingBudget 대신 thinkingLevel(minimal/low/medium/high)을 쓰지만,
+# 어떤 값을 받아들이는지는 모델마다 다르다(예: 일부 flash-lite 는 minimal 을 거절한다).
+# 그래서 "gemini-3 으로 시작하면 무조건 minimal" 같은 추측을 하지 않는다 — 모르는
+# 모델에는 아예 보내지 않는 fail-safe 로 둔다(보내면 400 INVALID_ARGUMENT 가 되고,
+# 응답 message 가 어느 필드가 문제인지 알려주지 않는 경우가 있어 원인 추적도 어렵다).
+#
+# 날짜/버전 접미사가 붙은 같은 모델(gemini-3.6-flash-001 등)까지 포함하되,
+# 이름이 다른 파생 모델(-lite 등)은 걸리지 않도록 접미사 형식을 제한한다.
+# alias(gemini-flash-latest)는 요청 시점에 어느 모델을 가리키는지 알 수 없으므로 제외.
+_THINKING_LEVEL_MODELS: dict[str, frozenset[str]] = {
+    "gemini-3.6-flash": frozenset({"minimal", "low", "medium", "high"}),
+}
+_MODEL_VERSION_SUFFIX = re.compile(r"-(?:\d{3,8}|preview(?:-\d{2}-\d{2})?)$")
+
+
+def _thinking_level_base(model: str) -> str:
+    """모델명에서 버전 접미사만 떼어낸 이름(allowlist 조회용)."""
+    name = (model or "").strip().lower()
+    stripped = _MODEL_VERSION_SUFFIX.sub("", name)
+    return stripped if stripped in _THINKING_LEVEL_MODELS else name
+
+
+def supports_thinking_level(model: str, level: str) -> bool:
+    """이 모델에 이 thinkingLevel 을 보내도 되는지(확인된 조합만 True)."""
+    if not level:
+        return False
+    return level in _THINKING_LEVEL_MODELS.get(_thinking_level_base(model), frozenset())
+
+
 # 생각을 끈 모델의 출력 상한. 3줄 요약에는 넉넉하다.
 _MAX_OUTPUT_TOKENS = 1024
 # 생각을 끌 수 없는 모델(Gemini 3 계열)의 출력 상한. 이 상한은 '생각 토큰 + 응답 토큰'
@@ -370,6 +412,45 @@ _SCHEMA = {
 }
 
 
+@dataclass
+class CallTelemetry:
+    """한 번의 _generate 호출에서 관측된 값. 호출자가 만들어 넘기고, 호출자가 로그로 남긴다.
+
+    Summarizer 의 반환형(dict)을 바꾸지 않기 위한 최소 설계다. 숨은 전역 상태
+    (last_usage 같은 것)를 두지 않는 이유는 명확하다 — 그런 값은 실패한 호출·다른
+    스레드의 호출과 섞여 '어느 호출의 수치인가'를 아무도 보장할 수 없다.
+
+    토큰 수치는 응답의 usageMetadata 에서 **있으면** 옮겨 적는다. 계측을 위해
+    countTokens 같은 추가 API 를 부르지 않는다(추가 Gemini 요청 0회).
+    """
+
+    model: str = ""
+    elapsed_sec: float = 0.0
+    prompt_tokens: int | None = None
+    candidate_tokens: int | None = None
+    thought_tokens: int | None = None
+    total_tokens: int | None = None
+    model_version: str | None = None
+
+    def fill_from_response(self, data: dict) -> None:
+        """GenerateContent 응답에서 사용량을 옮겨 적는다. 없으면 None 그대로 둔다."""
+        usage = (data or {}).get("usageMetadata")
+        if isinstance(usage, dict):
+            self.prompt_tokens = _as_int(usage.get("promptTokenCount"))
+            self.candidate_tokens = _as_int(usage.get("candidatesTokenCount"))
+            self.thought_tokens = _as_int(usage.get("thoughtsTokenCount"))
+            self.total_tokens = _as_int(usage.get("totalTokenCount"))
+        version = (data or {}).get("modelVersion")
+        self.model_version = version if isinstance(version, str) and version else None
+
+
+def _as_int(value) -> int | None:
+    """응답의 수치 필드. 없거나 숫자가 아니면 None(계측 때문에 실행이 죽으면 안 된다)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
 class Summarizer:
     """Gemini REST API 로 게시글 본문을 요약한다(requests 만 사용, 추가 의존성 없음)."""
 
@@ -408,7 +489,16 @@ class Summarizer:
         # 실행의 401 이 이번 실행의 정상 키까지 막는다(sticky terminal 금지).
         self._terminal_failure = None
 
-        ok = self._summarize_general(posts_by_source)
+        # 일반·의안 두 단계가 **함께** 쓸 상위 마감. 여기서 딱 한 번 만들고 두 단계가
+        # 같은 절대 시각을 공유한다 — 단계마다 다시 만들면(now+360 을 두 번) 공유
+        # 예산의 의미가 사라지고 최악값이 다시 두 배가 된다.
+        shared_deadline = (
+            time.monotonic() + self.cfg.total_budget_sec
+            if self.cfg.total_budget_sec > 0
+            else None
+        )
+
+        ok = self._summarize_general(posts_by_source, shared_deadline)
 
         # 일반 경로에서 '다시 불러도 같은 결과'인 실패가 확정됐다면, 같은 자격증명·
         # 같은 설정으로 도는 의안 배치도 부를 이유가 없다. 남은 의안은 제안이유
@@ -424,16 +514,33 @@ class Summarizer:
             )
             return ok
 
+        # 일반 단계가 공유 예산을 거의 다 썼다면 의안 호출을 억지로 시작하지 않는다.
+        # 연결조차 못 맺고 끝날 호출로 남은 시간을 태우느니 발췌로 보내는 편이 낫다.
+        # 시간예산 소진은 실행 실패가 아니다 — 메일은 그대로 나간다.
+        if shared_deadline is not None and (
+            shared_deadline - time.monotonic() < _MIN_CALL_SEC
+        ):
+            log.warning(
+                "공유 LLM 시간예산(%.0f초) 소진 — 의안 배치 요약을 건너뜁니다. "
+                "의안은 제안이유 발췌로 발송됩니다.",
+                self.cfg.total_budget_sec,
+            )
+            return ok
+
         try:
             # 지연 임포트: assembly_summary 는 이 모듈을 임포트한다(순환 방지).
             from .assembly_summary import summarize_assembly_bills
 
-            ok += summarize_assembly_bills(self, posts_by_source)
+            ok += summarize_assembly_bills(self, posts_by_source, shared_deadline)
         except Exception as e:  # noqa: BLE001 — 의안 요약 실패가 메일을 막지 않는다
             log.warning("의안 배치 요약 단계 실패 — 발췌로 발송합니다: %s", e)
         return ok
 
-    def _summarize_general(self, posts_by_source: dict[str, list[Post]]) -> int:
+    def _summarize_general(
+        self,
+        posts_by_source: dict[str, list[Post]],
+        shared_deadline: float | None = None,
+    ) -> int:
         """일반 게시물 전용 경로 — 기존 동작 그대로 1건당 1회 요약한다.
 
         의안(assembly_bill)은 여기서 반드시 제외한다. 배치 경로가 따로 처리하므로
@@ -472,8 +579,11 @@ class Summarizer:
         # 서킷 브레이커: Gemini 가 통째로 죽었을 때 모든 글에 같은 실패를 반복하면
         # (타임아웃 × 재시도 × 건수) 메일이 크게 지연된다. 연속 실패가 쌓이거나 총
         # 시간예산을 넘기면 남은 글은 호출 없이 원문 발췌로 넘긴다.
-        deadline = (
-            time.monotonic() + self.cfg.budget_sec if self.cfg.budget_sec > 0 else None
+        # 이 단계의 마감과 공유 마감 중 **이른 쪽**이 실제 마감이다. 공유 마감이
+        # 없으면(total_budget_sec=0) 기존 동작 그대로다.
+        deadline = _earlier_deadline(
+            time.monotonic() + self.cfg.budget_sec if self.cfg.budget_sec > 0 else None,
+            shared_deadline,
         )
         breaker = self.cfg.max_consecutive_failures
 
@@ -589,12 +699,23 @@ class Summarizer:
         *,
         schema: dict | None = None,
         max_output_tokens: int | None = None,
+        request_timeout_sec: float | None = None,
+        retry_response_timeout: bool = True,
+        thinking_level: str | None = None,
+        telemetry: "CallTelemetry | None" = None,
     ) -> dict:
         """모델 목록을 순서대로 시도한다. 404 계열에서만 다음 모델로 넘어간다.
 
         schema·max_output_tokens 는 호출별 구조화 출력 설정이다. 생략하면 기존 단건
         요약과 완전히 같은 payload 를 보낸다(의안 배치 요약만 값을 넘긴다).
+
+        request_timeout_sec  이 호출 한 번에 허용할 시간(초). None 이면 llm.timeout_sec.
+        retry_response_timeout  응답 생성 타임아웃에서 **같은 요청을 다시 보낼지**.
+                                False 여도 실패 종류(TRANSIENT)는 달라지지 않는다.
+        thinking_level  이 호출에만 붙일 thinking 수준. None 이면 기존 payload 그대로.
+        telemetry  주면 성공한 호출의 모델·소요시간·토큰 사용량을 채워 준다.
         """
+        started = time.monotonic()
         candidates = self._model_candidates()
         if not candidates:
             raise SummaryUnavailable(
@@ -612,6 +733,9 @@ class Summarizer:
                     deadline,
                     schema=schema,
                     max_output_tokens=max_output_tokens,
+                    request_timeout_sec=request_timeout_sec,
+                    retry_response_timeout=retry_response_timeout,
+                    thinking_level=thinking_level,
                 )
             except _ModelUnavailable as e:
                 last_reason = str(e)
@@ -631,6 +755,10 @@ class Summarizer:
             if self._active_model != model:
                 log.info("요약 모델 확정: %s", model)
                 self._active_model = model
+            if telemetry is not None:
+                telemetry.model = model
+                telemetry.elapsed_sec = time.monotonic() - started
+                telemetry.fill_from_response(data)
             return data
 
         log.error(
@@ -651,6 +779,7 @@ class Summarizer:
         send_thinking: bool,
         schema: dict | None = None,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
     ) -> dict:
         """모델이 받아들이는 옵션만 담은 generationConfig.
 
@@ -671,6 +800,11 @@ class Summarizer:
             # 단순 요약이라 생각은 필요 없다. 생각을 켠 채 출력 상한이 낮으면 본문이
             # 빈 채로 MAX_TOKENS 로 끝난다.
             gc["thinkingConfig"] = {"thinkingBudget": 0}
+        elif thinking_level and supports_thinking_level(model, thinking_level):
+            # Gemini 3 계열은 생각을 끌 수 없지만 수준은 낮출 수 있다. 지원이 확인된
+            # 모델·값 조합에만 붙인다(모르는 모델에는 보내지 않는다 — 위 allowlist 참고).
+            # thinkingBudget(2.5 계열)과는 상호배타다 — 한 요청에 둘 다 보내지 않는다.
+            gc["thinkingConfig"] = {"thinkingLevel": thinking_level}
         if _is_gemini_25(model):
             gc["temperature"] = _TEMPERATURE
         return gc
@@ -683,17 +817,43 @@ class Summarizer:
         *,
         schema: dict | None = None,
         max_output_tokens: int | None = None,
+        request_timeout_sec: float | None = None,
+        retry_response_timeout: bool = True,
+        thinking_level: str | None = None,
     ) -> dict:
         """모델 하나로 호출한다. 그 모델을 쓸 수 없으면 _ModelUnavailable."""
         send_thinking = (
             _is_gemini_25(model) and model not in self._thinking_unsupported
         )
+        # '요청된 수준'과 '실제로 보낸 수준'을 구분한다. allowlist 밖 모델에서는
+        # _generation_config 가 thinkingConfig 를 빼는데, 여기서 요청값만 들고 있으면
+        # 아래 400 교정 분기가 "thinking 때문이겠지"라고 오판해 **완전히 같은 요청을**
+        # 한 번 더 보낸다(max_retries=0 에서도). 성공 가능성 0인 호출이 한도와 배치
+        # window 를 먹고, 진짜 400 원인도 가린다.
+        #
+        # 그래서 지원 여부 판정을 여기서 한 번만 하고, 그 결과(effective_level)를
+        # payload 생성과 400 교정 자격 판단이 **함께** 쓴다.
+        effective_level = (
+            thinking_level
+            if (
+                thinking_level
+                and model not in self._thinking_unsupported
+                and supports_thinking_level(model, thinking_level)
+            )
+            else None
+        )
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": self._generation_config(
-                model, send_thinking, schema, max_output_tokens
+                model, send_thinking, schema, max_output_tokens, effective_level
             ),
         }
+        # 이 호출 한 번에 허용할 시간. 지정이 없으면 기존 llm.timeout_sec 그대로다.
+        request_budget = (
+            request_timeout_sec
+            if request_timeout_sec and request_timeout_sec > 0
+            else self.cfg.timeout_sec
+        )
 
         url = _ENDPOINT.format(model=model)
         # API key 는 헤더에만 넣는다. 이 dict 는 절대 로그로 나가지 않는다.
@@ -713,7 +873,7 @@ class Summarizer:
             self._throttle(deadline)
 
             # 대기 중에 마감이 지났으면 새 소켓을 열지 않는다.
-            budget = self.cfg.timeout_sec
+            budget = request_budget
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -744,6 +904,22 @@ class Summarizer:
                 last_kind = LLMErrorKind.TRANSIENT
                 last_status = None
                 reason = "timeout" if isinstance(e, RequestDeadlineExceeded) else "network"
+                # 응답 생성 단계의 타임아웃은 '서버가 아직 답을 만드는 중'이라는 뜻이다.
+                # 같은 프롬프트를 다시 보내면 같은 시간을 다시 쓰고 또 넘긴다 — 그 사이
+                # 뒤 배치에 남겨 둔 시간까지 먹는다(실제 장애의 증폭 경로였다).
+                # 그래서 이 경우만 같은 요청의 재시도를 끄고 즉시 접는다. 연결 실패·
+                # 5xx 같은 진짜 일시 장애의 bounded retry 는 그대로다. 실패 종류도
+                # TRANSIENT 그대로라 상위 배치 브레이커의 의미는 달라지지 않는다.
+                if not retry_response_timeout and isinstance(
+                    e, (requests.ReadTimeout, RequestDeadlineExceeded)
+                ):
+                    log.warning(
+                        "Gemini 응답 타임아웃 — model=%s error=%s "
+                        "(같은 요청을 재시도하지 않음)",
+                        model,
+                        type(e).__name__,
+                    )
+                    raise
                 if not self._sleep_before_retry(
                     attempt, deadline, model, LLMErrorKind.TRANSIENT, reason
                 ):
@@ -773,12 +949,15 @@ class Summarizer:
             # 대신 '우리가 이 요청에 붙인 유일한 선택 옵션이 thinkingConfig 이고 400 을
             # 받았다'는 사실만으로 그 옵션을 떼고 한 번만 재시도한다(send_thinking 이
             # False 가 되므로 두 번은 없다). 400 에서 다른 모델로 넘어가지는 않는다.
-            if resp.status_code == 400 and send_thinking:
+            # **실제로 thinkingConfig 를 보낸 요청**에서만 교정 재시도를 한다. 보내지도
+            # 않은 옵션을 '떼고' 다시 보내면 같은 요청의 반복일 뿐이다.
+            if resp.status_code == 400 and (send_thinking or effective_level):
                 log.info("모델 %s 는 thinkingConfig 미지원 — 제외하고 재시도", model)
                 self._thinking_unsupported.add(model)
                 send_thinking = False
+                effective_level = None
                 payload["generationConfig"] = self._generation_config(
-                    model, False, schema, max_output_tokens
+                    model, False, schema, max_output_tokens, None
                 )
                 continue
 

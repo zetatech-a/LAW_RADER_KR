@@ -2000,7 +2000,7 @@ def _run_mixed(s):
     counts = {"general": 0, "assembly": 0}
     original = s._generate
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         if "bill_id:" in prompt:
             counts["assembly"] += 1
         else:
@@ -2048,7 +2048,7 @@ def test_c1_general_transient_failure_still_allows_the_assembly_stage():
     s = Summarizer(_cfg(max_consecutive_failures=3))
     calls = {"n": 0}
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         calls["n"] += 1
         if "bill_id:" in prompt:
             return _envelope(
@@ -2077,7 +2077,7 @@ def test_c2_general_content_failure_still_allows_the_assembly_stage():
     """C2 — 응답 내용 문제는 그 글에 달린 것이다. 의안 배치를 막으면 안 된다."""
     s = Summarizer(_cfg(max_consecutive_failures=3))
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         if "bill_id:" in prompt:
             return _envelope(
                 json.dumps(

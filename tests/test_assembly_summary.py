@@ -106,13 +106,18 @@ class _Recorder:
     def __init__(self, posts, reply=None):
         self.posts = posts
         self.calls = []          # 호출별 요청 ID 목록
+        self.deadlines = []      # 호출별 deadline(배치 window 검증용)
         self.kwargs = []
         self._reply = reply
 
-    def __call__(self, prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def __call__(self, prompt, deadline=None, *, schema=None, max_output_tokens=None,
+                 **extra):
         ids = _ids_in(prompt, self.posts)
         self.calls.append(ids)
-        self.kwargs.append({"schema": schema, "max_output_tokens": max_output_tokens})
+        self.deadlines.append(deadline)
+        self.kwargs.append(
+            {"schema": schema, "max_output_tokens": max_output_tokens, **extra}
+        )
         if self._reply is not None:
             return self._reply(ids, len(self.calls))
         return _reply(ids)
@@ -133,11 +138,11 @@ def test_config_exposes_assembly_batch_defaults():
     cfg = load_config("config.yaml").llm.assembly_batch
     assert cfg.enabled is True
     assert cfg.batch_size == 25
-    assert cfg.max_bills == 50
+    assert cfg.max_bills == 75
     assert cfg.max_input_chars_per_bill == 20000
     assert cfg.max_batch_chars == 250000
     assert cfg.max_output_tokens == 16384
-    assert cfg.budget_sec == 120
+    assert cfg.budget_sec == 300
     assert cfg.retry_missing_once is True
 
 
@@ -216,7 +221,7 @@ def test_per_bill_input_is_truncated():
     s = Summarizer(cfg)
     captured = {}
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         captured["prompt"] = prompt
         return _reply([posts[0].post_id])
 
@@ -658,7 +663,7 @@ def test_batch_exception_never_escapes_summarize_all():
     bills = [_bill(0)]
     s = Summarizer(_cfg())
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         if schema is not None:
             raise RuntimeError("배치 경로 폭발")
         return _envelope('{"summary": ["일반 요약함"]}')
@@ -678,7 +683,7 @@ def test_general_posts_still_one_call_each():
     s = Summarizer(_cfg())
     seen = {"single": 0, "batch": 0}
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         if schema is None and max_output_tokens is None:
             seen["single"] += 1
             return _envelope('{"summary": ["첫째임", "둘째임", "셋째임"]}')
@@ -697,7 +702,7 @@ def test_mixed_run_uses_single_calls_for_general_and_one_batch_for_bills():
     s = Summarizer(_cfg())
     single, batch = [], []
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         if schema is None:
             single.append(prompt)
             return _envelope('{"summary": ["첫째임", "둘째임", "셋째임"]}')
@@ -721,7 +726,7 @@ def test_bills_do_not_consume_general_max_posts():
     bills = [_bill(i) for i in range(20)]
     s = Summarizer(_cfg(max_posts=3))
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         if schema is None:
             return _envelope('{"summary": ["첫째임", "둘째임", "셋째임"]}')
         return _reply(_ids_in(prompt, bills))
@@ -993,7 +998,7 @@ def test_general_posts_still_summarized_after_assembly_call_failure():
     s = Summarizer(_cfg(batch=AssemblyBatchConfig(batch_size=2)))
     calls = {"n": 0}
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         calls["n"] += 1
         if "bill_id:" in prompt:
             raise LLMCallError("HTTP 403", kind=LLMErrorKind.AUTH, status=403)
@@ -1062,7 +1067,7 @@ def test_prompt_example_matches_configured_lines(lines):
     posts = [_bill(0)]
     captured = {}
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         captured["prompt"] = prompt
         return _envelope(
             json.dumps(
@@ -1107,7 +1112,7 @@ def test_three_line_example_is_unchanged_at_the_default():
     posts = [_bill(0)]
     captured = {}
 
-    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None):
+    def _generate(prompt, deadline=None, *, schema=None, max_output_tokens=None, **_):
         captured["prompt"] = prompt
         return _reply(["PRC_0000"])
 
