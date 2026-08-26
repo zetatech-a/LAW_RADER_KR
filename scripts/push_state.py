@@ -15,8 +15,11 @@
 
 안전 규칙
 ---------
-- **force 계열 인자를 절대 쓰지 않는다.** `_run_git()` 이 명령 자체를 검사해
-  `--force` / `--force-with-lease` / `reset --hard` 등이 섞이면 즉시 예외를 던진다.
+- **force 계열 인자를 절대 쓰지 않는다.** `_assert_safe()` 가 git 실행 **전에**
+  명령을 검사해 값 붙은 형태(`--force-with-lease=<ref>`) · 짧은 옵션 묶음(`-qf`) ·
+  긴 옵션 축약(`--force-w`) 과 되감기/병합 하위명령(reset/rebase/merge/pull)을 거절한다.
+- **모든 git 호출에 벽시계 상한이 있다.** 멈춘 push 하나가 재시도 루프를 영원히
+  붙잡지 못한다.
 - 재시도는 '원격 ref 가 아직 우리가 기반한 커밋에 있다'가 확인될 때만 한다.
   영어 오류 문구 매칭에 의존하지 않는다 — 원격 ref 가 더 강한 신호다.
 - 원격이 독립적으로 전진했으면(다른 실행이 push 에 성공) **되돌리지 않고 실패**한다.
@@ -42,10 +45,31 @@ EXIT_EXHAUSTED = 1          # 재시도 상한까지 갔지만 끝내 push 되�
 EXIT_FATAL = 2              # 재시도해도 달라지지 않는 실패(인증/권한/브랜치 보호)
 EXIT_REMOTE_ADVANCED = 3    # 원격이 독립적으로 전진 — 자동 해결하지 않는다
 
-# 이 스크립트가 만들어 내면 안 되는 인자들. 하나라도 섞이면 실행 자체를 거부한다
+# git 명령 하나당 벽시계 상한. 이 값과 재시도 상한이 함께 헬퍼의 최악 소요를 정한다
+# (아래 계산 참조). 20초면 정상적인 push/ls-remote 에는 넉넉하고, 최악의 경우에도
+# 15분 monitor 주기의 절반 아래에서 끝난다.
+#
+#   preflight  : ls-remote 3회 × 20초 + backoff 2회 × 2초        =  64초
+#   push 시도 i: push 20초 + (실패 시) ls-remote 64초 + backoff
+#                 1회차 20+64+3=87 / 2회차 90 / 3회차 96 / 4회차 84 = 357초
+#   합계       : 64 + 357 = 421초 (약 7분)
+GIT_COMMAND_TIMEOUT_SEC = 20.0
+
+# 타임아웃을 나타내는 returncode. GNU `timeout(1)` 관례를 따른다. '실패 확정'이 아니라
+# '결과 미상'이므로 _FATAL_PATTERNS 에 잡히지 않아야 하고, 반드시 원격 ref 검증으로
+# 이어져야 한다.
+GIT_TIMEOUT_RETURNCODE = 124
+
+# 이 스크립트가 만들어 내면 안 되는 것들. 하나라도 섞이면 실행 자체를 거부한다
 # ("실수로 추가되는" 경로를 코드 레벨에서 막는다).
-FORBIDDEN_GIT_ARGS = ("--force", "-f", "--force-with-lease", "--force-if-includes", "--mirror")
-FORBIDDEN_GIT_COMBOS = (("reset", "--hard"),)
+#
+# 정확한 토큰 목록으로는 부족하다 — git 은 값 붙은 형태(`--force-with-lease=<ref>`),
+# 짧은 옵션 묶음(`-qf`), 모호하지 않은 긴 옵션 축약(`--force-w`)을 모두 받아들인다.
+# 그래서 토큰이 아니라 **옵션의 형태**를 본다(_is_forbidden_option).
+FORBIDDEN_LONG_OPTIONS = ("force", "force-with-lease", "force-if-includes", "mirror")
+FORBIDDEN_SHORT_FLAGS = frozenset("f")
+# 이 헬퍼는 '있는 브랜치를 전진시키는' 도구다. 이력을 되감거나 자동 병합하지 않는다.
+FORBIDDEN_SUBCOMMANDS = ("reset", "rebase", "merge", "pull")
 
 # 재시도해도 결과가 달라지지 않는 실패의 결정적 단서. 이 판정은 **fail-fast 전용**
 # 이며, 재시도 여부를 정하는 근거로는 쓰지 않는다(그쪽은 원격 ref 가 판단한다).
@@ -109,22 +133,71 @@ def _failure_reason(text: str) -> str:
     return redact(lines[-1])
 
 
+def _is_forbidden_option(token: str) -> bool:
+    """이 토큰이 금지된 force 계열 옵션의 **어떤 형태**라도 되는지.
+
+    git CLI 파서를 흉내 내지 않는다. 세 가지 형태만 보수적으로 본다:
+
+      긴 옵션 + 값   `--force-with-lease=refs/heads/main:<sha>`
+                     → `=` 앞의 이름만 떼어 본다.
+      긴 옵션 축약   `--force-w`, `--f`
+                     → git 은 모호하지 않은 축약을 받아들인다. 이름이 금지 옵션의
+                       **접두사**이기만 해도 거절한다.
+      짧은 옵션 묶음 `-f`, `-qf`, `-fq`
+                     → 묶음 안에 `f` 가 있으면 거절한다.
+
+    거짓 음성(놓침)보다 거짓 양성(과잉 거절)을 택한다. 이 스크립트가 실제로 쓰는
+    옵션은 `--verify` 하나뿐이고 어느 규칙에도 걸리지 않는다.
+    """
+    lowered = token.lower()
+    if lowered.startswith("--"):
+        name = lowered[2:].split("=", 1)[0]
+        if not name:
+            return False
+        return any(full.startswith(name) for full in FORBIDDEN_LONG_OPTIONS)
+    if lowered.startswith("-") and len(lowered) > 1:
+        cluster = lowered[1:].split("=", 1)[0]
+        return any(ch in FORBIDDEN_SHORT_FLAGS for ch in cluster)
+    return False
+
+
 def _assert_safe(args: list[str]) -> None:
-    lowered = [a.lower() for a in args]
-    for bad in FORBIDDEN_GIT_ARGS:
-        if bad in lowered:
-            raise AssertionError(f"금지된 git 인자입니다: {bad}")
-    for combo in FORBIDDEN_GIT_COMBOS:
-        if all(part in lowered for part in combo):
-            raise AssertionError(f"금지된 git 조합입니다: {' '.join(combo)}")
+    """git 을 실행하기 **전에** 명령 자체를 검사한다(프로세스 경계 가드)."""
+    if args and args[0].lower() in FORBIDDEN_SUBCOMMANDS:
+        raise AssertionError(f"금지된 git 하위명령입니다: {args[0]}")
+    for token in args:
+        if _is_forbidden_option(token):
+            raise AssertionError(f"금지된 git 인자입니다: {token}")
 
 
-def _subprocess_git(args: list[str]) -> GitResult:
-    proc = subprocess.run(  # noqa: S603 - 인자는 아래에서 우리가 조립한 것뿐이다
-        ["git", *args],
-        capture_output=True,
-        text=True,
-    )
+def _subprocess_git(args: list[str], *, timeout: float = GIT_COMMAND_TIMEOUT_SEC) -> GitResult:
+    """git 을 한 번 실행한다. **반드시** wall-clock 상한을 건다.
+
+    상한이 없으면 이 스크립트의 bounded 성질은 '시도 횟수 + backoff' 뿐이고 실제
+    벽시계 시간은 무한이다. 연결까지는 됐는데 응답이 오지 않는 push/ls-remote 하나가
+    재시도 루프를 아예 전진시키지 못하고, monitor 는 `cancel-in-progress: false` 라
+    뒤따르는 15분 주기 실행까지 큐에 쌓인다.
+
+    타임아웃은 **'실패했다'가 아니라 '결과를 모른다'** 이다. 그래서 예외를 밖으로
+    던지지 않고 non-zero GitResult 로 바꿔 호출자의 원격 ref 검증을 그대로 태운다
+    (클라이언트가 끊겼어도 push 는 GitHub 에 도달했을 수 있다).
+    """
+    # 실제 git 프로세스는 **무조건** 이 가드를 지난다. StatePusher._git 을 거치지 않는
+    # 호출자(_resolve 등)까지 한 곳에서 덮기 위해 여기에도 둔다.
+    _assert_safe(args)
+    try:
+        proc = subprocess.run(  # noqa: S603 - 인자는 아래에서 우리가 조립한 것뿐이다
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        # 명령·자격증명이 섞인 원격 URL 은 남기지 않는다(args 를 그대로 찍지 않는다).
+        return GitResult(
+            GIT_TIMEOUT_RETURNCODE,
+            stderr=f"error: git {args[0]} timed out after {timeout:g}s",
+        )
     return GitResult(proc.returncode, proc.stdout or "", proc.stderr or "")
 
 
@@ -210,7 +283,55 @@ class StatePusher:
         return min(delay, self.backoff_max_sec)
 
     # --- 본체 ---
+    def _preflight(self) -> int | None:
+        """첫 push **전에** 목적지 브랜치의 원격 상태를 확인한다.
+
+        확인 없이 밀면 안 되는 이유: 체크아웃 뒤 브랜치가 삭제됐거나 `--branch` 가
+        틀렸을 때, 평범한 `git push <sha>:refs/heads/<branch>` 는 그 ref 를 **만들고
+        성공**한다. 그러면 push 실패 후에만 도는 `remote == ""` 가드는 영영 닿지 않고,
+        헬퍼는 '있는 브랜치를 전진시킨다'는 계약을 스스로 깬다.
+
+        진행해도 좋으면 None, 아니면 그대로 반환할 종료 코드를 돌려준다.
+        """
+        remote = self.remote_sha()
+
+        if remote == self.local_sha:
+            # 이전 실행(또는 재시도)이 이미 올려 두었다. 밀 것이 없다.
+            self._log("remote already at the state commit; nothing to push")
+            self._log("state remote push confirmed")
+            return EXIT_OK
+
+        if remote is None:
+            # 목적지 상태를 모르는 채로는 밀지 않는다(fail closed).
+            self._log(
+                "preflight remote ref lookup failed; destination state unknown, "
+                "refusing to push"
+            )
+            self._log("state push exhausted; durable state NOT persisted")
+            return EXIT_EXHAUSTED
+
+        if remote == "":
+            self._log(
+                f"remote branch {self.branch} not found; refusing to create it"
+            )
+            return EXIT_REMOTE_ADVANCED
+
+        if remote != self.base_sha:
+            self._log(
+                "remote branch advanced; refusing unsafe push "
+                f"(expected base {self.base_sha[:12]}, remote {remote[:12]})"
+            )
+            return EXIT_REMOTE_ADVANCED
+
+        return None
+
     def run(self) -> int:
+        # preflight 가 통과해도 push 사이에 경쟁이 있을 수 있으므로, 아래 실패 후
+        # 원격 재검증은 그대로 남는다(둘 중 하나로 대체할 수 없다).
+        verdict = self._preflight()
+        if verdict is not None:
+            return verdict
+
         for attempt in range(1, self.max_attempts + 1):
             result = self._push()
             if result.returncode == 0:
