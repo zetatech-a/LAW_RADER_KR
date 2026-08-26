@@ -67,3 +67,56 @@ def test_state_is_still_committed_always(steps):
     commit = [s for s in steps if s.get("name") == "Commit updated state"]
     assert len(commit) == 1
     assert commit[0].get("if") == "always()"
+
+
+# ── state 원격 반영(2026-08-26 중복 메일 장애) ──────────────────────────────
+@pytest.fixture(scope="module")
+def commit_step(steps):
+    for s in steps:
+        if s.get("name") == "Commit updated state":
+            return s
+    raise AssertionError("'Commit updated state' 단계를 찾지 못했습니다")
+
+
+def test_state_push_goes_through_the_bounded_retry_helper(commit_step):
+    """맨 `git push` 한 번으로 돌아가면 장애가 그대로 재발한다."""
+    run = str(commit_step.get("run", ""))
+    assert "scripts/push_state.py" in run
+    import re
+
+    # `git push` 를 직접 부르는 줄이 남아 있으면 안 된다(헬퍼 호출만 허용).
+    bare_push = [
+        ln.strip()
+        for ln in run.splitlines()
+        if re.match(r"^\s*git\s+push\b", ln)
+    ]
+    assert bare_push == [], f"헬퍼를 우회하는 git push 가 남아 있습니다: {bare_push}"
+
+
+def test_state_commit_is_still_created_exactly_once(commit_step):
+    run = str(commit_step.get("run", ""))
+    assert run.count("git commit") == 1
+    assert "git add state/" in run
+
+
+def test_durable_success_is_logged_only_after_the_helper_succeeds(commit_step):
+    """'state remote push 완료' 는 헬퍼 호출 **뒤**에 있어야 한다."""
+    run = str(commit_step.get("run", ""))
+    assert "state remote push 완료" in run
+    assert run.index("scripts/push_state.py") < run.index(
+        'echo "state remote push 완료"'
+    )
+
+
+def test_workflow_never_force_pushes_state():
+    raw = WORKFLOW.read_text(encoding="utf-8")
+    for bad in ("--force", "--force-with-lease", "reset --hard"):
+        assert bad not in raw, f"워크플로에 금지된 조작이 있습니다: {bad}"
+
+
+def test_monitor_concurrency_protection_is_unchanged():
+    """cancel-in-progress:false 가 유지되어야 실행이 서로를 자르지 않는다."""
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    concurrency = doc["concurrency"]
+    assert concurrency["group"] == "law-rader-monitor"
+    assert concurrency["cancel-in-progress"] is False
