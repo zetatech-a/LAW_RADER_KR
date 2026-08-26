@@ -463,7 +463,10 @@ def run(argv=None) -> int:
         for post_id in recovered_ids:
             state.unqueue_detail(ASSEMBLY_SOURCE_KEY, post_id)
     state.save()
-    log.info("state 저장 완료")
+    # '로컬'을 명시한다 — 이 시점에 확정된 것은 러너 안의 파일뿐이고, 다음 실행이
+    # 실제로 참조하는 원격 state 는 워크플로가 커밋·push 에 성공해야 갱신된다.
+    # (2026-08-26 장애에서 이 로그가 '원격까지 저장됐다'로 읽혀 원인 판단을 늦췄다.)
+    log.info("state 로컬 저장 완료")
 
     if errors:
         log.warning("일부 소스 오류: %s", "; ".join(errors))

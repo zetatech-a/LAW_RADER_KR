@@ -84,15 +84,26 @@ jobs:
 
       # 모니터가 실패·취소되더라도 그때까지 기록된 기준선/신규 상태를 저장소에 반영해,
       # 다음 실행이 '최초 실행'을 반복하지 않도록 항상 커밋한다.
+      #
+      # push 는 scripts/push_state.py 가 맡는다. 커밋은 여기서 정확히 한 번 만들고,
+      # 헬퍼는 그 커밋을 원격 ref 로 확인하며 bounded retry 한다 — `git push` 한 번의
+      # 일시적 실패(운영 장애: `remote: fatal error in commit_refs`)가 원격 state 를
+      # 옛날 것으로 남겨 다음 실행이 같은 메일을 다시 보내는 일을 막는다.
+      # 강제 push 는 하지 않으며, 원격이 독립적으로 전진했으면 실패로 끝낸다.
       - name: Commit updated state
         if: always()
+        env:
+          STATE_BRANCH: ${{ github.ref_name }}
         run: |
-          if [[ -n "$(git status --porcelain state/)" ]]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add state/
-            git commit -m "chore: update monitor state [skip ci]"
-            git push
-          else
+          if [[ -z "$(git status --porcelain state/)" ]]; then
             echo "state 변경 없음"
+            exit 0
           fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/
+          git commit -m "chore: update monitor state [skip ci]"
+          python scripts/push_state.py --branch "$STATE_BRANCH"
+          # 원격 반영이 확인된 뒤에만 찍는다(애플리케이션의 'state 로컬 저장 완료'와
+          # 다른 사건이다).
+          echo "state remote push 완료"
