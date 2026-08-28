@@ -1,6 +1,7 @@
 {
   "fsc_press": {
     "seen": [
+      "path:87614",
       "path:87611",
       "path:87609",
       "path:87605",
@@ -1528,13 +1529,13 @@
     "pending_detail": {
       "PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1": {
         "first_seen_at": "2026-08-28T00:26:57Z",
-        "attempts": 11,
+        "attempts": 12,
         "title": "군급식기본법 일부개정법률안 (유용원의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1",
         "date": "2026-08-27",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-08-28T07:08:36Z"
+        "last_attempt_at": "2026-08-28T07:53:50Z"
       }
     }
   }
