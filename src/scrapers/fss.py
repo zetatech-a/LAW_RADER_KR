@@ -41,9 +41,10 @@ _DATE_ONLY = re.compile(r"^\s*(20\d{2})[.\-/]?(\d{1,2})[.\-/]?(\d{1,2})")
 #    섞인 .krds-bd-view 전체를 본문으로 쓰지 않는다.
 #  - 반대로 너무 넓은 #content 는 이 목록에서 뺀다. 개편된 페이지에서 #content 를
 #    잡으면 좌측 메뉴·breadcrumb 같은 페이지 껍데기가 본문으로 들어가 요약이 망가진다.
-#  - legacy selector 들은 구 홈페이지(및 아직 안 바뀐 페이지) 호환을 위해 뒤에 남긴다.
+#    이 목록에서 빼는 것은 #content **하나뿐**이다 — .cont 를 비롯한 나머지 legacy
+#    selector 는 구 홈페이지(및 아직 안 바뀐 페이지) 호환을 위해 뒤에 그대로 남긴다.
 _PRESS_KEY = "fss_press"
-_PRESS_BODY_SELECTORS = (".n-dbdata", ".view-cont", ".board-view", ".bbs-view")
+_PRESS_BODY_SELECTORS = (".n-dbdata", ".view-cont", ".board-view", ".bbs-view", ".cont")
 # 보도자료 외 게시판은 기존 동작 그대로.
 _BODY_SELECTORS = (".view-cont", ".board-view", ".bbs-view", ".cont", "#content")
 
@@ -84,14 +85,17 @@ def _body_text(soup: BeautifulSoup, selectors: tuple[str, ...]) -> str:
 
     '맞는 요소'가 아니라 '내용이 있는 요소'를 고른다 — 앞선 selector 가 빈 껍데기로
     존재하기만 해도 뒤의 selector 를 보지 못하면 본문을 통째로 잃는다.
+
+    한 selector 에 매칭되는 요소가 여러 개일 수 있으므로(반응형·템플릿 잔재로 빈
+    .n-dbdata 가 먼저 오는 경우 등) select_one 이 아니라 매칭 전부를 훑는다.
+    우선순위는 selector 순서 그대로다 — 앞 selector 에 내용 있는 요소가 하나라도
+    있으면 뒤 selector 는 보지 않는다.
     """
     for sel in selectors:
-        el = soup.select_one(sel)
-        if el is None:
-            continue
-        text = clean_text(el.get_text("\n"))
-        if text:
-            return text
+        for el in soup.select(sel):
+            text = clean_text(el.get_text("\n"))
+            if text:
+                return text
     return ""
 
 

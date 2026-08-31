@@ -749,6 +749,42 @@ def test_fss_press_empty_n_dbdata_falls_through_to_legacy():
     assert "구 구조에 남아 있는 본문" in p.body
 
 
+def test_fss_press_second_n_dbdata_beats_lower_priority_selector():
+    """같은 selector 에 여러 요소가 있으면 전부 훑는다 — 첫 요소가 비었다고 해서
+    우선순위가 낮은 selector 로 넘어가면 안 된다(빈 반응형/템플릿 컨테이너 대비)."""
+    duplicated = """
+    <div id="content">
+      <div class="n-dbdata"> </div>
+
+      <div class="n-dbdata">
+        ㅁ 실제 금감원 공식 본문
+        <br>
+        ㅇ 두 번째 n-dbdata의 내용
+      </div>
+
+      <div class="view-cont">이 legacy fallback은 선택되면 안 됨</div>
+    </div>"""
+    _, p = _enrich_press(duplicated, blob=None)
+    assert "실제 금감원 공식 본문" in p.body
+    assert "두 번째 n-dbdata의 내용" in p.body
+    assert "legacy fallback은 선택되면 안 됨" not in p.body
+
+
+def test_fss_press_legacy_cont_still_works():
+    """구 홈페이지의 .cont 만 있는 상세도 그대로 읽는다.
+
+    이번 변경에서 보도자료 목록에서 빼는 것은 넓은 #content 하나뿐이다 — 기존
+    production chain 이 지원하던 .cont 까지 함께 빠지면 구형 페이지가 본문을 잃는다.
+    """
+    legacy_cont = """
+    <div id="content"><div class="cont">
+      <p>구형 금감원 보도자료 본문</p>
+    </div></div>"""
+    _, p = _enrich_press(legacy_cont, blob=None)
+    assert p.body
+    assert "구형 금감원 보도자료 본문" in p.body
+
+
 def test_fss_press_does_not_fall_back_to_whole_content(caplog):
     """본문 컨테이너가 없으면 #content 를 긁지 않고, 대신 경고를 남긴다."""
     chrome_only = """
