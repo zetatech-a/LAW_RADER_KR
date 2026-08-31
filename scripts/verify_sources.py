@@ -37,6 +37,11 @@ PARTIAL = "🟠"
 # 정상이므로 기존 판정 기준(본문·첨부·구조화항목 중 하나)을 유지한다.
 _BODY_REQUIRED = {"assembly_bill"}
 
+# 상세 본문에 반드시 들어 있어야 하는 표식(선언한 소스만 검사한다).
+# 회신사례는 질의요지·회답·이유가 모두 있을 때만 본문을 만들므로, 하나라도 빠지면
+# 본문이 통째로 비어 나간다. 그 상태를 초록불로 넘기면 상세 파서가 깨진 채 운영된다.
+_REQUIRED_BODY_MARKERS = {"better_reply": ("[질의요지]", "[회답]", "[이유]")}
+
 # 의안은 여러 건을 표본으로 본다. 목록 맨 위는 갓 접수된 의안이라 원문이 아직 없을 수
 # 있어(PENDING), 첫 건만 보면 '등록 대기'와 '수집 고장'을 구분할 수 없다.
 _ASSEMBLY_SAMPLE = 3
@@ -93,7 +98,23 @@ def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMP
         return _verify_assembly_detail(scraper, page1, report, assembly_sample), page1
 
     if do_enrich:
-        first = page1[0]
+        # 한 소스 안에 상세 수집 대상과 비대상이 섞일 수 있다(회신사례는 구분별로
+        # 상세 endpoint 가 확인된 글만 상세 페이지가 있다). 비대상 글을 표본으로 잡으면
+        # 상세 파서를 한 번도 검증하지 못한 채 초록불이 나가므로 대상인 글을 고른다.
+        first = _enrichable_sample(scraper, page1)
+        if first is None:
+            report["status"] = PARTIAL
+            report["list_ok"] = True
+            report["body_len"] = 0
+            report["enrich_ok"] = False
+            report["detail_ok"] = False
+            report["enrich"] = f"{WARN} 상세 검증 표본 없음(1페이지에 상세 수집 대상 글이 없음)"
+            report["detail"] = (
+                f"목록 수집 성공({len(page1)}건) / 1페이지에 상세 수집 대상 글이 없어 "
+                "상세 파서를 검증하지 못했습니다. 지원 유형이 나올 때까지 "
+                "fetch.list_limit 을 늘려 재확인하세요."
+            )
+            return report, page1
         try:
             scraper.enrich(first)
             body_len = len(first.body or "")
@@ -113,10 +134,37 @@ def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMP
             report["enrich"] = f"{WARN} enrich 실패: {e}"
             report["enrich_ok"] = False
 
+        # 본문 표식을 선언한 소스는 '본문이 비어도 OK' 예외를 적용하지 않는다.
+        missing = [m for m in _REQUIRED_BODY_MARKERS.get(key, ()) if m not in (first.body or "")]
+        if missing:
+            report["status"] = PARTIAL
+            report["list_ok"] = True
+            report["detail_ok"] = False
+            report["detail"] = (
+                f"목록 수집 성공({len(page1)}건) / 상세 본문에 {' '.join(missing)} 가 "
+                f"없습니다({first.url}) — 부분 본문은 요약 입력으로 쓰지 않아 본문이 통째로 "
+                "비워집니다. 상세 마크업을 확인하세요."
+            )
+            return report, page1
+
     report["status"] = OK
     report["list_ok"] = True
     report["detail_ok"] = report.get("enrich_ok", True)
     return report, page1
+
+
+def _enrichable_sample(scraper, page1):
+    """상세 수집 대상인 첫 글. 대상이 하나도 없으면 None.
+
+    per-post 훅(BaseScraper.supports_enrich)이 없는 스크래퍼는 기존대로 첫 글을 쓴다.
+    """
+    hook = getattr(scraper, "supports_enrich", None)
+    if hook is None:
+        return page1[0]
+    for p in page1:
+        if hook(p):
+            return p
+    return None
 
 
 def _verify_assembly_detail(scraper, page1, report, sample_size=_ASSEMBLY_SAMPLE):

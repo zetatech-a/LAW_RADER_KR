@@ -246,7 +246,16 @@ def run(argv=None) -> int:
             continue
 
         log.info("[%s] 신규 %d건 발견 — 상세 수집", src.key, len(new_posts))
+        # 소스 전체는 상세 수집이 가능해도 개별 글은 아닐 수 있다(회신사례는 구분별로
+        # 상세 endpoint 가 확인된 글만 상세 페이지가 있다). 그런 글은 본문이 비는 것이
+        # 정상이므로 시도 자체를 세지 않는다 — 실패로 세면 그런 글만 신규인 실행이
+        # '성공률 0%' 로 잡혀 파서 장애 경보가 거짓으로 울린다.
+        per_post_hook = getattr(scraper, "supports_enrich", None)
+        skipped = 0
         for p in new_posts:
+            if per_post_hook is not None and not per_post_hook(p):
+                skipped += 1
+                continue
             try:
                 scraper.enrich(p)
             except Exception as e:  # noqa: BLE001
@@ -265,6 +274,13 @@ def run(argv=None) -> int:
             # 등)의 실패가 섞이면 있지도 않은 의안 장애를 보고하게 된다.
             if p.source_key == ASSEMBLY_SOURCE_KEY:
                 assembly_detail.count(ok_detail, pending=is_pending)
+        if skipped:
+            log.info(
+                "[%s] 신규 %d건 중 %d건은 상세 수집 대상 아님(제목·링크만 통지)",
+                src.key,
+                len(new_posts),
+                skipped,
+            )
 
         # 신규(초과분 포함)는 '메일 성공 후'에만 seen 처리하도록 보류한다.
         pending_seen.append((src.key, all_new_ids))

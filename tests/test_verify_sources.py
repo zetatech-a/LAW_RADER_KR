@@ -180,7 +180,66 @@ def test_structured_detail_source_stays_ok_without_body():
 
 
 def test_other_source_with_no_detail_still_ok_but_flagged():
-    # 기존 기준: 다른 소스는 상세가 비어도 status 자체는 OK 로 두고 enrich_ok 로만 알린다.
-    r = _run("better_reply", enrich=lambda p: None)
+    # 기존 기준: 표식을 선언하지 않은 소스는 상세가 비어도 status 는 OK 로 두고
+    # enrich_ok 로만 알린다(훅이 없는 스크래퍼는 종전대로 첫 글을 표본으로 쓴다).
+    r = _run("fss_mgmt_notice", enrich=lambda p: None)
     assert r["status"] == OK
     assert r["enrich_ok"] is False
+
+
+# --- 회신사례: 상세 표본 선정과 본문 표식 검증 ---
+
+
+class _MixedScraper(_Scraper):
+    """상세 수집 대상과 비대상이 섞인 소스(회신사례)를 흉내낸다."""
+
+    def supports_enrich(self, post):
+        return "Detail.do" in post.url
+
+
+def _reply_post(url):
+    return Post(source_key="better_reply", source_name="회신사례", post_id=url,
+                title="제목", url=url)
+
+
+_LIST = "https://better.fsc.go.kr/fsc_new/replyCase/TotalReplyList.do?stNo=11"
+_DETAIL = "https://better.fsc.go.kr/fsc_new/replyCase/LawreqDetail.do?lawreqIdx=1"
+
+
+def _run_mixed(posts, enrich=None):
+    sc = _MixedScraper("better_reply", posts, enrich)
+    return verify_source(sc, 30, True)[0]
+
+
+def test_reply_picks_supported_post_as_detail_sample():
+    """첫 글이 미지원 유형이어도 지원 유형을 찾아 상세 파서를 검증한다."""
+    enriched = []
+
+    def _enrich(p):
+        enriched.append(p.url)
+        p.body = "[질의요지]\n질의\n\n[회답]\n회답\n\n[이유]\n이유"
+
+    r = _run_mixed([_reply_post(_LIST), _reply_post(_DETAIL)], _enrich)
+    assert enriched == [_DETAIL]          # 목록 URL 글이 아니라 상세 글을 표본으로
+    assert r["status"] == OK
+    assert r["detail_ok"] is True
+
+
+def test_reply_without_supported_sample_is_partial():
+    """지원 유형이 하나도 없으면 정상 성공으로 가장하지 않는다."""
+    r = _run_mixed([_reply_post(_LIST), _reply_post(_LIST + "&x=2")])
+    assert r["status"] == PARTIAL
+    assert r["enrich_ok"] is False
+    assert "상세 검증 표본 없음" in r["enrich"]
+
+
+def test_reply_with_partial_body_is_partial():
+    """세 표식이 다 없으면(부분 본문이라 body 가 비워진 경우 포함) 부분 실패다."""
+
+    def _enrich(p):
+        p.body = ""      # 회답·이유 누락 → 스크래퍼가 본문을 비운 상태
+
+    r = _run_mixed([_reply_post(_DETAIL)], _enrich)
+    assert r["status"] == PARTIAL
+    assert r["detail_ok"] is False
+    assert "[질의요지]" in r["detail"] and "[회답]" in r["detail"]

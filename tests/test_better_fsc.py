@@ -1,8 +1,13 @@
 """금융규제포털 회신사례(better_reply) 상세 수집 회귀 테스트.
 
 네트워크에 의존하지 않는다 — 목록 JSON·상세 HTML·첨부 바이트를 돌려주는 가짜
-fetcher 로 결정적으로 검증한다. 상세 HTML 은 라이브 마크업의 핵심 패턴(라벨-값 표,
-라벨 헤딩 + 형제 본문)을 최소로 압축한 것이다.
+fetcher 로 결정적으로 검증한다.
+
+상세 HTML 은 **실제 공개 페이지에서 확인된 의미 구조(질의요지·회답·이유 + 첨부
+링크)를 축약한 synthetic fixture 이며, raw DOM snapshot 이 아니다.** 실제 태그
+구조는 이와 다를 수 있으므로 파서는 라벨-값 표와 라벨 헤딩 두 배치를 모두 본다.
+첨부 URL 만은 실제 관찰된 형태(/fsc_new/file/displayFile.do?filePath=…&orgFileName=…
+&sysFileName=…)를 그대로 쓴다.
 """
 import os
 import sys
@@ -13,8 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import LLMConfig, SourceConfig
 from src.fetcher import AttachmentTooLarge
 from src.models import Post
+from src.notifier import build_html, build_text
 from src.scrapers.better_fsc import BetterReplyScraper
-from src.summarizer import _prepare_body
+from src.summarizer import Summarizer, _prepare_body
 
 LIST_URL = (
     "https://better.fsc.go.kr/fsc_new/replyCase/TotalReplyList.do"
@@ -31,9 +37,9 @@ DETAIL_HTML = """
       <tr><th>이유</th><td>은행법 제28조는 겸영업무를 열거하고 있으며,
         해당 업무는 그 범위에 포함되지 않습니다.</td></tr>
       <tr><th>첨부파일</th><td>
-        <a href="/file/displayFile.do?fileId=A1&amp;seq=0">회신문.hwp (42 KB)</a>
-        <a href="/file/displayFile.do?fileId=A1&amp;seq=0">회신문.hwp</a>
-        <a href="https://evil.example.com/file/displayFile.do?fileId=A9">외부첨부.hwp</a>
+        <a href="/fsc_new/file/displayFile.do?filePath=%2Freply%2F2026&amp;orgFileName=%ED%9A%8C%EC%8B%A0%EB%AC%B8.hwp&amp;sysFileName=20260820_001.hwp">회신문.hwp (42 KB)</a>
+        <a href="/fsc_new/file/displayFile.do?filePath=%2Freply%2F2026&amp;orgFileName=%ED%9A%8C%EC%8B%A0%EB%AC%B8.hwp&amp;sysFileName=20260820_001.hwp">회신문.hwp</a>
+        <a href="https://evil.example.com/fsc_new/file/displayFile.do?filePath=%2Fx&amp;sysFileName=e.hwp">외부첨부.hwp</a>
         <a href="javascript:fn_viewer('A1')">문서뷰어</a>
       </td></tr>
     </tbody>
@@ -53,6 +59,31 @@ DETAIL_HTML_HEADING = """
     <p>전자금융거래법상 제한 규정이 없습니다.</p>
   </div>
 </div>
+"""
+
+# 부분 본문 — 질의요지만 있는 배치(회답·이유 없음).
+DETAIL_HTML_ONLY_QUESTION = """
+<div id="content"><table><tbody>
+  <tr><th>질의요지</th><td>겸영업무 신고 대상인지 여부를 질의함.</td></tr>
+</tbody></table></div>
+"""
+
+# 부분 본문 — 질의요지 + 회답만 있는 배치(이유 없음).
+DETAIL_HTML_NO_REASON = """
+<div id="content"><table><tbody>
+  <tr><th>질의요지</th><td>겸영업무 신고 대상인지 여부를 질의함.</td></tr>
+  <tr><th>회답</th><td>신고 대상에 해당하지 않습니다.</td></tr>
+</tbody></table></div>
+"""
+
+# 부분 본문인데 첨부는 있는 배치(첨부 수집은 계속되어야 한다).
+DETAIL_HTML_PARTIAL_WITH_FILE = """
+<div id="content"><table><tbody>
+  <tr><th>질의요지</th><td>겸영업무 신고 대상인지 여부를 질의함.</td></tr>
+  <tr><th>첨부파일</th><td>
+    <a href="/fsc_new/file/displayFile.do?filePath=%2Freply&amp;orgFileName=a.hwp&amp;sysFileName=1.hwp">첨부.hwp</a>
+  </td></tr>
+</tbody></table></div>
 """
 
 # 포털 오류 페이지.
@@ -221,6 +252,48 @@ def test_detail_body_from_heading_layout():
     assert "[이유]\n전자금융거래법상 제한 규정이 없습니다." in post.body
 
 
+def test_partial_sections_leave_body_empty(caplog):
+    """질의요지만 있으면 본문을 만들지 않는다 — 회답 없는 요약은 결론을 지어낸다."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML_ONLY_QUESTION))
+    post = _post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do"))
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == ""
+    assert "회답" in caplog.text and "이유" in caplog.text     # 누락 항목을 명시
+    assert _prepare_body(_llm_cfg(), post) == ""              # 요약 대상이 아니다
+
+
+def test_two_of_three_sections_still_leave_body_empty(caplog):
+    sc = _scraper(_Fetcher(html=DETAIL_HTML_NO_REASON))
+    post = _post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do"))
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == ""
+    # 누락된 항목만 이름이 오른다(이미 찾은 질의요지·회답은 빠진다).
+    assert "상세에서 이유 를 찾지 못해" in caplog.text
+
+
+def test_all_three_sections_fill_body():
+    """세 항목이 모두 있을 때만 본문이 채워진다(위 두 케이스와 같은 파서)."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML))
+    post = _post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do"))
+    sc.enrich(post)
+    assert post.body != ""
+    for label in ("[질의요지]", "[회답]", "[이유]"):
+        assert label in post.body
+
+
+def test_partial_sections_still_collect_attachments():
+    """본문이 비어도 첨부 수집·다운로드는 계속한다."""
+    fetcher = _Fetcher(html=DETAIL_HTML_PARTIAL_WITH_FILE)
+    sc = _scraper(fetcher)
+    post = _post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do"))
+    sc.enrich(post)
+    assert post.body == ""
+    assert [a.filename for a in post.attachments] == ["첨부.hwp"]
+    assert post.attachments[0].data == b"HWP"
+
+
 def test_detail_request_uses_list_url_as_referer():
     fetcher = _Fetcher(html=DETAIL_HTML)
     sc = _scraper(fetcher)
@@ -230,7 +303,13 @@ def test_detail_request_uses_list_url_as_referer():
 
 
 def test_detail_does_not_fill_details():
-    """details 를 채우면 notifier 가 요약 대신 그것만 싣고 요약 경로에서 빠진다."""
+    """details 는 비워 둔다 — 채우면 요약이 만들어져도 메일에 보이지 않는다.
+
+    (정확히는 summarizer 의 실제 호출 경로 _summarize_general 은 details 를 보지 않고
+     body 길이만 본다. 문제는 notifier 가 details 를 summary 보다 먼저 렌더하고,
+     집계 로그 ai_target_count 만 details 가 있는 글을 대상에서 빼 로그와 실제 호출이
+     어긋난다는 점이다.)
+    """
     sc = _scraper(_Fetcher(html=DETAIL_HTML))
     post = _post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do"))
     sc.enrich(post)
@@ -261,6 +340,60 @@ def test_post_without_body_is_not_eligible():
     assert _prepare_body(_llm_cfg(), _post(LIST_URL)) == ""
 
 
+def _envelope(text: str) -> dict:
+    """Gemini generateContent 응답 봉투(테스트에서 _generate 를 대체할 때 쓴다)."""
+    return {"candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP"}]}
+
+
+def test_enriched_post_goes_through_real_general_summary_path():
+    """_prepare_body 만이 아니라 실제 일반 요약 경로(summarize_all)를 태운다.
+
+    네트워크·Gemini 호출은 없다 — Summarizer._generate 만 가짜 응답으로 대체한다
+    (production summarizer 는 수정하지 않는다).
+    """
+    sc = _scraper(_Fetcher(html=DETAIL_HTML))
+    post = _post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do"))
+    sc.enrich(post)
+
+    summarizer = Summarizer(_llm_cfg())
+    prompts: list[str] = []
+
+    def _generate(prompt, deadline=None, **kw):
+        prompts.append(prompt)
+        return _envelope('{"summary": ["신고 대상 아님", "은행법 제28조 근거", "회신 요지"]}')
+
+    summarizer._generate = _generate
+    ok = summarizer.summarize_all({post.source_name: [post]})
+
+    assert ok == 1
+    assert len(prompts) == 1                       # 이 글로 실제 호출이 일어났다
+    assert "질의요지" in prompts[0]                 # 수집한 본문이 프롬프트에 실렸다
+    assert post.summary == ["신고 대상 아님", "은행법 제28조 근거", "회신 요지"]
+
+
+def test_unsupported_type_post_is_not_summarized():
+    """본문이 없는(미지원 구분) 글은 요약 호출 대상이 아니다."""
+    summarizer = Summarizer(_llm_cfg())
+    called = []
+    summarizer._generate = lambda *a, **kw: called.append(1) or _envelope("{}")
+    assert summarizer.summarize_all({"회신사례": [_post(LIST_URL)]}) == 0
+    assert called == []
+
+
+def test_summary_is_rendered_in_mail_body():
+    """details 를 비워 둔 덕분에 메일에 AI 요약이 그대로 실린다."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML))
+    post = _post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do"))
+    sc.enrich(post)
+    post.summary = ["신고 대상 아님", "은행법 제28조 근거", "회신 요지"]
+
+    html = build_html({post.source_name: [post]})
+    text = build_text({post.source_name: [post]})
+    for line in post.summary:
+        assert line in html
+        assert line in text
+
+
 # --- 6. ERROR PAGE ----------------------------------------------------------
 def test_error_page_is_not_stored_as_body(caplog):
     sc = _scraper(_Fetcher(html=ERROR_HTML))
@@ -283,7 +416,9 @@ def test_attachments_are_absolute_deduped_and_named():
     assert len(post.attachments) == 1                       # 중복 URL 제거
     att = post.attachments[0]
     assert att.url == (
-        "https://better.fsc.go.kr/file/displayFile.do?fileId=A1&seq=0"
+        "https://better.fsc.go.kr/fsc_new/file/displayFile.do"
+        "?filePath=%2Freply%2F2026&orgFileName=%ED%9A%8C%EC%8B%A0%EB%AC%B8.hwp"
+        "&sysFileName=20260820_001.hwp"
     )                                                       # 상대 → 절대
     assert att.filename == "회신문.hwp"                      # 크기 표기 제거
     assert att.data == b"HWP"
@@ -307,7 +442,9 @@ def test_attachment_too_large_keeps_metadata_and_body():
     sc.enrich(post)                                   # 예외가 새어 나오지 않는다
     assert len(post.attachments) == 1
     assert post.attachments[0].filename == "회신문.hwp"
-    assert post.attachments[0].url.startswith("https://better.fsc.go.kr/file/displayFile.do")
+    assert post.attachments[0].url.startswith(
+        "https://better.fsc.go.kr/fsc_new/file/displayFile.do"
+    )
     assert post.attachments[0].data is None
     assert "[회답]" in post.body                        # 본문 수집은 그대로 성공
 
@@ -337,7 +474,34 @@ def test_unparseable_detail_leaves_body_empty_and_warns(caplog):
     with caplog.at_level("WARNING"):
         sc.enrich(post)
     assert post.body == ""
-    assert "찾지 못함" in caplog.text
+    assert "질의요지·회답·이유 를 찾지 못해" in caplog.text
+
+
+# --- per-post 상세 수집 대상 훅 ---
+def test_supports_enrich_is_per_post():
+    """소스는 상세 수집을 하지만, 상세 주소가 없는 글은 통계에서 빠져야 한다."""
+    sc = _scraper(_Fetcher())
+    assert sc.supports_enrich(_post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do")))
+    assert sc.supports_enrich(_post(LIST_URL.replace("TotalReplyList.do", "OpinionDetail.do")))
+    assert not sc.supports_enrich(_post(LIST_URL))
+
+
+def test_base_scraper_hook_defaults_to_source_flag():
+    """기존 스크래퍼는 훅을 오버라이드하지 않아도 동작·통계가 그대로여야 한다."""
+    from src.config import SourceConfig as _SC
+    from src.scrapers.base import BaseScraper
+
+    class _Plain(BaseScraper):
+        pass
+
+    plain = _Plain(_SC(key="k", name="n", type="t", list_url="https://x/"), fetcher=None)
+    assert plain.supports_enrich(_post("https://x/any")) is True
+
+    class _Off(BaseScraper):
+        SUPPORTS_ENRICH = False
+
+    off = _Off(_SC(key="k", name="n", type="t", list_url="https://x/"), fetcher=None)
+    assert off.supports_enrich(_post("https://x/any")) is False
 
 
 # --- 기존 기능 보존 ---------------------------------------------------------

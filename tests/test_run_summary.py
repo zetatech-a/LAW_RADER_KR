@@ -710,6 +710,34 @@ def test_real_better_reply_scraper_now_supports_enrich():
     assert build_scraper(src, fetcher=None).SUPPORTS_ENRICH is True
 
 
+class _PerPostNoEnrichScraper(_NoEnrichScraper):
+    """소스는 상세 수집이 가능하지만 개별 글은 대상이 아닌 스크래퍼(회신사례 유형)."""
+
+    SUPPORTS_ENRICH = True
+
+    def supports_enrich(self, post):
+        return False
+
+    def enrich(self, post):        # pragma: no cover — 호출되지 않아야 한다
+        raise AssertionError("per-post 훅이 False 인 글에 enrich 를 부르면 안 된다")
+
+
+def test_per_post_unenrichable_posts_are_excluded_from_detail_stats(
+    tmp_path, monkeypatch, caplog
+):
+    """회귀: 상세 주소가 없는 글만 신규인 실행이 '성공률 0%' 경보를 내면 안 된다.
+
+    소스 단위 플래그로는 표현할 수 없는 경우다 — 같은 소스의 다른 글은 상세를 수집한다.
+    """
+    rc, sent, errors, text = _run_with_scraper(
+        tmp_path, monkeypatch, caplog, _PerPostNoEnrichScraper, ["better_reply"]
+    )
+    assert rc == 0 and sent == 1
+    assert errors == []
+    assert "상세 수집 집계(전체) — 시도 0건" in text
+    assert "상세 수집 대상 아님" in text
+
+
 def test_enrichable_sources_still_counted(tmp_path, monkeypatch, caplog):
     """플래그가 없는(=수집 가능한) 소스는 종전대로 실패를 센다."""
 

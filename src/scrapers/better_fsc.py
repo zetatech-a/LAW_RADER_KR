@@ -5,17 +5,28 @@
   레코드 필드: rownumber, pastreqType(구분), title, replyRegDate, dataIdx(안정 ID)
 
 상세는 목록에서 JS 함수(openReplyCasePastReqDetail)로 열리지만, 그 함수가 결국
-여는 페이지는 구분(pastreqType)별로 아래 GET 주소이며 목록의 dataIdx 를 그대로
-쓴다. 두 주소 모두 공개 색인된 실제 URL 로 확인했다.
+여는 페이지는 구분(pastreqType)별로 아래 GET 주소다.
   법령해석      /fsc_new/replyCase/LawreqDetail.do?...&lawreqIdx={dataIdx}
   비조치의견서  /fsc_new/replyCase/OpinionDetail.do?...&opinionIdx={dataIdx}
-그 밖의 구분('현장건의 과제' 등)은 상세 주소가 확인되지 않았으므로 **추측하지 않고**
-예전처럼 통합조회 목록 URL 을 링크로 둔다(본문·첨부 없이 제목만 통지).
+두 주소의 GET 상세 조회와 질의요지·회답·이유 존재는 외부 리뷰에서 실제 페이지로
+확인했다. 그 밖의 구분('현장건의 과제' 등)은 상세 주소가 확인되지 않았으므로
+**추측하지 않고** 예전처럼 통합조회 목록 URL 을 링크로 둔다(제목만 통지).
 
-상세 페이지에서는 질의요지·회답·이유를 뽑아 post.body 에 담는다. details 에는 담지
-않는다 — notifier 는 details 가 있으면 그것만 싣고(_summary_block), summarizer 는
-body 길이로만 요약 대상을 고르므로(_prepare_body) details 를 채우면 이 소스가 기존
-Gemini 3줄 요약 경로에서 빠진다.
+아직 라이브로 확인하지 못한 가정 두 가지(머지 전 확인 대상):
+  A. 목록 JSON 의 dataIdx 가 lawreqIdx/opinionIdx 와 실제로 같은 값인지.
+  B. OpinionDetail.do 에 통합조회 목록의 muNo=117 을 넣어도 정상 조회되는지
+     (공개된 일반 비조치의견서 URL 에서는 muNo=86 도 쓰인다).
+
+상세 페이지에서는 질의요지·회답·이유를 뽑아 post.body 에 담는다. **세 항목이 모두
+있을 때만** 담는다 — 회답이 빠진 질의만으로 3줄 요약을 만들면 결론을 지어낸 요약이
+메일에 실린다. 하나라도 없으면 body 를 비워 두고(요약 대상에서 제외) 어떤 항목이
+없는지 warning 을 남긴다. 첨부 수집은 그와 무관하게 계속한다.
+
+details 에는 담지 않는다. summarizer 의 실제 호출 경로(_summarize_general)는 details
+를 보지 않고 _prepare_body(=body 길이)만으로 대상을 고르므로 details 를 채워도 요약
+호출 자체는 일어난다. 다만 notifier 가 details 를 summary 보다 먼저 렌더하므로
+(_summary_block) 그 요약이 메일에 보이지 않고, 집계 로그의 ai_target_count 는 details
+가 있는 글을 대상에서 빼 로그와 실제 호출이 어긋난다. 그래서 body 만 쓴다.
 """
 from __future__ import annotations
 
@@ -178,6 +189,14 @@ class BetterReplyScraper(BaseScraper):
         """상세 수집 대상인 URL 인지(목록 URL 폴백이면 False)."""
         return urlparse(url or "").path.rsplit("/", 1)[-1].lower() in _DETAIL_FILES
 
+    def supports_enrich(self, post: Post) -> bool:
+        """상세 주소가 확인된 구분(법령해석·비조치의견서)의 글만 상세 수집 대상이다.
+
+        나머지 구분은 목록 URL 이 링크라 본문·첨부가 비는 것이 정상이므로, main 이
+        상세 수집 통계에서 빼도록 False 를 돌려준다.
+        """
+        return self._is_detail_url(post.url)
+
     # --- 상세 수집 ---
     def enrich(self, post: Post) -> None:
         """상세에서 질의요지·회답·이유와 첨부를 채운다.
@@ -202,15 +221,18 @@ class BetterReplyScraper(BaseScraper):
             return
 
         sections = self._sections(soup)
-        if sections:
-            post.body = "\n\n".join(f"[{label}]\n{text}" for label, text in sections)
-        else:
+        missing = [label for label in _BODY_LABELS if label not in sections]
+        if missing:
+            # 부분 본문은 요약 입력으로 쓰지 않는다 — 회답 없는 질의만 넘기면 Gemini 가
+            # 결론을 지어낸다. 본문을 비우면 기존 폴백(제목·링크)으로 안전하게 나간다.
             log.warning(
-                "[%s] 상세에서 %s 를 찾지 못함 — 마크업 확인 필요: %s",
+                "[%s] 상세에서 %s 를 찾지 못해 본문을 비웁니다 — 마크업 확인 필요: %s",
                 self.key,
-                "·".join(_BODY_LABELS),
+                "·".join(missing),
                 post.url,
             )
+        else:
+            post.body = "\n\n".join(f"[{label}]\n{sections[label]}" for label in _BODY_LABELS)
 
         self._collect_attachments(soup, post)
         for att in post.attachments:
@@ -230,10 +252,11 @@ class BetterReplyScraper(BaseScraper):
         return any(m in text for m in _ERROR_MARKERS)
 
     # --- 본문 추출 ---
-    def _sections(self, soup: BeautifulSoup) -> list[tuple[str, str]]:
-        """질의요지·회답·이유를 (라벨, 본문) 으로. 못 찾은 항목은 뺀다.
+    def _sections(self, soup: BeautifulSoup) -> dict[str, str]:
+        """찾아낸 {라벨: 본문}. 못 찾은 항목은 키 자체가 없다.
 
-        마크업을 라이브로 확인할 수 없어 두 배치를 모두 본다.
+        세 항목이 실제 페이지에 있다는 것은 확인했지만 raw 마크업(태그 구조)까지는
+        확인하지 못해 두 배치를 모두 본다.
           1) 구조적 라벨-값 짝(tr 안의 th/td, dt+dd)
           2) 라벨만 든 요소 뒤에 본문이 형제로 오는 배치
         먼저 찾은 값을 쓴다.
@@ -247,7 +270,7 @@ class BetterReplyScraper(BaseScraper):
             for key, value in self._heading_sections(soup):
                 if key not in found and value:
                     found[key] = value
-        return [(label, found[label]) for label in _BODY_LABELS if label in found]
+        return found
 
     @staticmethod
     def _label_pairs(soup: BeautifulSoup) -> Iterator[tuple[str, str]]:
