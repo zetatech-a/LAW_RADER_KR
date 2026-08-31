@@ -654,7 +654,7 @@ def _run_with_scraper(tmp_path, monkeypatch, caplog, scraper_cls, keys):
 
 
 class _NoEnrichScraper:
-    """회신사례처럼 상세가 JS 팝업이라 enrich 가 아무것도 못 채우는 소스."""
+    """SUPPORTS_ENRICH=False 를 선언한(=상세를 수집할 수 없는) 가상의 소스."""
 
     SUPPORTS_ENRICH = False
 
@@ -675,10 +675,12 @@ class _NoEnrichScraper:
 def test_unenrichable_source_does_not_trigger_zero_success_error(
     tmp_path, monkeypatch, caplog
 ):
-    """회귀: better_reply 만 신규인 실행이 '성공률 0%' 장애 경보를 내면 안 된다.
+    """회귀: SUPPORTS_ENRICH=False 인 소스만 신규인 실행이 '성공률 0%' 장애 경보를
+    내면 안 된다.
 
-    이 소스는 상세가 JS 팝업이라 본문이 비는 것이 **정상**이다. 실패로 세면 정상
-    실행마다 거짓 ERROR 가 찍혀 진짜 파서 장애가 그 잡음에 묻힌다.
+    그런 소스는 본문이 비는 것이 **정상**이다. 실패로 세면 정상 실행마다 거짓 ERROR 가
+    찍혀 진짜 파서 장애가 그 잡음에 묻힌다. (키는 config 에 있는 아무 소스나 써도
+    되며, 스크래퍼는 위 가짜 클래스로 대체된다.)
     """
     rc, sent, errors, text = _run_with_scraper(
         tmp_path, monkeypatch, caplog, _NoEnrichScraper, ["better_reply"]
@@ -689,19 +691,23 @@ def test_unenrichable_source_does_not_trigger_zero_success_error(
     assert "상세 수집 대상 아님" in text
 
 
-def test_real_better_reply_scraper_declares_no_enrich():
-    """플래그가 실제 스크래퍼에 붙어 있어야 위 회귀 방어가 의미를 갖는다."""
+def test_real_better_reply_scraper_now_supports_enrich():
+    """회신사례는 법령해석·비조치의견서 상세를 수집한다 — 상세 통계에 포함되어야 한다.
+
+    (예전에는 상세가 JS 팝업이라 SUPPORTS_ENRICH=False 였다. 상세 GET 주소가 확인되어
+     본문·첨부를 수집하게 되었으므로, 이제는 수집 실패가 통계에 잡혀야 한다.)
+    """
     from src.scrapers import build_scraper
     from src.scrapers.base import BaseScraper
     from src.scrapers.better_fsc import BetterReplyScraper
 
-    assert BetterReplyScraper.SUPPORTS_ENRICH is False
+    assert BetterReplyScraper.SUPPORTS_ENRICH is True
     assert BaseScraper.SUPPORTS_ENRICH is True     # 기본은 '수집한다'
     src = SourceConfig(
         key="better_reply", name="회신사례", type="better_reply",
         list_url="https://better.fsc.go.kr/", extra={},
     )
-    assert build_scraper(src, fetcher=None).SUPPORTS_ENRICH is False
+    assert build_scraper(src, fetcher=None).SUPPORTS_ENRICH is True
 
 
 def test_enrichable_sources_still_counted(tmp_path, monkeypatch, caplog):

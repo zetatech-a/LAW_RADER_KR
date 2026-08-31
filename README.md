@@ -17,11 +17,11 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 | `fss_rule_amendment` | 금융감독원 | 세칙 제·개정 예고 | HTML |
 | `fss_sanction` | 금융감독원 | 검사결과 제재 | HTML |
 | `fss_mgmt_notice` | 금융감독원 | 경영유의사항 등 공시 | HTML |
-| `better_reply` | 금융규제·법령해석포털 | 법령해석·비조치의견서 회신사례 | JSON (POST) |
+| `better_reply` | 금융규제·법령해석포털 | 법령해석·비조치의견서 회신사례 | JSON (POST, 목록) + 상세페이지(질의요지·회답·이유·첨부) |
 | `assembly_bill` | 의안정보시스템 | 계류의안 | 열린국회 Open API (목록) + 상세페이지(제안이유 및 주요내용) |
 
 목록 파서는 실제 사이트 HTML/응답으로 검증되어 제목·URL·날짜·본문·첨부를 수집합니다.
-(`fss_mgmt_notice` 는 상세가 PDF 직접 다운로드, `better_reply` 는 상세가 JS 함수라 목록 링크로 안내)
+(`fss_mgmt_notice` 는 상세가 PDF 직접 다운로드. `better_reply` 는 상세 주소가 확인된 **법령해석·비조치의견서**만 본문·첨부를 수집하고, 상세 주소가 확인되지 않은 구분(현장건의 과제 등)은 종전대로 목록 링크로 안내합니다)
 
 > **확정된 수집 계약** (2026-08 Playwright 라이브 캡처):
 >
@@ -143,7 +143,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
    - API 키(`GEMINI_API_KEY`)가 없거나 호출이 실패하면 **원문 발췌로 자동 대체**되고 메일은 정상 발송됩니다. 일반 게시물은 제목 중복과 담당부서·등록일·첨부파일 안내 같은 반복 안내문을 제외한 본문 첫 부분을 220자까지 발췌합니다(외부 호출 없음).
    - **의안 발췌는 220자 한 줄이 아닙니다.** 의안 본문은 '제안이유 및 주요내용' 한 덩어리라 앞 220자에는 거의 항상 현행 제도 설명만 실리고 정작 *무엇을 바꾸는지*가 잘립니다. 그래서 의안만 원문에서 **최대 3개의 서로 다른 의미 구간**(배경 → 입법행위 → 결론)을 골라 총 900자 이내로 싣습니다. 문장 분리가 되지 않는 한 덩어리 본문은 `머리 … [중략] 꼬리` 형태로 보여줍니다. **AI 요약이 아니라 원문 그대로의 결정적(deterministic) 발췌**이므로 라벨도 '제안이유 및 주요내용 발췌'를 유지합니다. Phase 2 의 '의안 상세 업데이트' 알림도 같은 렌더러를 쓰므로 자동으로 같은 발췌를 받습니다.
    - 의안 배치 호출이 실패하면 **실패의 종류에 따라** 다르게 다룹니다. 인증(401·403)·한도(429)·잘못된 요청(400)·모델 부재처럼 다시 불러도 결과가 같은 실패는 남은 배치를 **즉시** 포기합니다. 반대로 일시 장애(408·5xx·네트워크·타임아웃)는 재시도한 뒤 **다음 배치를 한 번은 더 두드려 보고**, 연속 실패가 `llm.assembly_batch.max_consecutive_transient_failures` 에 도달할 때만 남은 배치를 포기합니다. 호출은 성공했고 **응답 '내용'이 문제인 경우**(깨진 JSON·스키마 위반·안전필터 차단 등)는 그 배치에 담긴 의안 내용에 달린 판정이라 다음 배치는 통과할 수 있으므로 멈추지 않습니다. 자세한 분류는 아래 [알려진 한계](#알려진-한계)의 실패 처리 표를 보세요.
-   - 상세 본문이 없는 소스(금융규제포털 회신사례)는 요약 대상이 아닙니다. 상세가 JS 팝업이라 수집할 대상 자체가 없으므로(`SUPPORTS_ENRICH = False`) **상세 수집 통계에서도 제외**합니다 — 실패로 세면 그 소스만 신규인 실행이 '성공률 0%' 로 잡혀 거짓 장애 경보가 울립니다.
+   - 금융규제포털 회신사례는 **법령해석·비조치의견서**의 질의요지·회답·이유를 `post.body` 에 담아 기존 일반 요약 경로(`min_body_chars` 이상이면 1건당 1회 호출)를 그대로 탑니다. `details` 는 채우지 않습니다 — 채우면 notifier 가 요약 대신 그 표만 싣고 요약 대상에서도 빠집니다. 상세 주소가 확인되지 않은 구분은 본문 없이 제목·링크만 나가며, 그 글만 신규인 실행에서는 상세 수집 통계가 '성공 0건' 으로 잡힐 수 있습니다(정상 동작).
    - 모델이 수명 종료돼 404가 나면 `llm.fallback_models` 순서로 자동 전환하고, 성공한 모델을 그 실행 동안 재사용합니다. 전부 실패해도 원문 발췌로 발송됩니다. **타임아웃·5xx 에서는 모델을 바꾸지 않습니다.**
    - 의안 배치는 호출 1회마다 운영 로그에 입력 규모와 사용량을 남깁니다(추가 Gemini 요청 0회 — `countTokens` 를 따로 부르지 않습니다). 호출 전 `Assembly AI call — batch=i/n items=… body_chars=… prompt_chars=… min/avg/max_bill_chars=… allocated_window_sec=… overall_remaining_sec=…`, 성공 후 `Assembly AI call ok — elapsed_sec=… model_version=… prompt_tokens=… candidate_tokens=… thought_tokens=… total_tokens=…`(응답에 `usageMetadata` 가 없으면 `None`), 실패 시 `Assembly AI call failed — elapsed_sec=… error_kind=… error_type=… response_retry=…`. **API 키·프롬프트 전문·제안이유 본문은 로그에 남기지 않습니다**(길이만 남깁니다).
 5. 발송할 것이 있으면 **다이제스트 메일 1통**으로 묶어 발송합니다(첨부 포함). 한 통 안에 두 종류가 들어갈 수 있습니다.
@@ -336,7 +336,7 @@ python -m pytest -q
 
 리포트는 소스별로 **① 목록 건수 ② 제목 샘플 ③ 페이지네이션 동작 ④ 본문/첨부 추출 여부** 를 보여줍니다. 0건인 소스는 `debug/<key>_list.txt` 원본을 열어 실제 셀렉터를 확인한 뒤 해당 스크래퍼의 `_parse_list` 를 수정하면 됩니다.
 
-판정은 세 가지입니다 — ✅ 정상 / 🟠 **부분 실패(목록 성공·상세 실패)** / ❌ 실패. 상세가 PDF 직접 다운로드(`fss_mgmt_notice`)거나 JS 팝업(`better_reply`)인 소스는 본문이 비어도 정상으로 봅니다.
+판정은 세 가지입니다 — ✅ 정상 / 🟠 **부분 실패(목록 성공·상세 실패)** / ❌ 실패. 상세가 PDF 직접 다운로드(`fss_mgmt_notice`)인 소스와, 상세 주소가 확인된 구분만 수집하는 `better_reply` 는 본문이 비어도 정상으로 봅니다.
 
 계류의안은 **available 검증과 pending 검증을 따로** 합니다. 목록 맨 위는 갓 접수된 의안이라 원문이 아직 없을 수 있어(등록 대기), 첫 건만 보면 '등록 대기'와 '수집 고장'을 구분할 수 없기 때문입니다. 표본 `--assembly-sample`(기본 3)건을 훑어 상태별로 세고 다음과 같이 판정합니다.
 
@@ -375,7 +375,7 @@ src/
   scrapers/
     base.py                 # 스크래퍼 베이스(페이지네이션·디버그 덤프)
     fsc.py  fss.py          # 금융위 / 금감원 게시판
-    better_fsc.py assembly.py  # 회신사례(JSON) / 계류의안(Open API + 제안이유 수집)
+    better_fsc.py assembly.py  # 회신사례(JSON 목록 + 상세 수집) / 계류의안(Open API + 제안이유 수집)
 state/seen.json             # 이미 본 글 ID (자동 커밋)
 scripts/
   send_test_email.py        # SMTP 설정 확인
