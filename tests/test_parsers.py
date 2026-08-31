@@ -2,6 +2,7 @@
 
 실제 사이트(2026-07 캡처) 마크업의 핵심 패턴을 최소 HTML 로 재현한다.
 """
+import logging
 import os
 import sys
 
@@ -10,6 +11,7 @@ from bs4 import BeautifulSoup
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import SourceConfig
+from src.models import Post
 from src.scrapers.fsc import FscBoardScraper
 from src.scrapers.fss import FssBoardScraper
 
@@ -25,10 +27,12 @@ def _fsc(list_url, html):
 
 
 class _DetailFetcher:
-    """enrich() 용 최소 fetcher — 상세 HTML 하나만 돌려준다."""
+    """enrich() 용 최소 fetcher — 상세 HTML 하나(+선택적 첨부 바이트)를 돌려준다."""
 
-    def __init__(self, html):
+    def __init__(self, html, blob=None):
         self.html = html
+        self.blob = blob
+        self.downloaded = []
 
     def get(self, url, referer=None):
         return object()
@@ -36,13 +40,22 @@ class _DetailFetcher:
     def text(self, resp):
         return self.html
 
-    def download(self, url, referer=None):  # pragma: no cover - 첨부 없는 케이스
-        raise AssertionError("이 테스트에는 첨부가 없어야 한다")
+    def download(self, url, referer=None):
+        if self.blob is None:  # pragma: no cover - 첨부 없는 케이스
+            raise AssertionError("이 테스트에는 첨부가 없어야 한다")
+        self.downloaded.append(url)
+        return self.blob
 
 
 def _fss(list_url, html):
     sc = FssBoardScraper(SourceConfig(key="k", name="k", type="x", list_url=list_url), fetcher=None)
     return sc._parse_list(BeautifulSoup(html, "lxml"))
+
+
+def _fss_scraper(key, list_url, fetcher):
+    return FssBoardScraper(
+        SourceConfig(key=key, name=key, type="fss_board", list_url=list_url), fetcher=fetcher
+    )
 
 
 def test_fsc_press_path_id_title_and_attachments():
@@ -623,6 +636,214 @@ def test_fss_mgmt_notice_file_download_detail():
     assert p.title == "KB증권주식회사"
     assert p.post_id.startswith("file:202500516_12_KB")  # 파일명 기반 안정 ID
     assert "hpdownload" in p.url                          # 상세=파일 URL(enrich 에서 첨부 처리)
+
+
+# --- 금감원 보도자료 상세 본문(2026-08 개편) ---
+PRESS_LIST = "https://www.fss.or.kr/fss/bbs/B0000188/list.do?menuNo=200218"
+PRESS_VIEW = (
+    "https://www.fss.or.kr/fss/bbs/B0000188/view.do?nttId=225832&menuNo=200218&pageIndex=1"
+)
+
+# 개편 후 상세 마크업의 핵심 패턴을 최소로 압축한 것. 실제 본문은 .n-dbdata 안에만
+# 있고, 같은 .krds-bd-view 안에 제목·담당부서·문의전화·등록일·첨부파일명이 함께 있다.
+PRESS_DETAIL_NEW = """
+<div id="content"><div class="krds-bd-view">
+  <div class="sub-info">
+    <h3 class="subject">26.6월말 국내은행 BIS기준 자본비율 현황(잠정)</h3>
+    <dl class="bd-info">
+      <div class="info-wrap"><dt>담당부서</dt><dd>은행리스크감독국</dd></div>
+      <div class="info-wrap"><dt>문의</dt><dd>3145-8331</dd></div>
+      <div class="info-wrap"><dt>등록일</dt><dd>2026-08-31</dd></div>
+    </dl>
+  </div>
+
+  <dl class="attach-file-box">
+    <dt>첨부파일</dt>
+    <dd><a href="/fss/cmmn/file/fileDown.do?atchFileId=FILE_0001&fileSn=0">
+      <span class="name">보도자료_자본비율.hwp</span></a></dd>
+  </dl>
+
+  <div class="n-dbdata">
+    ㅁ '26.6월말 국내은행의 자본비율은 전분기말 대비 상승하고,
+    모든 은행의 자본비율이 규제비율을 상회하는 등 양호한 수준을 유지
+    <br><br>
+    ㅁ 대외 불확실성이 지속되는 가운데 신용위험 확대 가능성이 상존
+    <br><br>
+    ㅇ 손실흡수능력 확충 및 자본적정성 관리를 강화하도록 유도할 예정
+    <br><br>
+    ※ 자세한 내용은 첨부파일을 참고하시기 바랍니다.
+  </div>
+</div></div>
+"""
+
+
+def _press_post(url=PRESS_VIEW):
+    return Post(
+        source_key="fss_press",
+        source_name="금감원 · 보도자료",
+        post_id="nttId:225832",
+        title="26.6월말 국내은행 BIS기준 자본비율 현황(잠정)",
+        url=url,
+        date="2026-08-31",
+    )
+
+
+def _enrich_press(html, blob=b"%HWP dummy", key="fss_press"):
+    sc = _fss_scraper(key, PRESS_LIST, _DetailFetcher(html, blob=blob))
+    post = _press_post()
+    post.source_key = key
+    sc.enrich(post)
+    return sc, post
+
+
+def test_fss_press_body_comes_from_n_dbdata_only():
+    """개편 후 본문은 .n-dbdata 에서 오고, 주변 메타데이터는 섞이지 않는다."""
+    _, p = _enrich_press(PRESS_DETAIL_NEW)
+    assert p.body
+    assert "국내은행의 자본비율" in p.body
+    assert "손실흡수능력" in p.body
+    # .krds-bd-view 전체를 긁었다면 함께 들어왔을 값들
+    assert "은행리스크감독국" not in p.body
+    assert "3145-8331" not in p.body
+    assert "담당부서" not in p.body
+    # 첨부 블록(파일명)은 본문에 섞이지 않는다. 본문 마지막의 '첨부파일을 참고하시기'는
+    # 금감원이 직접 쓴 문장이므로 그대로 남아야 한다 — 그래서 파일명으로 검사한다.
+    assert "보도자료_자본비율.hwp" not in p.body
+    assert "BIS기준 자본비율 현황" not in p.body   # 제목 h3 도 아님
+
+
+def test_fss_press_body_keeps_bullet_markers_and_numbers():
+    """ㅁ/ㅇ 표식과 날짜·비율 같은 수치 표현이 손상되지 않는다."""
+    _, p = _enrich_press(PRESS_DETAIL_NEW)
+    assert "ㅁ" in p.body and "ㅇ" in p.body
+    assert "'26.6월말" in p.body
+    assert "※ 자세한 내용은 첨부파일을 참고하시기 바랍니다." in p.body
+
+
+def test_fss_press_new_markup_still_collects_and_downloads_attachments():
+    """본문 selector 를 바꿔도 첨부 수집·다운로드는 그대로다."""
+    sc, p = _enrich_press(PRESS_DETAIL_NEW)
+    assert [a.filename for a in p.attachments] == ["보도자료_자본비율.hwp"]
+    assert p.attachments[0].data == b"%HWP dummy"
+    assert sc.fetcher.downloaded == [p.attachments[0].url]
+
+
+def test_fss_press_legacy_view_cont_still_works():
+    """구 홈페이지 구조(.view-cont)도 fallback 으로 그대로 동작한다."""
+    legacy = """
+    <div id="content"><div class="view-cont">
+      <p>금융감독원은 오늘 보도자료를 배포하였다.</p>
+    </div></div>"""
+    _, p = _enrich_press(legacy, blob=None)
+    assert "보도자료를 배포" in p.body
+
+
+def test_fss_press_empty_n_dbdata_falls_through_to_legacy():
+    """신형 컨테이너가 빈 껍데기로만 있어도 본문을 잃지 않는다."""
+    mixed = """
+    <div id="content">
+      <div class="n-dbdata"> </div>
+      <div class="view-cont"><p>구 구조에 남아 있는 본문</p></div>
+    </div>"""
+    _, p = _enrich_press(mixed, blob=None)
+    assert "구 구조에 남아 있는 본문" in p.body
+
+
+def test_fss_press_second_n_dbdata_beats_lower_priority_selector():
+    """같은 selector 에 여러 요소가 있으면 전부 훑는다 — 첫 요소가 비었다고 해서
+    우선순위가 낮은 selector 로 넘어가면 안 된다(빈 반응형/템플릿 컨테이너 대비)."""
+    duplicated = """
+    <div id="content">
+      <div class="n-dbdata"> </div>
+
+      <div class="n-dbdata">
+        ㅁ 실제 금감원 공식 본문
+        <br>
+        ㅇ 두 번째 n-dbdata의 내용
+      </div>
+
+      <div class="view-cont">이 legacy fallback은 선택되면 안 됨</div>
+    </div>"""
+    _, p = _enrich_press(duplicated, blob=None)
+    assert "실제 금감원 공식 본문" in p.body
+    assert "두 번째 n-dbdata의 내용" in p.body
+    assert "legacy fallback은 선택되면 안 됨" not in p.body
+
+
+def test_fss_press_legacy_cont_still_works():
+    """구 홈페이지의 .cont 만 있는 상세도 그대로 읽는다.
+
+    이번 변경에서 보도자료 목록에서 빼는 것은 넓은 #content 하나뿐이다 — 기존
+    production chain 이 지원하던 .cont 까지 함께 빠지면 구형 페이지가 본문을 잃는다.
+    """
+    legacy_cont = """
+    <div id="content"><div class="cont">
+      <p>구형 금감원 보도자료 본문</p>
+    </div></div>"""
+    _, p = _enrich_press(legacy_cont, blob=None)
+    assert p.body
+    assert "구형 금감원 보도자료 본문" in p.body
+
+
+def test_fss_press_does_not_fall_back_to_whole_content(caplog):
+    """본문 컨테이너가 없으면 #content 를 긁지 않고, 대신 경고를 남긴다."""
+    chrome_only = """
+    <div id="content">
+      <ul class="lnb"><li><a href="/fss/main">금융감독원 홈</a></li></ul>
+      <p>페이지 껍데기만 있는 상세</p>
+    </div>"""
+    with caplog.at_level(logging.WARNING, logger="src.scrapers.fss"):
+        _, p = _enrich_press(chrome_only, blob=None)
+    assert p.body == ""                     # 메뉴가 본문으로 들어오지 않는다
+    assert "상세 본문 selector를 찾지 못함" in caplog.text
+    assert "fss_press" in caplog.text
+    assert "nttId:225832" in caplog.text
+    assert PRESS_VIEW in caplog.text
+
+
+def test_fss_press_missing_body_does_not_raise():
+    """본문을 못 찾아도 예외 없이(=발송을 막지 않고) 넘어간다 — fail-soft 유지."""
+    _, p = _enrich_press("<div id='content'></div>", blob=None)
+    assert p.body == ""
+    assert p.title                          # 나머지 필드는 그대로
+
+
+def test_other_fss_sources_keep_wide_content_fallback():
+    """보도자료가 아닌 게시판은 기존 #content fallback 을 그대로 쓴다."""
+    html = """
+    <div id="content"><p>행정지도 예고 본문</p></div>"""
+    sc = _fss_scraper(
+        "fss_admin_guidance",
+        "https://www.fss.or.kr/fss/job/admnPrvntc/list.do?menuNo=200491",
+        _DetailFetcher(html),
+    )
+    post = Post(
+        source_key="fss_admin_guidance",
+        source_name="금감원 · 행정지도 예고",
+        post_id="seqno:123",
+        title="행정지도 예고",
+        url="https://www.fss.or.kr/fss/job/admnPrvntc/view.do?seqno=123",
+    )
+    sc.enrich(post)
+    assert "행정지도 예고 본문" in post.body
+
+
+def test_other_fss_sources_can_also_read_new_markup():
+    """다른 게시판이 같은 개편 구조를 쓰더라도 #content 폴백으로 본문은 살아 있다."""
+    sc = _fss_scraper(
+        "fss_rule_amendment",
+        "https://www.fss.or.kr/fss/job/lrgRegItnPrvntc/list.do?menuNo=200489",
+        _DetailFetcher(PRESS_DETAIL_NEW, blob=b"%HWP dummy"),
+    )
+    post = Post(
+        source_key="fss_rule_amendment",
+        source_name="금감원 · 세칙 예고",
+        post_id="lrgSlno:9",
+        title="세칙 예고",
+        url="https://www.fss.or.kr/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=9",
+    )
+    sc.enrich(post)
+    assert "손실흡수능력" in post.body
 
 
 def test_assembly_openapi_envelope_parsing(monkeypatch):

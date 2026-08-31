@@ -31,6 +31,23 @@ _FILE_HINT = ("hpdownload", "filedown", "getfile", "/cmmn/file/", "/file")
 _ID_KEYS = ("nttId", "seqno", "lrgSlno")
 _DATE_ONLY = re.compile(r"^\s*(20\d{2})[.\-/]?(\d{1,2})[.\-/]?(\d{1,2})")
 
+# --- 상세 본문 컨테이너 ---
+# 2026-08 홈페이지 개편으로 보도자료 상세의 공식 웹 본문이 .krds-bd-view > .n-dbdata 로
+# 옮겨졌다. 개편 후에는 기존 selector 가 하나도 맞지 않아 body 가 통째로 비었고,
+# 그 결과 AI 3줄 요약 대상에서 빠졌다(요약은 본문이 있어야 돈다).
+#
+# 보도자료만 selector 목록을 따로 두는 이유:
+#  - .n-dbdata 를 최우선으로 잡아야 제목·담당부서·문의전화·등록일·조회수·첨부파일명이
+#    섞인 .krds-bd-view 전체를 본문으로 쓰지 않는다.
+#  - 반대로 너무 넓은 #content 는 이 목록에서 뺀다. 개편된 페이지에서 #content 를
+#    잡으면 좌측 메뉴·breadcrumb 같은 페이지 껍데기가 본문으로 들어가 요약이 망가진다.
+#    이 목록에서 빼는 것은 #content **하나뿐**이다 — .cont 를 비롯한 나머지 legacy
+#    selector 는 구 홈페이지(및 아직 안 바뀐 페이지) 호환을 위해 뒤에 그대로 남긴다.
+_PRESS_KEY = "fss_press"
+_PRESS_BODY_SELECTORS = (".n-dbdata", ".view-cont", ".board-view", ".bbs-view", ".cont")
+# 보도자료 외 게시판은 기존 동작 그대로.
+_BODY_SELECTORS = (".view-cont", ".board-view", ".bbs-view", ".cont", "#content")
+
 # --- 검사결과 제재 상세의 구조화 추출 ---
 # 이 게시판의 상세 페이지에서 눈에 보이는 정보는 사실상 아래 3개 항목뿐이고, 정작
 # 제재 내용은 첨부 PDF 에 있다. 그런데 넓은 컨테이너(#content 등)를 통째로 긁으면
@@ -61,6 +78,25 @@ def _iso_date(value: str) -> str:
     if not (1 <= mo <= 12 and 1 <= d <= 31):
         return ""
     return f"{y:04d}-{mo:02d}-{d:02d}"
+
+
+def _body_text(soup: BeautifulSoup, selectors: tuple[str, ...]) -> str:
+    """selectors 를 순서대로 시도해 처음으로 내용이 있는 컨테이너의 본문 텍스트.
+
+    '맞는 요소'가 아니라 '내용이 있는 요소'를 고른다 — 앞선 selector 가 빈 껍데기로
+    존재하기만 해도 뒤의 selector 를 보지 못하면 본문을 통째로 잃는다.
+
+    한 selector 에 매칭되는 요소가 여러 개일 수 있으므로(반응형·템플릿 잔재로 빈
+    .n-dbdata 가 먼저 오는 경우 등) select_one 이 아니라 매칭 전부를 훑는다.
+    우선순위는 selector 순서 그대로다 — 앞 selector 에 내용 있는 요소가 하나라도
+    있으면 뒤 selector 는 보지 않는다.
+    """
+    for sel in selectors:
+        for el in soup.select(sel):
+            text = clean_text(el.get_text("\n"))
+            if text:
+                return text
+    return ""
 
 
 def _label_value_pairs(soup: BeautifulSoup) -> dict[str, str]:
@@ -226,15 +262,20 @@ class FssBoardScraper(BaseScraper):
             if post.source_key == _SANCTION_KEY:
                 post.details = self._sanction_details(soup, post)
             if not post.details:
-                body_el = (
-                    soup.select_one(".view-cont")
-                    or soup.select_one(".board-view")
-                    or soup.select_one(".bbs-view")
-                    or soup.select_one(".cont")
-                    or soup.select_one("#content")
+                is_press = post.source_key == _PRESS_KEY
+                post.body = _body_text(
+                    soup, _PRESS_BODY_SELECTORS if is_press else _BODY_SELECTORS
                 )
-                if body_el:
-                    post.body = clean_text(body_el.get_text("\n"))
+                if is_press and not post.body:
+                    # 상세 요청 자체는 성공했는데 신형·legacy selector 가 모두 빗나간
+                    # 경우 = 또 한 번의 마크업 변경 신호. 진단할 수 있게 남기되,
+                    # 발송 자체는 막지 않는다(기존 fail-soft 유지).
+                    log.warning(
+                        "[%s] 상세 본문 selector를 찾지 못함: post_id=%s url=%s",
+                        self.key,
+                        post.post_id,
+                        post.url,
+                    )
             # 상세 페이지에만 있는 첨부 보강(목록에 없던 경우)
             existing = {a.url for a in post.attachments}
             for fa in soup.find_all("a", href=True):
