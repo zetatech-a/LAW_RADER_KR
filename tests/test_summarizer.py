@@ -188,6 +188,28 @@ def test_summarize_all_fills_summary_and_survives_failure():
     assert calls["n"] == 2        # 본문 있는 2건만 호출
 
 
+def test_fss_press_body_is_eligible_for_general_summary():
+    """금감원 보도자료도 일반 요약 대상이다(개편 후 .n-dbdata 본문 회귀 방지).
+
+    본문이 비어 요약이 통째로 빠지던 버그의 반대편을 잠근다 — 본문만 채워지면
+    source_key 때문에 제외되는 일은 없고, 운영 기본값(min_body_chars=80)에서도
+    금감원 웹 본문 길이면 요약이 돈다.
+    """
+    body = (
+        "ㅁ '26.6월말 국내은행의 자본비율은 전분기말 대비 상승하고, 모든 은행의 "
+        "자본비율이 규제비율을 상회하는 등 양호한 수준을 유지\n\n"
+        "ㅇ 손실흡수능력 확충 및 자본적정성 관리를 강화하도록 유도할 예정"
+    )
+    post = _post(source_key="fss_press", source_name="금감원 · 보도자료", body=body)
+
+    s = Summarizer(_cfg(min_body_chars=80))   # config.yaml 운영 기본값
+    s._generate = lambda prompt, deadline=None: _envelope(
+        '{"summary": ["요약 1", "요약 2", "요약 3"]}'
+    )
+    assert s.summarize_all({"금감원 · 보도자료": [post]}) == 1
+    assert post.summary == ["요약 1", "요약 2", "요약 3"]
+
+
 def test_parse_keeps_leading_numbers():
     # 목록 표식만 떼고 실제 수치(시행일·금액·비율)는 절대 건드리지 않는다.
     s = Summarizer(_cfg(lines=5))
