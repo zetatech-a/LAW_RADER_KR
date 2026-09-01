@@ -115,6 +115,17 @@ class BaseScraper:
         """
         return self.SUPPORTS_ENRICH
 
+    def enrich_succeeded(self, post: Post) -> bool:
+        """상세 수집이 이 소스의 계약상 성공했는지. 기본은 '무언가 채워졌는가'.
+
+        스크래퍼 대부분은 실패를 내부에서 삼키므로(한 건 실패가 나머지를 막지 않도록)
+        예외 유무가 아니라 채워진 내용으로 성공을 센다. 소스가 그보다 엄격한 계약을
+        가진 경우(회신사례는 질의요지·회답·이유가 모두 있어야 정상)만 override 한다 —
+        느슨한 기본 판정을 그대로 쓰면 첨부만 남고 본문 파서가 깨진 상태가 성공으로
+        잡혀 고장이 통계에 묻힌다.
+        """
+        return bool(post.body or post.details or post.attachments)
+
     # --- 페이지네이션 수집 ---
     def collect(self, limit: int, seen_ids: set[str], max_pages: int) -> CollectResult:
         """1페이지부터 최대 max_pages 페이지를 훑어 '신규(seen 에 없는)' 글을 모은다.

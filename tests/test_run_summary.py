@@ -738,6 +738,32 @@ def test_per_post_unenrichable_posts_are_excluded_from_detail_stats(
     assert "상세 수집 대상 아님" in text
 
 
+class _AttachmentOnlyScraper(_NoEnrichScraper):
+    """첨부만 채우고 본문은 못 채우는 스크래퍼 — 계약상 실패를 선언한다."""
+
+    SUPPORTS_ENRICH = True
+
+    def enrich(self, post):
+        from src.models import Attachment
+
+        post.attachments.append(Attachment(filename="회신문.hwp", url="https://x/f"))
+
+    def enrich_succeeded(self, post):
+        return bool(post.body)      # 회신사례 계약: 본문이 있어야 성공
+
+
+def test_attachment_only_counts_as_attempted_but_not_succeeded(
+    tmp_path, monkeypatch, caplog
+):
+    """회귀: 첨부만 남고 본문 파서가 깨진 상태가 '성공'으로 잡히면 고장이 묻힌다."""
+    rc, sent, errors, text = _run_with_scraper(
+        tmp_path, monkeypatch, caplog, _AttachmentOnlyScraper, ["better_reply"]
+    )
+    assert rc == 0 and sent == 1        # 메일 발송·seen 정책은 그대로
+    # 시도에는 포함되고 성공에는 포함되지 않는다.
+    assert "상세 수집 집계(전체) — 시도 2건 / 성공 0건 / 등록대기 0건 / 실패 2건" in text
+
+
 def test_enrichable_sources_still_counted(tmp_path, monkeypatch, caplog):
     """플래그가 없는(=수집 가능한) 소스는 종전대로 실패를 센다."""
 

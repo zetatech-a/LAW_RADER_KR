@@ -8,6 +8,10 @@ fetcher 로 결정적으로 검증한다.
 구조는 이와 다를 수 있으므로 파서는 라벨-값 표와 라벨 헤딩 두 배치를 모두 본다.
 첨부 URL 만은 실제 관찰된 형태(/fsc_new/file/displayFile.do?filePath=…&orgFileName=…
 &sysFileName=…)를 그대로 쓴다.
+
+동일 게시물 검증(identity guard)을 실제 production path 로 태우기 위해, 상세 fixture 는
+외부에서 관찰된 항목(상세 제목, '회신일' 라벨/값)을 함께 담는다. 새 selector 를 지어내지
+않고 이미 쓰는 라벨-값 구조에만 얹는다.
 """
 import os
 import sys
@@ -30,8 +34,10 @@ LIST_URL = (
 # 라벨-값 표(th/td) 배치 + 공식 첨부 링크(상대 URL, 중복 포함).
 DETAIL_HTML = """
 <div id="content">
+  <h2 class="title">겸영업무 해당 여부</h2>
   <table class="tbl-view">
     <tbody>
+      <tr><th>회신일</th><td>2026-08-20</td></tr>
       <tr><th>질의요지</th><td>겸영업무 신고 대상인지 여부를 질의함.</td></tr>
       <tr><th>회답</th><td>신고 대상에 해당하지 않습니다.</td></tr>
       <tr><th>이유</th><td>은행법 제28조는 겸영업무를 열거하고 있으며,
@@ -48,8 +54,41 @@ DETAIL_HTML = """
 """
 
 # 라벨만 든 요소 뒤에 본문이 형제로 오는 배치(표가 아닌 레이아웃).
+#
+# 마지막 항목('이유') 뒤에 **같은 부모 아래** 첨부·목록/이전글 버튼·URL 복사·푸터가
+# 이어진다. 다음 본문 라벨이 없으므로, 경계 처리가 없으면 이 텍스트가 전부 법률적
+# '이유' 본문이 되어 Gemini 로 넘어간다.
 DETAIL_HTML_HEADING = """
 <div id="content">
+  <div class="view">
+    <h4>제목</h4>
+    <p>전자금융업자 겸영 가능 여부</p>
+    <h4>회신일</h4>
+    <p>2026-07-15</p>
+    <h4>□ 질의요지</h4>
+    <p>전자금융업자의 겸영 가능 여부</p>
+    <h4>□ 회답</h4>
+    <p>가능합니다.</p>
+    <h4>□ 이유</h4>
+    <p>전자금융거래법상 제한 규정이 없습니다.</p>
+    <div class="file">
+      <a href="/fsc_new/file/displayFile.do?filePath=%2Freply&amp;orgFileName=b.hwp&amp;sysFileName=2.hwp">회신문_전자금융.hwp</a>
+    </div>
+    <div class="btn-area">
+      <a href="/fsc_new/replyCase/TotalReplyList.do">목록</a>
+      <button type="button">URL 복사</button>
+    </div>
+    <footer>금융위원회 금융규제·법령해석포털 · 대표전화 1234-5678</footer>
+  </div>
+</div>
+"""
+
+# heading 레이아웃인데 회신일이 표(라벨-값)로 오는 변형 — identity guard 는 구조적
+# 라벨-값에서 회신일을 읽으므로 이쪽도 통과해야 한다.
+DETAIL_HTML_HEADING_TABLE_DATE = """
+<div id="content">
+  <h2>전자금융업자 겸영 가능 여부</h2>
+  <table><tbody><tr><th>회신일</th><td>2026.07.15</td></tr></tbody></table>
   <div class="view">
     <h4>□ 질의요지</h4>
     <p>전자금융업자의 겸영 가능 여부</p>
@@ -63,14 +102,16 @@ DETAIL_HTML_HEADING = """
 
 # 부분 본문 — 질의요지만 있는 배치(회답·이유 없음).
 DETAIL_HTML_ONLY_QUESTION = """
-<div id="content"><table><tbody>
+<div id="content"><h2>겸영업무 해당 여부</h2><table><tbody>
+  <tr><th>회신일</th><td>2026-08-20</td></tr>
   <tr><th>질의요지</th><td>겸영업무 신고 대상인지 여부를 질의함.</td></tr>
 </tbody></table></div>
 """
 
 # 부분 본문 — 질의요지 + 회답만 있는 배치(이유 없음).
 DETAIL_HTML_NO_REASON = """
-<div id="content"><table><tbody>
+<div id="content"><h2>겸영업무 해당 여부</h2><table><tbody>
+  <tr><th>회신일</th><td>2026-08-20</td></tr>
   <tr><th>질의요지</th><td>겸영업무 신고 대상인지 여부를 질의함.</td></tr>
   <tr><th>회답</th><td>신고 대상에 해당하지 않습니다.</td></tr>
 </tbody></table></div>
@@ -78,7 +119,8 @@ DETAIL_HTML_NO_REASON = """
 
 # 부분 본문인데 첨부는 있는 배치(첨부 수집은 계속되어야 한다).
 DETAIL_HTML_PARTIAL_WITH_FILE = """
-<div id="content"><table><tbody>
+<div id="content"><h2>겸영업무 해당 여부</h2><table><tbody>
+  <tr><th>회신일</th><td>2026-08-20</td></tr>
   <tr><th>질의요지</th><td>겸영업무 신고 대상인지 여부를 질의함.</td></tr>
   <tr><th>첨부파일</th><td>
     <a href="/fsc_new/file/displayFile.do?filePath=%2Freply&amp;orgFileName=a.hwp&amp;sysFileName=1.hwp">첨부.hwp</a>
@@ -165,14 +207,27 @@ def _list_one(gubun, idx="5051"):
     return sc, posts[0]
 
 
-def _post(url, key="better_reply"):
+def _detail(url_file="LawreqDetail.do"):
+    return LIST_URL.replace("TotalReplyList.do", url_file)
+
+
+def _opinion_post():
+    """DETAIL_HTML_HEADING 의 상세와 동일 게시물인 목록 Post."""
+    return _post(
+        _detail("OpinionDetail.do"),
+        title="[비조치의견서] 전자금융업자 겸영 가능 여부",
+        date="2026-07-15",
+    )
+
+
+def _post(url, key="better_reply", title=None, date="2026-08-20"):
     return Post(
         source_key=key,
         source_name="금융규제포털 · 법령해석·비조치의견서 회신사례",
         post_id="dataIdx:5051",
-        title="[법령해석] 겸영업무 해당 여부",
+        title="[법령해석] 겸영업무 해당 여부" if title is None else title,
         url=url,
-        date="2026-08-20",
+        date=date,
     )
 
 
@@ -245,10 +300,43 @@ def test_detail_body_contains_three_sections_in_order():
 
 def test_detail_body_from_heading_layout():
     sc = _scraper(_Fetcher(html=DETAIL_HTML_HEADING))
-    post = _post(LIST_URL.replace("TotalReplyList.do", "OpinionDetail.do"))
+    post = _opinion_post()
     sc.enrich(post)
     assert "[질의요지]\n전자금융업자의 겸영 가능 여부" in post.body
     assert "[회답]\n가능합니다." in post.body
+    assert "[이유]\n전자금융거래법상 제한 규정이 없습니다." in post.body
+
+
+def test_heading_layout_reason_stops_before_trailing_controls():
+    """마지막 항목('이유') 뒤의 첨부·버튼·푸터가 법률 본문에 섞이면 안 된다.
+
+    다음 본문 라벨이 없어 예전 구현은 남은 형제를 전부 '이유'로 삼켰다.
+    """
+    sc = _scraper(_Fetcher(html=DETAIL_HTML_HEADING))
+    post = _opinion_post()
+    sc.enrich(post)
+
+    reason = post.body.split("[이유]\n", 1)[1]
+    assert reason == "전자금융거래법상 제한 규정이 없습니다."   # 정상 이유 문장만
+    for garbage in ("회신문_전자금융.hwp", "목록", "URL 복사", "1234-5678", "대표전화"):
+        assert garbage not in post.body, garbage
+
+
+def test_heading_layout_still_collects_the_trailing_attachment():
+    """본문 경계를 끊어도 첨부 수집 자체는 정상 동작해야 한다."""
+    fetcher = _Fetcher(html=DETAIL_HTML_HEADING)
+    sc = _scraper(fetcher)
+    post = _opinion_post()
+    sc.enrich(post)
+    assert [a.filename for a in post.attachments] == ["회신문_전자금융.hwp"]
+    assert post.attachments[0].data == b"HWP"
+
+
+def test_heading_layout_with_table_reply_date():
+    """회신일이 표로 오는 heading 변형도 동일 게시물로 통과한다."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML_HEADING_TABLE_DATE))
+    post = _opinion_post()          # 목록 날짜 2026-07-15 ↔ 상세 '2026.07.15'
+    sc.enrich(post)
     assert "[이유]\n전자금융거래법상 제한 규정이 없습니다." in post.body
 
 
@@ -468,13 +556,174 @@ def test_attachment_download_failure_does_not_raise():
     assert "[질의요지]" in post.body
 
 
+# 동일 게시물인 것은 확인되지만 세 항목을 하나도 못 찾는 경우(마크업 변경 신호).
+DETAIL_HTML_NO_SECTIONS = """
+<div id="content"><h2>겸영업무 해당 여부</h2>
+  <table><tbody><tr><th>회신일</th><td>2026-08-20</td></tr></tbody></table>
+  <div>내용 없음</div>
+</div>
+"""
+
+
 def test_unparseable_detail_leaves_body_empty_and_warns(caplog):
-    sc = _scraper(_Fetcher(html="<html><body><div>내용 없음</div></body></html>"))
+    sc = _scraper(_Fetcher(html=DETAIL_HTML_NO_SECTIONS))
     post = _post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do"))
     with caplog.at_level("WARNING"):
         sc.enrich(post)
     assert post.body == ""
     assert "질의요지·회답·이유 를 찾지 못해" in caplog.text
+
+
+# --- 동일 게시물 검증(identity guard) ---
+#
+# 목록 dataIdx 를 lawreqIdx/opinionIdx 로 쓰는 매핑은 아직 라이브로 확인되지 않았다.
+# 그 가정이 틀리면 목록 A 의 제목 밑에 상세 B 의 회답·첨부가 실릴 수 있다.
+
+# 세 항목과 첨부가 모두 있는 '멀쩡해 보이는' 다른 게시물의 상세.
+OTHER_POST_HTML = """
+<div id="content"><h2>전혀 다른 사안에 대한 질의</h2><table><tbody>
+  <tr><th>회신일</th><td>2020-01-02</td></tr>
+  <tr><th>질의요지</th><td>다른 게시물의 질의입니다.</td></tr>
+  <tr><th>회답</th><td>다른 게시물의 회답입니다.</td></tr>
+  <tr><th>이유</th><td>다른 게시물의 이유입니다.</td></tr>
+  <tr><th>첨부파일</th><td>
+    <a href="/fsc_new/file/displayFile.do?filePath=%2Fx&amp;orgFileName=other.hwp&amp;sysFileName=9.hwp">다른회신문.hwp</a>
+  </td></tr>
+</tbody></table></div>
+"""
+
+# 제목은 맞는데 회신일이 다른 상세(같은 제목의 다른 회차 등).
+WRONG_DATE_HTML = DETAIL_HTML.replace("<td>2026-08-20</td>", "<td>2019-03-04</td>")
+
+# 무해한 표기 차이(줄바꿈·중복 공백·NBSP)만 있는 제목.
+SPACED_TITLE_HTML = DETAIL_HTML.replace(
+    "<h2 class=\"title\">겸영업무 해당 여부</h2>",
+    "<h2 class=\"title\">겸영업무\n   해당&nbsp;&nbsp;여부</h2>",
+)
+
+
+def test_identity_ok_collects_body_and_attachments():
+    """A. 제목·회신일이 모두 맞으면 정상 수집."""
+    fetcher = _Fetcher(html=DETAIL_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail())
+    sc.enrich(post)
+    assert "[회답]" in post.body
+    assert len(post.attachments) == 1 and post.attachments[0].data == b"HWP"
+
+
+def test_identity_rejects_other_post_content(caplog):
+    """B/D. 세 라벨과 첨부가 다 있어도 목록 제목과 다르면 절대 붙이지 않는다."""
+    fetcher = _Fetcher(html=OTHER_POST_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail())
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == ""
+    assert post.attachments == []
+    assert fetcher.downloaded == []                  # 다운로드 호출 자체가 없다
+    assert "다른 게시물일 수 있어" in caplog.text
+    assert "다른 게시물의 회답" not in post.body
+
+
+def test_identity_rejects_wrong_reply_date(caplog):
+    """C. 제목이 맞아도 회신일이 다르면 거부."""
+    fetcher = _Fetcher(html=WRONG_DATE_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail())
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert "회신일" in caplog.text and "다름" in caplog.text
+
+
+def test_identity_rejects_missing_reply_date(caplog):
+    """회신일을 아예 확인할 수 없으면 fail-open 하지 않는다."""
+    html = DETAIL_HTML.replace("<tr><th>회신일</th><td>2026-08-20</td></tr>", "")
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail())
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert "동일 게시물 확인 불가" in caplog.text
+
+
+def test_identity_strips_only_our_own_title_prefix():
+    """E. 우리가 붙인 [법령해석]/[비조치의견서] 접두어만 제거한다."""
+    # 접두어가 붙은 목록 제목 → 제거 후 상세 제목과 일치
+    sc = _scraper(_Fetcher(html=DETAIL_HTML))
+    with_prefix = _post(_detail(), title="[법령해석] 겸영업무 해당 여부")
+    sc.enrich(with_prefix)
+    assert "[회답]" in with_prefix.body
+
+    # 접두어가 없는 원 제목도 그대로 통과한다(접두어를 요구하지 않는다)
+    sc = _scraper(_Fetcher(html=DETAIL_HTML))
+    without_prefix = _post(_detail(), title="겸영업무 해당 여부")
+    sc.enrich(without_prefix)
+    assert "[회답]" in without_prefix.body
+
+
+def test_identity_rejects_gubun_endpoint_mismatch(caplog):
+    """E/4. 목록 구분과 상세 endpoint 가 어긋나면 거부한다."""
+    fetcher = _Fetcher(html=DETAIL_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail("LawreqDetail.do"), title="[비조치의견서] 겸영업무 해당 여부")
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert "어긋남" in caplog.text
+
+
+def test_identity_tolerates_harmless_whitespace_differences():
+    """F. 줄바꿈·중복 공백·NBSP 정도의 표기 차이는 정상 허용."""
+    sc = _scraper(_Fetcher(html=SPACED_TITLE_HTML))
+    post = _post(_detail())
+    sc.enrich(post)
+    assert "[회답]" in post.body
+
+
+# --- 상세 수집 성공 판정(enrich_succeeded) ---
+def test_attachment_only_reply_is_not_a_detail_success():
+    """A. 본문이 비고 첨부만 잡힌 상태는 이 소스의 계약상 실패다."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML_PARTIAL_WITH_FILE))
+    post = _post(_detail())
+    sc.enrich(post)
+    assert post.body == "" and post.attachments != []
+    assert sc.enrich_succeeded(post) is False
+    # 기본 판정이었다면 성공으로 잡혔을 상태라는 것을 명시한다.
+    assert bool(post.body or post.details or post.attachments) is True
+
+
+def test_complete_body_with_attachment_is_a_detail_success():
+    """B. 세 항목 + 첨부가 모두 있으면 성공."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML))
+    post = _post(_detail())
+    sc.enrich(post)
+    assert post.body != "" and post.attachments != []
+    assert sc.enrich_succeeded(post) is True
+
+
+def test_base_scraper_success_hook_keeps_existing_meaning():
+    """C. 다른 스크래퍼는 기존 bool(body/details/attachments) 의미 그대로."""
+    from src.config import SourceConfig as _SC
+    from src.models import Attachment
+    from src.scrapers.base import BaseScraper
+
+    class _Plain(BaseScraper):
+        pass
+
+    plain = _Plain(_SC(key="k", name="n", type="t", list_url="https://x/"), fetcher=None)
+    empty = _post("https://x/1")
+    assert plain.enrich_succeeded(empty) is False
+    empty.attachments.append(Attachment(filename="a.pdf", url="https://x/a.pdf"))
+    assert plain.enrich_succeeded(empty) is True       # 첨부만 있어도 성공(기존 의미)
+    only_details = _post("https://x/2")
+    only_details.details = [("금융기관명", "A은행")]
+    assert plain.enrich_succeeded(only_details) is True
 
 
 # --- per-post 상세 수집 대상 훅 ---

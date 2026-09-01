@@ -233,6 +233,33 @@ def test_reply_without_supported_sample_is_partial():
     assert "상세 검증 표본 없음" in r["enrich"]
 
 
+def test_reply_attachment_only_is_not_enrich_ok():
+    """verify_sources 의 성공 판정도 main 과 같은 계약(enrich_succeeded)을 쓴다."""
+
+    class _ContractScraper(_MixedScraper):
+        def enrich_succeeded(self, post):
+            return bool(post.body)
+
+    def _enrich(p):
+        p.attachments.append(Attachment(filename="회신문.hwp", url="https://x/f"))
+
+    sc = _ContractScraper("better_reply", [_reply_post(_DETAIL)], _enrich)
+    r = verify_source(sc, 30, True)[0]
+    assert r["enrich_ok"] is False        # 첨부만으로는 성공이 아니다
+    assert r["status"] == PARTIAL         # 본문 표식도 없으므로 부분 실패
+
+
+def test_default_success_criterion_unchanged_for_other_scrapers():
+    """훅이 없는 스크래퍼는 기존 bool(body/첨부/details) 기준 그대로."""
+
+    def _attach_only(p):
+        p.attachments.append(Attachment(filename="a.pdf", url="https://x/a.pdf"))
+
+    r = _run("fss_mgmt_notice", enrich=_attach_only)
+    assert r["enrich_ok"] is True
+    assert r["status"] == OK
+
+
 def test_reply_with_partial_body_is_partial():
     """세 표식이 다 없으면(부분 본문이라 body 가 비워진 경우 포함) 부분 실패다."""
 

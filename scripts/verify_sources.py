@@ -128,7 +128,14 @@ def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMP
             report["enrich"] = (
                 f"본문 {body_len}자 / 첨부 {n_att}개(다운로드 {n_dl}개){detail_note}"
             )
-            report["enrich_ok"] = body_len > 0 or n_att > 0 or n_details > 0
+            # 성공 판정은 main.py 와 같은 기준을 쓴다(스크래퍼가 계약을 선언했으면
+            # 그 판정). 두 곳이 어긋나면 운영 통계와 라이브 검증 결과가 달라진다.
+            success_hook = getattr(scraper, "enrich_succeeded", None)
+            report["enrich_ok"] = (
+                bool(success_hook(first))
+                if success_hook is not None
+                else (body_len > 0 or n_att > 0 or n_details > 0)
+            )
         except Exception as e:  # noqa: BLE001
             report["body_len"] = 0
             report["enrich"] = f"{WARN} enrich 실패: {e}"

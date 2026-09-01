@@ -251,6 +251,8 @@ def run(argv=None) -> int:
         # 정상이므로 시도 자체를 세지 않는다 — 실패로 세면 그런 글만 신규인 실행이
         # '성공률 0%' 로 잡혀 파서 장애 경보가 거짓으로 울린다.
         per_post_hook = getattr(scraper, "supports_enrich", None)
+        # 성공 판정도 스크래퍼가 계약대로 정한다(기본은 아래 bool(...) 과 같은 의미).
+        success_hook = getattr(scraper, "enrich_succeeded", None)
         skipped = 0
         for p in new_posts:
             if per_post_hook is not None and not per_post_hook(p):
@@ -261,9 +263,14 @@ def run(argv=None) -> int:
             except Exception as e:  # noqa: BLE001
                 log.warning("[%s] enrich 실패 %s: %s", src.key, p.url, e)
             # 스크래퍼 대부분은 실패를 내부에서 삼키므로(한 건 실패가 나머지를 막지
-            # 않도록) 예외 유무가 아니라 '무언가 채워졌는지'로 성공을 센다.
+            # 않도록) 예외 유무가 아니라 '무언가 채워졌는지'로 성공을 센다. 소스가 더
+            # 엄격한 계약을 선언했으면(enrich_succeeded) 그 판정을 따른다.
             # verify_sources.py 의 enrich_ok 와 같은 기준이다.
-            ok_detail = bool(p.body or p.details or p.attachments)
+            ok_detail = bool(
+                success_hook(p)
+                if success_hook is not None
+                else (p.body or p.details or p.attachments)
+            )
             # 등록 대기는 실패가 아니다(원문이 아직 공개되지 않았을 뿐).
             is_pending = (
                 p.source_key == ASSEMBLY_SOURCE_KEY
