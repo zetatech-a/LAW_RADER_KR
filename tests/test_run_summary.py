@@ -654,7 +654,7 @@ def _run_with_scraper(tmp_path, monkeypatch, caplog, scraper_cls, keys):
 
 
 class _NoEnrichScraper:
-    """회신사례처럼 상세가 JS 팝업이라 enrich 가 아무것도 못 채우는 소스."""
+    """SUPPORTS_ENRICH=False 를 선언한(=상세를 수집할 수 없는) 가상의 소스."""
 
     SUPPORTS_ENRICH = False
 
@@ -675,10 +675,12 @@ class _NoEnrichScraper:
 def test_unenrichable_source_does_not_trigger_zero_success_error(
     tmp_path, monkeypatch, caplog
 ):
-    """회귀: better_reply 만 신규인 실행이 '성공률 0%' 장애 경보를 내면 안 된다.
+    """회귀: SUPPORTS_ENRICH=False 인 소스만 신규인 실행이 '성공률 0%' 장애 경보를
+    내면 안 된다.
 
-    이 소스는 상세가 JS 팝업이라 본문이 비는 것이 **정상**이다. 실패로 세면 정상
-    실행마다 거짓 ERROR 가 찍혀 진짜 파서 장애가 그 잡음에 묻힌다.
+    그런 소스는 본문이 비는 것이 **정상**이다. 실패로 세면 정상 실행마다 거짓 ERROR 가
+    찍혀 진짜 파서 장애가 그 잡음에 묻힌다. (키는 config 에 있는 아무 소스나 써도
+    되며, 스크래퍼는 위 가짜 클래스로 대체된다.)
     """
     rc, sent, errors, text = _run_with_scraper(
         tmp_path, monkeypatch, caplog, _NoEnrichScraper, ["better_reply"]
@@ -689,19 +691,77 @@ def test_unenrichable_source_does_not_trigger_zero_success_error(
     assert "상세 수집 대상 아님" in text
 
 
-def test_real_better_reply_scraper_declares_no_enrich():
-    """플래그가 실제 스크래퍼에 붙어 있어야 위 회귀 방어가 의미를 갖는다."""
+def test_real_better_reply_scraper_now_supports_enrich():
+    """회신사례는 법령해석·비조치의견서 상세를 수집한다 — 상세 통계에 포함되어야 한다.
+
+    (예전에는 상세가 JS 팝업이라 SUPPORTS_ENRICH=False 였다. 상세 GET 주소가 확인되어
+     본문·첨부를 수집하게 되었으므로, 이제는 수집 실패가 통계에 잡혀야 한다.)
+    """
     from src.scrapers import build_scraper
     from src.scrapers.base import BaseScraper
     from src.scrapers.better_fsc import BetterReplyScraper
 
-    assert BetterReplyScraper.SUPPORTS_ENRICH is False
+    assert BetterReplyScraper.SUPPORTS_ENRICH is True
     assert BaseScraper.SUPPORTS_ENRICH is True     # 기본은 '수집한다'
     src = SourceConfig(
         key="better_reply", name="회신사례", type="better_reply",
         list_url="https://better.fsc.go.kr/", extra={},
     )
-    assert build_scraper(src, fetcher=None).SUPPORTS_ENRICH is False
+    assert build_scraper(src, fetcher=None).SUPPORTS_ENRICH is True
+
+
+class _PerPostNoEnrichScraper(_NoEnrichScraper):
+    """소스는 상세 수집이 가능하지만 개별 글은 대상이 아닌 스크래퍼(회신사례 유형)."""
+
+    SUPPORTS_ENRICH = True
+
+    def supports_enrich(self, post):
+        return False
+
+    def enrich(self, post):        # pragma: no cover — 호출되지 않아야 한다
+        raise AssertionError("per-post 훅이 False 인 글에 enrich 를 부르면 안 된다")
+
+
+def test_per_post_unenrichable_posts_are_excluded_from_detail_stats(
+    tmp_path, monkeypatch, caplog
+):
+    """회귀: 상세 주소가 없는 글만 신규인 실행이 '성공률 0%' 경보를 내면 안 된다.
+
+    소스 단위 플래그로는 표현할 수 없는 경우다 — 같은 소스의 다른 글은 상세를 수집한다.
+    """
+    rc, sent, errors, text = _run_with_scraper(
+        tmp_path, monkeypatch, caplog, _PerPostNoEnrichScraper, ["better_reply"]
+    )
+    assert rc == 0 and sent == 1
+    assert errors == []
+    assert "상세 수집 집계(전체) — 시도 0건" in text
+    assert "상세 수집 대상 아님" in text
+
+
+class _AttachmentOnlyScraper(_NoEnrichScraper):
+    """첨부만 채우고 본문은 못 채우는 스크래퍼 — 계약상 실패를 선언한다."""
+
+    SUPPORTS_ENRICH = True
+
+    def enrich(self, post):
+        from src.models import Attachment
+
+        post.attachments.append(Attachment(filename="회신문.hwp", url="https://x/f"))
+
+    def enrich_succeeded(self, post):
+        return bool(post.body)      # 회신사례 계약: 본문이 있어야 성공
+
+
+def test_attachment_only_counts_as_attempted_but_not_succeeded(
+    tmp_path, monkeypatch, caplog
+):
+    """회귀: 첨부만 남고 본문 파서가 깨진 상태가 '성공'으로 잡히면 고장이 묻힌다."""
+    rc, sent, errors, text = _run_with_scraper(
+        tmp_path, monkeypatch, caplog, _AttachmentOnlyScraper, ["better_reply"]
+    )
+    assert rc == 0 and sent == 1        # 메일 발송·seen 정책은 그대로
+    # 시도에는 포함되고 성공에는 포함되지 않는다.
+    assert "상세 수집 집계(전체) — 시도 2건 / 성공 0건 / 등록대기 0건 / 실패 2건" in text
 
 
 def test_enrichable_sources_still_counted(tmp_path, monkeypatch, caplog):

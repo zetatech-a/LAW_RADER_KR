@@ -17,6 +17,7 @@
 import argparse
 import os
 import sys
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -32,9 +33,24 @@ FAIL = "❌"
 PARTIAL = "🟠"
 
 # 상세 본문(body)이 반드시 있어야 하는 소스.
-# 다른 소스는 상세가 PDF 직접 다운로드(fss_mgmt_notice)거나 JS 팝업(better_reply)이라
-# body 가 비는 것이 정상이므로 기존 판정 기준(본문·첨부·구조화항목 중 하나)을 유지한다.
+# 다른 소스는 상세가 PDF 직접 다운로드(fss_mgmt_notice)거나, 상세 주소가 확인된 구분만
+# 수집하는 소스(better_reply — 현장건의 과제 등은 목록 링크만)라 body 가 비는 것이
+# 정상이므로 기존 판정 기준(본문·첨부·구조화항목 중 하나)을 유지한다.
 _BODY_REQUIRED = {"assembly_bill"}
+
+# 상세 본문에 반드시 들어 있어야 하는 표식(선언한 소스만 검사한다).
+# 회신사례는 질의요지·회답·이유가 모두 있을 때만 본문을 만들므로, 하나라도 빠지면
+# 본문이 통째로 비어 나간다. 그 상태를 초록불로 넘기면 상세 파서가 깨진 채 운영된다.
+_REQUIRED_BODY_MARKERS = {"better_reply": ("[질의요지]", "[회답]", "[이유]")}
+
+# 회신사례는 구분마다 상세 endpoint 가 다르다. 한쪽만 검증하고 초록불을 내면, 아직
+# 라이브 확인 전인 'OpinionDetail.do + muNo=117' 조합이 통째로 실패해도 드러나지 않는다.
+# 그래서 이 소스는 endpoint 유형별로 한 건씩 따로 검증한다(URL path basename 기준).
+_REPLY_DETAIL_ENDPOINTS = {
+    "lawreqdetail.do": "법령해석",
+    "opiniondetail.do": "비조치의견서",
+}
+_REPLY_ENDPOINT_SOURCES = {"better_reply"}
 
 # 의안은 여러 건을 표본으로 본다. 목록 맨 위는 갓 접수된 의안이라 원문이 아직 없을 수
 # 있어(PENDING), 첫 건만 보면 '등록 대기'와 '수집 고장'을 구분할 수 없다.
@@ -70,6 +86,7 @@ def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMP
     # --- 2페이지(페이지네이션 작동 확인) ---
     # HTML(PAGE_PARAM)뿐 아니라 POST/API 로 page 인자 페이지네이션하는 소스(SUPPORTS_
     # PAGINATION=True)도 실제로 2페이지를 요청해 오프셋 무시 여부까지 검증한다.
+    page2: list = []          # 상세 표본 풀로 재사용한다(추가 요청을 만들지 않는다)
     if scraper.paginates:
         how = getattr(scraper, "PAGE_PARAM", None) or "page/offset"
         try:
@@ -91,8 +108,28 @@ def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMP
     if do_enrich and key in _BODY_REQUIRED:
         return _verify_assembly_detail(scraper, page1, report, assembly_sample), page1
 
+    if do_enrich and key in _REPLY_ENDPOINT_SOURCES:
+        # 이미 받아 둔 2페이지를 표본 풀에 함께 넣는다(추가 HTTP 요청 없음).
+        return _verify_reply_details(scraper, page1 + page2, report, key), page1
+
     if do_enrich:
-        first = page1[0]
+        # 한 소스 안에 상세 수집 대상과 비대상이 섞일 수 있다(회신사례는 구분별로
+        # 상세 endpoint 가 확인된 글만 상세 페이지가 있다). 비대상 글을 표본으로 잡으면
+        # 상세 파서를 한 번도 검증하지 못한 채 초록불이 나가므로 대상인 글을 고른다.
+        first = _enrichable_sample(scraper, page1)
+        if first is None:
+            report["status"] = PARTIAL
+            report["list_ok"] = True
+            report["body_len"] = 0
+            report["enrich_ok"] = False
+            report["detail_ok"] = False
+            report["enrich"] = f"{WARN} 상세 검증 표본 없음(1페이지에 상세 수집 대상 글이 없음)"
+            report["detail"] = (
+                f"목록 수집 성공({len(page1)}건) / 1페이지에 상세 수집 대상 글이 없어 "
+                "상세 파서를 검증하지 못했습니다. 지원 유형이 나올 때까지 "
+                "fetch.list_limit 을 늘려 재확인하세요."
+            )
+            return report, page1
         try:
             scraper.enrich(first)
             body_len = len(first.body or "")
@@ -106,16 +143,134 @@ def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMP
             report["enrich"] = (
                 f"본문 {body_len}자 / 첨부 {n_att}개(다운로드 {n_dl}개){detail_note}"
             )
-            report["enrich_ok"] = body_len > 0 or n_att > 0 or n_details > 0
+            # 성공 판정은 main.py 와 같은 기준을 쓴다(스크래퍼가 계약을 선언했으면
+            # 그 판정). 두 곳이 어긋나면 운영 통계와 라이브 검증 결과가 달라진다.
+            success_hook = getattr(scraper, "enrich_succeeded", None)
+            report["enrich_ok"] = (
+                bool(success_hook(first))
+                if success_hook is not None
+                else (body_len > 0 or n_att > 0 or n_details > 0)
+            )
         except Exception as e:  # noqa: BLE001
             report["body_len"] = 0
             report["enrich"] = f"{WARN} enrich 실패: {e}"
             report["enrich_ok"] = False
 
+        # 본문 표식을 선언한 소스는 '본문이 비어도 OK' 예외를 적용하지 않는다.
+        missing = [m for m in _REQUIRED_BODY_MARKERS.get(key, ()) if m not in (first.body or "")]
+        if missing:
+            report["status"] = PARTIAL
+            report["list_ok"] = True
+            report["detail_ok"] = False
+            report["detail"] = (
+                f"목록 수집 성공({len(page1)}건) / 상세 본문에 {' '.join(missing)} 가 "
+                f"없습니다({first.url}) — 부분 본문은 요약 입력으로 쓰지 않아 본문이 통째로 "
+                "비워집니다. 상세 마크업을 확인하세요."
+            )
+            return report, page1
+
     report["status"] = OK
     report["list_ok"] = True
     report["detail_ok"] = report.get("enrich_ok", True)
     return report, page1
+
+
+def _enrichable_sample(scraper, page1):
+    """상세 수집 대상인 첫 글. 대상이 하나도 없으면 None.
+
+    per-post 훅(BaseScraper.supports_enrich)이 없는 스크래퍼는 기존대로 첫 글을 쓴다.
+    """
+    hook = getattr(scraper, "supports_enrich", None)
+    if hook is None:
+        return page1[0]
+    for p in page1:
+        if hook(p):
+            return p
+    return None
+
+
+def _detail_endpoint(post) -> str:
+    """상세 URL 의 파일명(소문자). 목록 URL 폴백이면 endpoint map 에 없는 값이 나온다."""
+    return urlparse(post.url or "").path.rsplit("/", 1)[-1].lower()
+
+
+def _verify_reply_details(scraper, pool, report, key):
+    """회신사례 상세를 **endpoint 유형별로** 한 건씩 검증한다.
+
+    첫 지원 글 하나만 보면 목록 앞머리가 전부 법령해석일 때 비조치의견서 경로가 통째로
+    실패해도 초록불이 나간다. 두 유형은 endpoint 도 식별자 파라미터도 다르므로 따로
+    센다. 표본을 찾지 못한 유형은 '성공'이 아니라 '검증하지 못함'이다.
+    """
+    supports = getattr(scraper, "supports_enrich", None)
+    succeeded_hook = getattr(scraper, "enrich_succeeded", None)
+    markers = _REQUIRED_BODY_MARKERS.get(key, ())
+
+    # enrich 가 동일 게시물 확인에 실패하면 post.url 이 목록으로 되돌아간다.
+    # 그래서 endpoint 유형은 **enrich 를 부르기 전에** 확정해 둔다.
+    chosen: dict = {}
+    for p in pool:
+        if supports is not None and not supports(p):
+            continue                      # 미지원 구분은 표본 수에 넣지 않는다
+        endpoint = _detail_endpoint(p)
+        if endpoint in _REPLY_DETAIL_ENDPOINTS and endpoint not in chosen:
+            chosen[endpoint] = p
+
+    lines, failures, no_sample = [], [], []
+    max_body = 0
+    for endpoint, gubun in _REPLY_DETAIL_ENDPOINTS.items():
+        post = chosen.get(endpoint)
+        if post is None:
+            no_sample.append(f"{gubun}({endpoint})")
+            lines.append(f"      - {WARN} {gubun} / {endpoint}: 표본 없음")
+            continue
+        candidate = post.url
+        try:
+            scraper.enrich(post)
+        except Exception as e:  # noqa: BLE001 - enrich 는 원래 삼키지만 방어
+            failures.append(f"{gubun}: enrich 실패({e})")
+            lines.append(f"      - {FAIL} {gubun} / {endpoint}: enrich 실패 {e}")
+            continue
+        body_len = len(post.body or "")
+        max_body = max(max_body, body_len)
+        n_att = len(post.attachments)
+        n_dl = sum(1 for a in post.attachments if a.data)
+        if post.url != candidate:
+            # 동일 게시물 확인 실패 — 스크래퍼가 사용자 링크를 목록으로 되돌린 상태.
+            failures.append(f"{gubun}: 동일 게시물 확인 실패")
+            lines.append(
+                f"      - {FAIL} {gubun} / {endpoint}: 동일 게시물 확인 실패 {candidate}"
+            )
+            continue
+        lack = [m for m in markers if m not in (post.body or "")]
+        ok_detail = bool(succeeded_hook(post)) if succeeded_hook is not None else body_len > 0
+        if not ok_detail or lack:
+            failures.append(f"{gubun}: 본문 미완성({' '.join(lack) or '본문 없음'})")
+            lines.append(
+                f"      - {FAIL} {gubun} / {endpoint}: 본문 {body_len}자 / "
+                f"누락 {' '.join(lack) or '-'}"
+            )
+            continue
+        lines.append(
+            f"      - {OK} {gubun} / {endpoint}: 본문 {body_len}자 / "
+            f"첨부 {n_att}개(다운로드 {n_dl}개)"
+        )
+
+    all_ok = not failures and not no_sample
+    report["body_len"] = max_body
+    report["list_ok"] = True
+    report["enrich_ok"] = all_ok
+    report["detail_ok"] = all_ok
+    report["enrich"] = "endpoint 유형별 검증\n" + "\n".join(lines)
+    if all_ok:
+        report["status"] = OK
+        return report
+    report["status"] = PARTIAL
+    reasons = failures + [f"{n}: 상세 검증 표본 없음" for n in no_sample]
+    report["detail"] = (
+        "목록 수집 성공 / 상세 endpoint 검증 미완료 — " + " · ".join(reasons) +
+        ". 표본이 없으면 fetch.list_limit 을 늘려 두 유형이 모두 나오도록 재확인하세요."
+    )
+    return report
 
 
 def _verify_assembly_detail(scraper, page1, report, sample_size=_ASSEMBLY_SAMPLE):

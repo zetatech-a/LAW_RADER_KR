@@ -105,6 +105,27 @@ class BaseScraper:
         """상세 페이지에서 본문/첨부를 채운다. 기본은 아무것도 안 함."""
         return
 
+    def supports_enrich(self, post: Post) -> bool:
+        """이 게시글이 상세 수집 대상인지. 기본은 소스 단위 플래그를 그대로 따른다.
+
+        한 소스 안에 상세를 열 수 있는 글과 없는 글이 섞이는 경우(회신사례는 구분별로
+        상세 endpoint 가 확인된 글만 상세 페이지가 있다)를 위한 훅이다. False 인 글은
+        main 이 상세 수집 통계에서 아예 뺀다 — 본문이 비는 것이 정상인 글을 실패로 세면
+        그런 글만 신규인 실행이 '성공률 0%' 로 잡혀 거짓 장애 경보가 울린다.
+        """
+        return self.SUPPORTS_ENRICH
+
+    def enrich_succeeded(self, post: Post) -> bool:
+        """상세 수집이 이 소스의 계약상 성공했는지. 기본은 '무언가 채워졌는가'.
+
+        스크래퍼 대부분은 실패를 내부에서 삼키므로(한 건 실패가 나머지를 막지 않도록)
+        예외 유무가 아니라 채워진 내용으로 성공을 센다. 소스가 그보다 엄격한 계약을
+        가진 경우(회신사례는 질의요지·회답·이유가 모두 있어야 정상)만 override 한다 —
+        느슨한 기본 판정을 그대로 쓰면 첨부만 남고 본문 파서가 깨진 상태가 성공으로
+        잡혀 고장이 통계에 묻힌다.
+        """
+        return bool(post.body or post.details or post.attachments)
+
     # --- 페이지네이션 수집 ---
     def collect(self, limit: int, seen_ids: set[str], max_pages: int) -> CollectResult:
         """1페이지부터 최대 max_pages 페이지를 훑어 '신규(seen 에 없는)' 글을 모은다.

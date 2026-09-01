@@ -3,21 +3,212 @@
 목록은 DataTables 서버사이드 방식(POST → JSON)이다(라이브 확인).
   엔드포인트: /fsc_new/replyCase/selectReplyCaseTotalReplyList.do  (POST, JSON)
   레코드 필드: rownumber, pastreqType(구분), title, replyRegDate, dataIdx(안정 ID)
-상세는 JS 함수 openReplyCasePastReqDetail(dataIdx, gubun) 로 열려 단순 URL 이 없으므로,
-링크는 목록 페이지로 두고 제목·구분·일자만 통지한다(첨부/본문 수집 없음).
+
+상세는 목록에서 JS 함수(openReplyCasePastReqDetail)로 열리지만, 그 함수가 결국
+여는 페이지는 구분(pastreqType)별로 아래 GET 주소다.
+  법령해석      /fsc_new/replyCase/LawreqDetail.do?...&lawreqIdx={dataIdx}
+  비조치의견서  /fsc_new/replyCase/OpinionDetail.do?...&opinionIdx={dataIdx}
+두 주소의 GET 상세 조회와 질의요지·회답·이유 존재는 외부 리뷰에서 실제 페이지로
+확인했다. 그 밖의 구분('현장건의 과제' 등)은 상세 주소가 확인되지 않았으므로
+**추측하지 않고** 예전처럼 통합조회 목록 URL 을 링크로 둔다(제목만 통지).
+
+아직 라이브로 확인하지 못한 가정 두 가지(머지 전 확인 대상 — 아래 가드는 이 가정을
+검증해 주는 것이 아니라, 가정이 틀렸을 때 잘못된 콘텐츠가 발송되는 것을 막는다):
+  A. 목록 JSON 의 dataIdx 가 lawreqIdx/opinionIdx 와 실제로 같은 값인지.
+  B. OpinionDetail.do 에 통합조회 목록의 muNo=117 을 넣어도 정상 조회되는지
+     (공개된 일반 비조치의견서 URL 에서는 muNo=86 도 쓰인다).
+
+그래서 상세 응답을 받으면 본문·첨부를 붙이기 **전에** 목록 record 와 같은 글인지
+확인한다(_identity_ok — 구분↔endpoint, 정식 제목 일치, 회신일 일치). 제목은 페이지
+전체 텍스트에서 찾지 않고 '제목이 놓인 자리'(_detail_title)에서만 읽어 정확히 같은지
+본다 — 잘못된 상세 B 의 이전글/다음글·푸터에 A 의 제목이 있어도 통과하면 안 되기
+때문이다. 확인되지 않으면 본문·첨부를 붙이지 않는 것은 물론(다운로드도 하지 않는다)
+**사용자 링크도 통합조회 목록으로 되돌린다** — 검증되지 않은 후보 링크를 그대로 두면
+제목만 보고 누른 사용자가 다른 사건의 상세로 가기 때문이다. 잘못된 회답을 다른 제목
+밑에 보내는 것이 본문이 비는 것보다 훨씬 나쁘므로 fail-open 하지 않는다. 반대로 identity 확인에 성공한 뒤의 본문
+파싱·첨부 실패에서는 링크를 되돌리지 않는다(그 상세가 이 글의 것임은 이미 확인됐다).
+
+상세 페이지에서는 질의요지·회답·이유를 뽑아 post.body 에 담는다. **세 항목이 모두
+있을 때만** 담는다 — 회답이 빠진 질의만으로 3줄 요약을 만들면 결론을 지어낸 요약이
+메일에 실린다. 하나라도 없으면 body 를 비워 두고(요약 대상에서 제외) 어떤 항목이
+없는지 warning 을 남긴다. 첨부 수집은 그와 무관하게 계속한다.
+
+details 에는 담지 않는다. summarizer 의 실제 호출 경로(_summarize_general)는 details
+를 보지 않고 _prepare_body(=body 길이)만으로 대상을 고르므로 details 를 채워도 요약
+호출 자체는 일어난다. 다만 notifier 가 details 를 summary 보다 먼저 렌더하므로
+(_summary_block) 그 요약이 메일에 보이지 않고, 집계 로그의 ai_target_count 는 details
+가 있는 글을 대상에서 빼 로그와 실제 호출이 어긋난다. 그래서 body 만 쓴다.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import re
+from collections.abc import Iterator
+from datetime import date
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
-from ..models import Post
+from bs4 import BeautifulSoup
+
+from ..fetcher import AttachmentTooLarge
+from ..models import Attachment, Post
 from .base import BaseScraper, clean_text
 
 log = logging.getLogger(__name__)
 
 _AJAX_URL = "https://better.fsc.go.kr/fsc_new/replyCase/selectReplyCaseTotalReplyList.do"
+
+# 목록의 구분(pastreqType) → (상세 페이지 파일명, dataIdx 를 실어 보낼 파라미터명).
+# 여기 없는 구분은 상세 주소가 확인되지 않은 것이므로 URL 을 만들지 않는다.
+_DETAIL_ENDPOINTS: dict[str, tuple[str, str]] = {
+    "법령해석": ("LawreqDetail.do", "lawreqIdx"),
+    "비조치의견서": ("OpinionDetail.do", "opinionIdx"),
+}
+_DETAIL_FILES = frozenset(f.lower() for f, _ in _DETAIL_ENDPOINTS.values())
+
+# 상세 URL 에 그대로 옮겨 실을 목록 URL 의 내비게이션 파라미터(순서 유지).
+# 목록 URL(config.yaml)에 있는 값만 옮긴다 — 없는 값을 지어내지 않는다.
+_NAV_PARAMS = ("stNo", "muNo", "muGpNo")
+
+# 상세에서 뽑을 항목. 리스트 순서가 곧 body 출력 순서다.
+_BODY_LABELS = ("질의요지", "회답", "이유")
+
+# 상세 URL 파일명 → 목록의 구분. 목록 record 와 상세 endpoint 가 같은 유형을 가리키는지
+# 확인하는 데 쓴다(_identity_ok).
+_FILE_TO_GUBUN = {f.lower(): g for g, (f, _) in _DETAIL_ENDPOINTS.items()}
+
+# 동일 게시물 확인에 쓰는 회신일 라벨. 페이지 어딘가의 날짜를 주워 쓰지 않고, 이 라벨이
+# 붙은 값만 본다(_reply_date).
+_REPLY_DATE_LABELS = ("회신일", "회신일자")
+
+# 상세의 '정식 제목' 이 라벨-값으로 노출될 때 쓰는 라벨.
+_TITLE_LABELS = ("제목",)
+
+# 상세 상단에 필드명으로 등장하는 것으로 외부에서 확인된 라벨들. 제목 heading 후보에서
+# 걸러내는 용도로만 쓴다(있으면 제외, 없어도 무방 — 잘못 포함해도 fail-closed 방향).
+_FIELD_LABELS = frozenset(
+    _BODY_LABELS + _REPLY_DATE_LABELS + _TITLE_LABELS + ("처리구분", "소관부서", "첨부파일")
+)
+
+# 제목이 heading 으로만 노출될 때 후보로 볼 태그.
+_TITLE_HEADING_TAGS = ("h1", "h2", "h3", "h4")
+
+# 라벨이 담길 만한 요소. 라벨 헤딩을 찾을 때 훑는 범위이며, 이 밖의 태그는 보지 않는다.
+_LABEL_HOST_TAGS = (
+    "h2", "h3", "h4", "h5", "h6", "strong", "b", "p", "span", "div", "li", "dt", "th"
+)
+
+# heading 폴백에서 본문 수집을 멈출 경계.
+#
+# 실제 상세는 표 구조라 이 폴백은 보조 경로다. 그런데 마지막 항목('이유') 뒤에는 다음
+# 라벨이 없어서, 같은 부모 아래 이어지는 첨부 목록·목록/이전글/다음글 버튼·푸터가
+# 통째로 '이유' 본문에 붙어 Gemini 에 법률적 이유로 전달된다. 그래서 fail-closed 로
+# 끊되, **본문 문단 안의 인라인 링크는 경계가 아니다** — 회신문의 이유에는
+# '은행법 <a>제28조</a>에 따릅니다' 처럼 법령 링크가 흔한데, 링크가 있다는 이유만으로
+# 문단을 끊으면 정상 법률 본문을 통째로 잘라내 불완전한 이유를 요약하게 된다.
+#
+# 그래서 판정을 둘로 나눈다(클래스 이름은 추측하지 않는다 — 태그와 링크 경로만 본다).
+#   1) hard 경계: 이 태그가 자신이거나 자손에 있으면 그 자리부터 본문이 아니다.
+_HARD_BOUNDARY_TAGS = (
+    "nav", "footer", "header", "form", "button", "input", "select", "textarea", "hr"
+)
+#   2) 링크는 따로 판정한다 — _is_boundary 참고(홀로 놓인 앵커 / 공식 첨부 링크 /
+#      앵커 밖에 실질 텍스트가 없는 링크 전용 블록만 경계).
+# 조상에 있으면 본문·제목이 아닌 태그(링크 안의 텍스트는 조작 요소다).
+_BOUNDARY_ANCESTOR_TAGS = _HARD_BOUNDARY_TAGS + ("a",)
+# 링크 전용 블록 판정용 — 앵커 밖에 이만 남으면 실질 텍스트가 없는 것으로 본다.
+_SEPARATOR_ONLY = re.compile(r"^[\s|/·ㆍ,;:.\-–—<>«»\[\]()]*$")
+
+# 포털의 공식 첨부 다운로드 경로(이 계열만 내려받는다).
+_FILE_PATH = "/file/displayfile.do"
+
+# 정상 콘텐츠 대신 포털 오류 페이지가 온 경우의 표식. 이 문구가 body 로 저장되어
+# Gemini 요약 입력이 되면 안 된다.
+_ERROR_MARKERS = (
+    "ERROR PAGE",
+    "요청하신 페이지는 사용할 수 없거나 찾을 수 없는 페이지",
+)
+
+_WS_ALL = re.compile(r"\s+")
+# 번호 매김 접두어를 **토큰 하나로** 먼저 걷어낸다: '(1)', '1)', '1.', '1:'.
+# 문자 클래스로만 처리하면 '(1)질의요지' 에서 '(' 와 '1' 만 지워지고 ')' 가 남아
+# ')질의요지' 가 되어 라벨 매칭이 통째로 깨진다(닫는 괄호는 문자열 끝이 아니라
+# 라벨 앞에 있으므로 _LABEL_TAIL 도 잡지 못한다).
+# 숫자 뒤에 구분기호가 반드시 있어야 하므로 '1차 회답' 같은 정상 라벨은 건드리지 않는다.
+_NUMBERING_PREFIX = re.compile(r"^\(\d{1,2}\)|^\d{1,2}[.):：]")
+# 남은 불릿·괄호 장식. '□ 질의요지', '[회답]', '● 회답' 을 같은 라벨로 보기 위한 정리용.
+# 숫자는 넣지 않는다 — 번호는 위에서 토큰으로 처리하므로, 여기에 두면 '1차 회답' 같은
+# 정상 라벨의 첫 글자까지 삼킨다.
+_LABEL_LEAD = re.compile(r"^[\[\(<{【《〔◇□■○●▶▷▣※◎·•*\-–—.,]+")
+_LABEL_TAIL = re.compile(r"[\]\)>}】》〕:：.,·]+$")
+# 첨부 앵커 텍스트 뒤에 붙는 크기 표기('(42 KB)').
+_SIZE_SUFFIX = re.compile(r"\s*[\(\[]\s*[\d.,]+\s*[KMG]?B\s*[\)\]]\s*$", re.IGNORECASE)
+
+# 파일명이 아니라 UI 라벨일 뿐인 앵커 텍스트. 공백을 지운 뒤 **정확히 일치**할 때만
+# 라벨로 본다('다운' 부분일치 같은 넓은 규칙은 정상 파일명을 삼킨다).
+_GENERIC_LINK_LABELS = frozenset({"다운로드", "첨부파일", "파일다운로드", "첨부"})
+
+# 공식 다운로드 URL 이 원본 파일명을 싣는 쿼리 파라미터(외부에서 관찰된 사실).
+_ORG_FILENAME_PARAM = "orgFileName"
+
+
+def _norm_label(text: str) -> str:
+    """라벨 정규화 — 공백·번호·불릿·괄호를 걷어내 정확 비교할 수 있게 만든다.
+
+    순서가 중요하다: 공백 제거 → 번호 매김 접두어(토큰 단위) → 불릿·괄호 장식 → 꼬리.
+    번호를 문자 단위로 먼저 지우면 '(1) 질의요지' 의 닫는 괄호가 남는다.
+    장식과 번호가 겹쳐 붙는 '□ 1. 질의요지' 까지 받도록 두 단계를 한 번 더 돌린다.
+    """
+    s = _WS_ALL.sub("", text or "")
+    for _ in range(2):
+        s = _NUMBERING_PREFIX.sub("", s)
+        s = _LABEL_LEAD.sub("", s)
+    return _LABEL_TAIL.sub("", s)
+
+
+def _norm_ws(text: str) -> str:
+    """공백만 정규화한다(NBSP 포함). 문자 자체는 건드리지 않는다.
+
+    제목 대조용이다. 문장부호까지 지우면 서로 다른 게시물이 같은 제목으로 보일 수
+    있으므로, 줄바꿈·중복 공백 같은 무해한 표기 차이만 흡수한다.
+    (파이썬 정규식의 공백 클래스는 유니코드 모드라 NBSP·전각 공백도 포함한다.)
+    """
+    return _WS_ALL.sub(" ", text or "").strip()
+
+
+# 날짜 표기. 값 **전체**가 날짜일 때만 인정한다(fullmatch) — 주변 숫자가 날짜에
+# 섞여 들어가면 동일 게시물 판정이 무의미해진다.
+_DATE_FORMATS = (
+    re.compile(r"(\d{4})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})\.?"),
+    re.compile(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?"),
+    re.compile(r"(\d{4})(\d{2})(\d{2})"),
+)
+
+
+def _parse_date(text: str) -> str:
+    """날짜 문자열을 canonical 'YYYYMMDD' 로. 해석 못 하면 빈 문자열.
+
+    연·월·일을 **각각** 읽어 zero-pad 한다. 숫자만 이어붙여 앞 8자리를 자르는 방식은
+    '2026년 8월 20일'(→ 2026820, 7자리)을 통째로 놓치고, 그 결과 정상 상세를 '회신일
+    없음'으로 오판하거나(거짓 reject) 목록·상세가 모두 그 형식이면 날짜 대조가 조용히
+    생략된다. 자릿수만으로는 월/일 경계를 알 수 없어 zfill 로도 고칠 수 없다.
+
+    달력에 없는 값(2026-02-29, 2026-13-01, 2026-04-31 …)은 정상 날짜로 인정하지 않는다.
+    """
+    s = _norm_ws(text)
+    if not s:
+        return ""
+    for pattern in _DATE_FORMATS:
+        m = pattern.fullmatch(s)
+        if not m:
+            continue
+        year, month, day = (int(g) for g in m.groups())
+        try:
+            return date(year, month, day).strftime("%Y%m%d")
+        except ValueError:
+            return ""   # 형식은 맞지만 달력에 없는 날 — 다른 형식으로 재해석하지 않는다
+    return ""
 
 
 class BetterReplyScraper(BaseScraper):
@@ -65,7 +256,8 @@ class BetterReplyScraper(BaseScraper):
                     source_name=self.name,
                     post_id=pid,
                     title=f"[{gubun}] {title}" if gubun else title,
-                    url=self.list_url,  # 상세가 JS 라 목록 페이지로 링크
+                    # 상세 주소가 확인된 구분만 상세로, 나머지는 종전대로 목록으로.
+                    url=self._detail_url(rec) or self.list_url,
                     date=clean_text(str(rec.get("replyRegDate", ""))),
                 )
             )
@@ -96,10 +288,444 @@ class BetterReplyScraper(BaseScraper):
         digest = hashlib.md5(f"{t}|{d}".encode("utf-8")).hexdigest()[:16]
         return f"h:{digest}"
 
-    # 상세가 JS 팝업 함수라 수집할 대상이 없다. 본문·첨부가 비는 것이 이 소스의
-    # 정상 동작이므로 상세 수집 통계에서 제외한다(실패로 세면 거짓 장애 경보가 된다).
-    SUPPORTS_ENRICH = False
+    # --- 상세 URL ---
+    def _detail_url(self, rec: dict) -> str:
+        """구분별 상세 페이지 URL. 확인되지 않은 구분이면 빈 문자열.
 
+        '(2014이전)' 이 붙은 구분은 같은 dataIdx 가 같은 상세 화면을 여는지 확인되지
+        않았으므로 대상에서 뺀다(제목 표기용 gubun 과 달리 원본 값으로 정확 비교).
+        """
+        endpoint = _DETAIL_ENDPOINTS.get(clean_text(str(rec.get("pastreqType", ""))))
+        if not endpoint:
+            return ""
+        idx = clean_text(str(rec.get("dataIdx", "")))
+        if not idx.isdigit():
+            return ""
+        filename, param = endpoint
+        query = parse_qs(urlparse(self.list_url).query)
+        params = [(k, query[k][-1]) for k in _NAV_PARAMS if query.get(k)]
+        params.append((param, idx))
+        return f"{urljoin(self.list_url, filename)}?{urlencode(params)}"
+
+    @staticmethod
+    def _is_detail_url(url: str) -> bool:
+        """상세 수집 대상인 URL 인지(목록 URL 폴백이면 False)."""
+        return urlparse(url or "").path.rsplit("/", 1)[-1].lower() in _DETAIL_FILES
+
+    def supports_enrich(self, post: Post) -> bool:
+        """상세 주소가 확인된 구분(법령해석·비조치의견서)의 글만 상세 수집 대상이다.
+
+        나머지 구분은 목록 URL 이 링크라 본문·첨부가 비는 것이 정상이므로, main 이
+        상세 수집 통계에서 빼도록 False 를 돌려준다.
+        """
+        return self._is_detail_url(post.url)
+
+    # --- 상세 수집 ---
     def enrich(self, post: Post) -> None:
-        # 상세가 JS 함수라 단순 수집 불가 — 제목/구분/일자/링크만 통지
-        return
+        """상세에서 질의요지·회답·이유와 첨부를 채운다.
+
+        post.url 의 상세 주소는 아직 라이브 확인되지 않은 dataIdx 매핑으로 만든
+        **후보(provisional)** 다. 그 응답이 이 게시물의 것임을 확인하기 전까지는 사용자에게
+        내보낼 링크로 신뢰하지 않는다 — 확인에 실패하면 목록 URL 로 되돌린다
+        (_fallback_to_list). 확인에 성공한 뒤의 본문·첨부 실패는 링크를 되돌리지 않는다.
+
+        한 건의 실패가 나머지 수집을 막지 않도록 모든 실패는 로그로만 남기고 넘어간다.
+        """
+        if not self._is_detail_url(post.url):
+            return  # 상세 주소가 확인되지 않은 구분 — 목록 링크로만 통지(기존 동작)
+
+        # 되돌린 뒤에도 '어떤 후보가 실패했는지'가 로그에 남도록 따로 보관한다.
+        detail_url = post.url
+
+        try:
+            resp = self.fetcher.get(detail_url, referer=self.list_url)
+            html = self.fetcher.text(resp)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "[%s] 상세 로드 실패 — 목록 링크로 되돌립니다 %s: %s", self.key, detail_url, e
+            )
+            self._fallback_to_list(post)
+            return
+
+        soup = BeautifulSoup(html, "lxml")
+        if self._is_error_page(soup):
+            # 오류 문구가 body 가 되어 Gemini 요약 입력이 되면 안 된다.
+            log.warning(
+                "[%s] 상세가 포털 ERROR PAGE — 목록 링크로 되돌립니다: %s", self.key, detail_url
+            )
+            self._fallback_to_list(post)
+            return
+
+        # 본문·첨부를 붙이기 **전에** 이 응답이 목록의 그 글이 맞는지 확인한다.
+        # 확인되지 않으면 아무것도 붙이지 않고(첨부 다운로드도 하지 않고) 링크도 되돌린다.
+        if not self._identity_ok(soup, post):
+            self._fallback_to_list(post)
+            return
+
+        # 여기부터 detail_url 은 이 게시물의 상세임이 확인됐다. 아래의 본문 파싱·첨부
+        # 실패는 '이 글의 상세를 다 못 읽은 것'일 뿐이므로 링크는 되돌리지 않는다 —
+        # 사용자가 원문을 직접 볼 수 있어야 한다.
+        sections = self._sections(soup)
+        missing = [label for label in _BODY_LABELS if label not in sections]
+        if missing:
+            # 부분 본문은 요약 입력으로 쓰지 않는다 — 회답 없는 질의만 넘기면 Gemini 가
+            # 결론을 지어낸다. 본문을 비우면 기존 폴백(제목·링크)으로 안전하게 나간다.
+            log.warning(
+                "[%s] 상세에서 %s 를 찾지 못해 본문을 비웁니다 — 마크업 확인 필요: %s",
+                self.key,
+                "·".join(missing),
+                post.url,
+            )
+        else:
+            post.body = "\n\n".join(f"[{label}]\n{sections[label]}" for label in _BODY_LABELS)
+
+        self._collect_attachments(soup, post)
+        for att in post.attachments:
+            if att.data is not None:
+                continue
+            try:
+                att.data = self.fetcher.download(att.url, referer=post.url)
+            except AttachmentTooLarge as e:
+                # 용량 초과는 실패가 아니다 — 파일명·링크는 그대로 남겨 메일에 안내한다.
+                log.info("[%s] 첨부 용량 초과 — 링크만 유지 %s: %s", self.key, att.filename, e)
+            except Exception as e:  # noqa: BLE001
+                log.warning("[%s] 첨부 다운로드 실패 %s: %s", self.key, att.url, e)
+
+    def _fallback_to_list(self, post: Post) -> None:
+        """검증되지 않은 상세 후보 링크를 사용자에게 노출하지 않는다.
+
+        본문·첨부만 막고 링크를 그대로 두면, 제목만 보고 누른 사용자가 다른 사건의
+        상세로 이동할 수 있다. identity 가드의 목적과 어긋나므로 known-good 인 통합조회
+        목록으로 되돌린다. seen·발송 정책은 건드리지 않는다(링크만 바뀐다).
+        """
+        post.url = self.list_url
+
+    def enrich_succeeded(self, post: Post) -> bool:
+        """이 소스의 계약상 상세 수집이 성공했는가 — 본문이 만들어졌을 때만 True.
+
+        기본 판정(본문·첨부·구조화항목 중 하나)을 그대로 쓰면, 마크업이 바뀌어 세 항목을
+        모두 놓쳤는데 첨부 링크만 살아 있는 상태가 '성공'으로 잡힌다. 그러면 질의·회답
+        없이 제목과 파일만 실린 메일이 계속 나가는데도 상세 수집 통계는 초록불이라
+        고장이 묻힌다. 이 소스는 세 항목이 모두 있을 때만 body 를 만들므로 body 유무가
+        곧 계약 충족 여부다.
+        """
+        return bool(post.body)
+
+    # --- 동일 게시물 검증 ---
+    def _identity_ok(self, soup: BeautifulSoup, post: Post) -> bool:
+        """상세 응답이 목록의 그 글이 맞는지 fail-closed 로 검증한다.
+
+        목록 dataIdx 를 lawreqIdx/opinionIdx 로 쓰는 매핑은 아직 라이브로 확인되지
+        않았다. 그 가정이 틀리거나 포털이 잘못된 idx 를 다른 정상 페이지로 돌려주면,
+        목록 A 의 제목 밑에 상세 B 의 회답·첨부가 실린다. 법령해석 알림에서 그것은
+        본문이 비는 것보다 훨씬 나쁘므로, 확인되지 않으면 통과시키지 않는다.
+
+        검증은 지금 Post 가 이미 가진 값(title/date/url)만으로 한다.
+
+        상세 페이지가 스스로 '법령해석/비조치의견서'라고 찍는지는 보지 않는다 —
+        공개된 LawreqDetail URL 중에는 muNo 에 따라 '규제입증책임제' 같은 다른 메뉴
+        맥락으로 렌더되는 것이 있어(검색 색인에서 확인) 유형 단어가 페이지에 없을 수
+        있다. 대신 목록 구분(제목 접두어)과 URL endpoint 가 서로 맞는지를 본다.
+        """
+        filename = urlparse(post.url).path.rsplit("/", 1)[-1].lower()
+        gubun = _FILE_TO_GUBUN.get(filename, "")
+        if not gubun:
+            return False  # 확인된 endpoint 가 아니면 검증 근거 자체가 없다
+
+        title = clean_text(post.title)
+        prefix = f"[{gubun}]"
+        if title.startswith(prefix):
+            title = title[len(prefix):].strip()      # 우리가 붙인 접두어만 제거
+        elif title.startswith("["):
+            log.warning(
+                "[%s] 목록 구분과 상세 endpoint 가 어긋남(%s ↔ %s) — 건너뜁니다: %s",
+                self.key, post.title, gubun, post.url,
+            )
+            return False
+        if not title:
+            return False
+
+        detail_title = self._detail_title(soup)
+        if not detail_title:
+            log.warning(
+                "[%s] 상세의 정식 제목을 확인할 수 없어 동일 게시물 대조 불가 — "
+                "건너뜁니다: %s",
+                self.key, post.url,
+            )
+            return False
+        if _norm_ws(detail_title) != _norm_ws(title):
+            log.warning(
+                "[%s] 상세 제목이 목록과 다름(상세 %r ↔ 목록 %r) — 다른 게시물이므로 "
+                "건너뜁니다: %s",
+                self.key, detail_title, title, post.url,
+            )
+            return False
+
+        raw_date = clean_text(post.date)
+        if raw_date:
+            want = _parse_date(raw_date)
+            if not want:
+                # 목록 날짜가 있는데 해석하지 못했다 = 검사 생략이 아니라 확인 불가.
+                log.warning(
+                    "[%s] 목록 회신일(%r)을 해석할 수 없어 동일 게시물 확인 불가 — "
+                    "건너뜁니다: %s",
+                    self.key, post.date, post.url,
+                )
+                return False
+            got = self._reply_date(soup)
+            if not got:
+                log.warning(
+                    "[%s] 상세에서 %s 를 찾지 못해 동일 게시물 확인 불가 — 건너뜁니다: %s",
+                    self.key, "/".join(_REPLY_DATE_LABELS), post.url,
+                )
+                return False
+            if got != want:
+                log.warning(
+                    "[%s] 상세 회신일(%s)이 목록(%s)과 다름 — 다른 게시물이므로 "
+                    "건너뜁니다: %s",
+                    self.key, got, want, post.url,
+                )
+                return False
+        return True
+
+    @classmethod
+    def _detail_title(cls, soup: BeautifulSoup) -> str:
+        """상세 페이지의 '정식 게시물 제목'. 신뢰할 수 없으면 빈 문자열.
+
+        페이지 전체 텍스트에서 목록 제목을 찾는 방식은 쓰지 않는다 — 잘못된 상세 B 가
+        와도 그 페이지의 이전글/다음글 링크·관련글·푸터에 A 의 제목이 있으면 통과해
+        버리고, 회신일까지 같으면 B 의 회답·첨부가 A 밑에 실린다. 그것을 막는 것이 이
+        가드의 목적이므로 '제목이 놓인 자리'로 범위를 좁힌다.
+
+        순서:
+          1) '제목' 라벨이 붙은 값(회신일과 같은 구조적 라벨-값 메커니즘).
+          2) 본문(질의요지) 앞에 오는 heading 중 필드 라벨이 아니고 링크·내비게이션·
+             푸터에 속하지 않는 것. **후보 텍스트가 정확히 한 가지일 때만** 인정한다 —
+             여럿이면 어느 것이 제목인지 알 수 없으므로 판단하지 않는다.
+          3) 그 밖에는 빈 문자열(호출자가 fail-closed 처리).
+
+        라이브 raw HTML 을 확인할 수 없으므로 클래스 이름(.board-title 등)은 쓰지
+        않는다. 위 두 경로 모두 문서 구조만 본다.
+        """
+        for value in cls._labelled_values(soup, _TITLE_LABELS):
+            return value
+        return cls._heading_title(soup)
+
+    @classmethod
+    def _heading_title(cls, soup: BeautifulSoup) -> str:
+        """본문 앞 heading 에서 제목을 고른다. 후보가 여럿이면 빈 문자열(판단 보류)."""
+        candidates: list[str] = []
+        # 문서 순서로 훑다가 첫 본문 라벨을 만나면 멈춘다 — 제목은 본문보다 앞에 있다.
+        for el in soup.find_all(list(_LABEL_HOST_TAGS) + ["h1"]):
+            if _norm_label(el.get_text(" ")) in _BODY_LABELS:
+                break
+            if el.name not in _TITLE_HEADING_TAGS:
+                continue
+            if cls._is_boundary(el) or cls._inside_boundary(el):
+                continue        # 내비게이션·푸터·링크 안의 heading 은 제목이 아니다
+            text = _norm_ws(el.get_text(" "))
+            if not text or _norm_label(text) in _FIELD_LABELS:
+                continue
+            candidates.append(text)
+        unique = set(candidates)
+        return candidates[0] if len(unique) == 1 else ""
+
+    @classmethod
+    def _labelled_values(cls, soup: BeautifulSoup, labels) -> Iterator[str]:
+        """라벨이 붙은 값 후보. 구조적 짝(th/td, dt+dd)을 먼저 보고, 없으면 라벨만 든
+        요소의 바로 다음 형제를 본다. 페이지 전체를 훑지 않는다.
+        """
+        for label, value in cls._label_pairs(soup):
+            if _norm_label(label) in labels and value:
+                yield value
+        for el in soup.find_all(list(_LABEL_HOST_TAGS)):
+            if _norm_label(el.get_text(" ")) not in labels:
+                continue
+            sib = el.find_next_sibling()
+            if sib is None:
+                continue
+            text = clean_text(sib.get_text(" "))
+            if text:
+                yield text
+
+    @classmethod
+    def _reply_date(cls, soup: BeautifulSoup) -> str:
+        """회신일 라벨이 붙은 값을 canonical YYYYMMDD 로. 없거나 못 읽으면 빈 문자열.
+
+        페이지 전체에서 날짜를 긁지 않는다 — 푸터·본문에 우연히 있는 날짜가 통과하면
+        검증이 무의미해진다.
+        """
+        for value in cls._labelled_values(soup, _REPLY_DATE_LABELS):
+            parsed = _parse_date(value)
+            if parsed:
+                return parsed
+        return ""
+
+    @staticmethod
+    def _is_error_page(soup: BeautifulSoup) -> bool:
+        text = clean_text(soup.get_text(" "))
+        return any(m in text for m in _ERROR_MARKERS)
+
+    # --- 본문 추출 ---
+    def _sections(self, soup: BeautifulSoup) -> dict[str, str]:
+        """찾아낸 {라벨: 본문}. 못 찾은 항목은 키 자체가 없다.
+
+        세 항목이 실제 페이지에 있다는 것은 확인했지만 raw 마크업(태그 구조)까지는
+        확인하지 못해 두 배치를 모두 본다.
+          1) 구조적 라벨-값 짝(tr 안의 th/td, dt+dd)
+          2) 라벨만 든 요소 뒤에 본문이 형제로 오는 배치
+        먼저 찾은 값을 쓴다.
+        """
+        found: dict[str, str] = {}
+        for label, value in self._label_pairs(soup):
+            key = _norm_label(label)
+            if key in _BODY_LABELS and key not in found and value:
+                found[key] = value
+        if len(found) < len(_BODY_LABELS):
+            for key, value in self._heading_sections(soup):
+                if key not in found and value:
+                    found[key] = value
+        return found
+
+    @staticmethod
+    def _label_pairs(soup: BeautifulSoup) -> Iterator[tuple[str, str]]:
+        """구조적으로 짝지어진 (라벨 텍스트, 값 텍스트) 만 낸다.
+
+        페이지 전체에서 '라벨 근처 텍스트'를 훑지 않는다 — 중첩 표의 셀이 바깥 행의
+        짝으로 끼어들지 않도록 각 tr 직속 셀만 본다.
+        """
+        for row in soup.find_all("tr"):
+            cells = [c for c in row.find_all(["th", "td"]) if c.find_parent("tr") is row]
+            heads = [c for c in cells if c.name == "th"]
+            values = [c for c in cells if c.name == "td"]
+            for th, td in zip(heads, values):
+                yield th.get_text(" "), clean_text(td.get_text("\n"))
+        for dt in soup.find_all("dt"):
+            dd = dt.find_next_sibling()
+            if dd is not None and dd.name == "dd":
+                yield dt.get_text(" "), clean_text(dd.get_text("\n"))
+
+    @classmethod
+    def _heading_sections(cls, soup: BeautifulSoup) -> Iterator[tuple[str, str]]:
+        """텍스트가 라벨 '뿐'인 요소를 찾아, 다음 경계 전까지의 형제를 본문으로 낸다.
+
+        경계는 두 가지다: 다음 본문 라벨, 그리고 조작·내비게이션 영역(_is_boundary).
+        마지막 항목('이유')에는 뒤따르는 라벨이 없으므로 후자가 없으면 첨부 목록·
+        목록/이전글 버튼·푸터까지 법률적 '이유' 본문으로 끌려 들어간다. 반대로 본문
+        문단 안의 인라인 링크(법령 링크 등)는 경계가 아니다 — _is_boundary 참고.
+        """
+        for el in soup.find_all(list(_LABEL_HOST_TAGS)):
+            key = _norm_label(el.get_text(" "))
+            if key not in _BODY_LABELS:
+                continue
+            parts: list[str] = []
+            for sib in el.next_siblings:
+                if getattr(sib, "name", None) is None:
+                    text = clean_text(str(sib))
+                    if text:
+                        parts.append(text)
+                    continue
+                if _norm_label(sib.get_text(" ")) in _BODY_LABELS:
+                    break  # 다음 항목의 라벨 = 이 항목의 끝
+                if cls._is_boundary(sib):
+                    break  # 첨부·버튼·내비게이션·푸터 = 본문의 끝
+                text = clean_text(sib.get_text("\n"))
+                if text:
+                    parts.append(text)
+            body = clean_text("\n".join(parts))
+            if body:
+                yield key, body
+
+    @classmethod
+    def _is_boundary(cls, el) -> bool:
+        """이 형제부터는 본문이 아니라 조작·내비게이션 영역인지.
+
+        **본문 문단 안의 인라인 링크는 경계가 아니다.** '자손에 <a> 가 있으면 경계'로
+        보면 '은행법 <a>제28조</a>에 따릅니다' 같은 정상 문단이 통째로 잘려 나간다.
+        링크가 경계가 되는 것은 아래 세 가지 — 모두 구조로 판정한다.
+        """
+        if el.name in _HARD_BOUNDARY_TAGS or el.find(list(_HARD_BOUNDARY_TAGS)) is not None:
+            return True
+        if el.name == "a":
+            return True                       # 형제 자리에 홀로 놓인 링크 = 조작 요소
+        if cls._has_attachment_link(el):
+            return True                       # 공식 첨부 다운로드 블록
+        return cls._link_only_block(el)       # 목록/이전글/다음글 같은 링크 전용 블록
+
+    @staticmethod
+    def _has_attachment_link(el) -> bool:
+        """공식 첨부 다운로드(/file/displayFile.do) 링크를 품은 블록인지."""
+        return any(
+            urlparse(a["href"]).path.lower().endswith(_FILE_PATH)
+            for a in el.find_all("a", href=True)
+        )
+
+    @staticmethod
+    def _link_only_block(el) -> bool:
+        """링크만으로 이뤄진 조작 블록인지(목록·이전글·다음글 등).
+
+        앵커 **밖에** 실질 텍스트가 있으면 본문 문단이다. 구분기호만 남는 경우에만
+        조작 블록으로 본다 — 문단 안 인라인 링크와 갈라내는 기준이다.
+        """
+        if el.find("a") is None:
+            return False
+        for node in el.find_all(string=True):
+            if node.find_parent("a") is not None:
+                continue
+            if not _SEPARATOR_ONLY.match(str(node)):
+                return False
+        return True
+
+    @staticmethod
+    def _inside_boundary(el) -> bool:
+        """조작·내비게이션 영역(링크·nav·footer 등) '안' 에 있는 요소인지."""
+        return any(p.name in _BOUNDARY_ANCESTOR_TAGS for p in el.parents if p.name)
+
+    # --- 첨부 ---
+    def _collect_attachments(self, soup: BeautifulSoup, post: Post) -> None:
+        """상세의 공식 첨부 링크(/file/displayFile.do)만 수집. 중복·외부 origin 제외."""
+        origin = urlparse(self.list_url).netloc.lower()
+        seen = {a.url for a in post.attachments}
+        for anchor in soup.find_all("a", href=True):
+            href = anchor["href"].strip()
+            if not href or href.lower().startswith("javascript"):
+                continue
+            url = urljoin(post.url, href)
+            parsed = urlparse(url)
+            if not parsed.path.lower().endswith(_FILE_PATH):
+                continue
+            if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != origin:
+                log.warning("[%s] 외부 origin 첨부 링크 무시: %s", self.key, url)
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            post.attachments.append(
+                Attachment(filename=self._filename(anchor, url), url=url)
+            )
+
+    @classmethod
+    def _filename(cls, anchor, url: str) -> str:
+        """첨부 파일명. 크기 표기('(42 KB)')는 제거한다.
+
+        앵커 텍스트가 '다운로드' 같은 UI 라벨이면 그것을 파일명으로 쓰지 않는다 —
+        원본 이름과 확장자를 잃고, 첨부가 여럿이면 전부 같은 이름이 되어 메일에서
+        구분할 수 없다. 그런 경우 공식 다운로드 URL 의 orgFileName 을 쓴다.
+        """
+        for raw in (anchor.get_text(" "), anchor.get("title") or "", anchor.get("download") or ""):
+            name = _SIZE_SUFFIX.sub("", clean_text(raw)).strip()
+            if name and _WS_ALL.sub("", name) not in _GENERIC_LINK_LABELS:
+                return name
+        return cls._org_filename(url) or "첨부파일"
+
+    @staticmethod
+    def _org_filename(url: str) -> str:
+        """공식 다운로드 URL 의 orgFileName 에서 원본 파일명을 읽는다. 없으면 빈 문자열.
+
+        parse_qs 가 percent 인코딩과 '+' 공백을 함께 풀어 주므로 따로 unquote 하지
+        않는다. 외부 문자열이므로 개행을 지우고 경로 조각을 떼어 파일명만 남긴다.
+        """
+        values = parse_qs(urlparse(url).query).get(_ORG_FILENAME_PARAM) or []
+        raw = (values[-1] if values else "").replace("\r", " ").replace("\n", " ")
+        name = clean_text(raw).replace("\\", "/").rsplit("/", 1)[-1].strip()
+        return _SIZE_SUFFIX.sub("", name).strip()
