@@ -980,6 +980,142 @@ def test_numbered_headings_are_parsed_end_to_end(caplog):
     assert "찾지 못해" not in caplog.text          # missing warning 없음
 
 
+# --- 검증되지 않은 상세 후보 링크는 사용자에게 노출하지 않는다 ---
+#
+# 상세 URL 은 아직 라이브 확인되지 않은 dataIdx 매핑으로 만든 '후보' 다. identity 를
+# 확인하기 전까지는 본문·첨부뿐 아니라 링크도 신뢰하지 않는다 — 본문만 막고 링크를
+# 그대로 두면 제목만 보고 누른 사용자가 다른 사건의 상세로 간다.
+
+
+def test_verified_detail_keeps_its_url():
+    """A. identity 통과 시 상세 URL 을 그대로 유지한다."""
+    fetcher = _Fetcher(html=DETAIL_HTML)
+    sc = _scraper(fetcher)
+    detail_url = _detail()
+    post = _post(detail_url)
+    sc.enrich(post)
+    assert post.url == detail_url
+    assert "[회답]" in post.body
+    assert post.attachments[0].data == b"HWP"
+
+
+def test_identity_mismatch_falls_back_to_list_url():
+    """B. 다른 게시물이면 본문·첨부·다운로드는 물론 링크도 되돌린다."""
+    fetcher = _Fetcher(html=NAV_CONTAINS_OTHER_TITLE_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail())
+    sc.enrich(post)
+    assert post.url == LIST_URL
+    assert post.body == ""
+    assert post.attachments == []
+    assert fetcher.downloaded == []
+
+
+def test_wrong_reply_date_falls_back_to_list_url():
+    """C. 제목은 같아도 회신일이 다르면 링크까지 되돌린다."""
+    sc = _scraper(_Fetcher(html=WRONG_DATE_HTML))
+    post = _post(_detail())
+    sc.enrich(post)
+    assert post.url == LIST_URL
+
+
+def test_unverifiable_title_falls_back_to_list_url():
+    """D. 정식 제목을 특정할 수 없으면 링크를 신뢰하지 않는다."""
+    sc = _scraper(_Fetcher(html=AMBIGUOUS_TITLE_HTML))
+    post = _post(_detail())
+    sc.enrich(post)
+    assert post.url == LIST_URL
+
+
+def test_error_page_falls_back_to_list_url():
+    """E. 포털 ERROR PAGE 는 그 후보 URL 이 살아 있다는 근거가 되지 못한다."""
+    sc = _scraper(_Fetcher(html=ERROR_HTML))
+    detail_url = _detail()
+    post = _post(detail_url)
+    assert post.url == detail_url          # enrich 전에는 후보 URL
+    sc.enrich(post)
+    assert post.url == LIST_URL
+    assert post.body == "" and post.attachments == []
+
+
+def test_detail_request_failure_falls_back_to_list_url(caplog):
+    """F. GET 실패도 후보 URL 을 검증하지 못한 것이므로 되돌린다(예외는 전파 안 함)."""
+    fetcher = _Fetcher(html=DETAIL_HTML)
+    fetcher.get_error = RuntimeError("boom")
+    sc = _scraper(fetcher)
+    detail_url = _detail()
+    post = _post(detail_url)
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.url == LIST_URL
+    assert detail_url in caplog.text       # 어떤 후보가 실패했는지 로그에 남는다
+
+
+def test_partial_body_keeps_verified_detail_url():
+    """G. identity 는 통과했는데 본문만 못 읽은 경우 — 링크는 유지해야 한다.
+
+    'enrich_succeeded == False' 를 근거로 링크까지 되돌리면, 사용자가 원문을 직접 볼
+    길이 사라진다. 이 상세가 이 글의 것임은 이미 확인됐다.
+    """
+    sc = _scraper(_Fetcher(html=DETAIL_HTML_PARTIAL_WITH_FILE))
+    detail_url = _detail()
+    post = _post(detail_url)
+    sc.enrich(post)
+    assert post.body == ""
+    assert sc.enrich_succeeded(post) is False
+    assert post.url == detail_url          # 링크는 그대로
+
+
+def test_attachment_download_failure_keeps_verified_detail_url():
+    """H. identity 통과 후 첨부 다운로드만 실패한 경우도 링크를 유지한다."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML, download_error=RuntimeError("net")))
+    detail_url = _detail()
+    post = _post(detail_url)
+    sc.enrich(post)
+    assert post.url == detail_url
+    assert "[회답]" in post.body
+    assert post.attachments[0].data is None
+
+
+def test_attachment_too_large_keeps_verified_detail_url():
+    """AttachmentTooLarge 도 identity 이후의 실패이므로 링크를 되돌리지 않는다."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML, download_error=AttachmentTooLarge(999, 10)))
+    detail_url = _detail()
+    post = _post(detail_url)
+    sc.enrich(post)
+    assert post.url == detail_url
+
+
+def test_rejected_candidate_url_never_reaches_the_mail():
+    """I. notifier 는 production 코드 그대로 — post.url fallback 만으로 만족해야 한다."""
+    fetcher = _Fetcher(html=NAV_CONTAINS_OTHER_TITLE_HTML)
+    sc = _scraper(fetcher)
+    candidate = _detail()
+    post = _post(candidate)
+    sc.enrich(post)
+    assert post.url == LIST_URL
+
+    html = build_html({post.source_name: [post]})
+    text = build_text({post.source_name: [post]})
+    from html import escape as _html_escape
+
+    assert LIST_URL in text
+    assert _html_escape(LIST_URL) in html       # HTML 은 & 가 &amp; 로 이스케이프된다
+    assert "LawreqDetail.do" not in html        # 후보 URL 은 어떤 형태로도 나가지 않는다
+    assert "LawreqDetail.do" not in text
+    assert candidate not in text
+
+
+def test_unsupported_type_url_is_untouched():
+    """미지원 구분은 원래 목록 URL 이며 enrich 가 건드리지 않는다(기존 동작)."""
+    fetcher = _Fetcher(html=DETAIL_HTML)
+    sc = _scraper(fetcher)
+    post = _post(LIST_URL)
+    sc.enrich(post)
+    assert post.url == LIST_URL
+    assert fetcher.get_calls == []
+
+
 # --- 상세 수집 성공 판정(enrich_succeeded) ---
 def test_attachment_only_reply_is_not_a_detail_success():
     """A. 본문이 비고 첨부만 잡힌 상태는 이 소스의 계약상 실패다."""

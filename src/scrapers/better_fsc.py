@@ -22,9 +22,11 @@
 확인한다(_identity_ok — 구분↔endpoint, 정식 제목 일치, 회신일 일치). 제목은 페이지
 전체 텍스트에서 찾지 않고 '제목이 놓인 자리'(_detail_title)에서만 읽어 정확히 같은지
 본다 — 잘못된 상세 B 의 이전글/다음글·푸터에 A 의 제목이 있어도 통과하면 안 되기
-때문이다. 확인되지 않으면 아무것도 붙이지 않고(첨부 수집·다운로드도 하지 않고) 제목·
-링크만 통지한다. 잘못된 회답을 다른 제목 밑에 보내는 것이 본문이 비는 것보다 훨씬
-나쁘기 때문에 fail-open 하지 않는다.
+때문이다. 확인되지 않으면 본문·첨부를 붙이지 않는 것은 물론(다운로드도 하지 않는다)
+**사용자 링크도 통합조회 목록으로 되돌린다** — 검증되지 않은 후보 링크를 그대로 두면
+제목만 보고 누른 사용자가 다른 사건의 상세로 가기 때문이다. 잘못된 회답을 다른 제목
+밑에 보내는 것이 본문이 비는 것보다 훨씬 나쁘므로 fail-open 하지 않는다. 반대로 identity 확인에 성공한 뒤의 본문
+파싱·첨부 실패에서는 링크를 되돌리지 않는다(그 상세가 이 글의 것임은 이미 확인됐다).
 
 상세 페이지에서는 질의요지·회답·이유를 뽑아 post.body 에 담는다. **세 항목이 모두
 있을 때만** 담는다 — 회답이 빠진 질의만으로 3줄 요약을 만들면 결론을 지어낸 요약이
@@ -306,30 +308,47 @@ class BetterReplyScraper(BaseScraper):
     def enrich(self, post: Post) -> None:
         """상세에서 질의요지·회답·이유와 첨부를 채운다.
 
-        한 건의 실패가 나머지 수집을 막지 않도록 모든 실패는 로그로만 남기고 넘어간다
-        (본문 없이 제목·링크만 나가는 것이 최악의 결과가 아니다).
+        post.url 의 상세 주소는 아직 라이브 확인되지 않은 dataIdx 매핑으로 만든
+        **후보(provisional)** 다. 그 응답이 이 게시물의 것임을 확인하기 전까지는 사용자에게
+        내보낼 링크로 신뢰하지 않는다 — 확인에 실패하면 목록 URL 로 되돌린다
+        (_fallback_to_list). 확인에 성공한 뒤의 본문·첨부 실패는 링크를 되돌리지 않는다.
+
+        한 건의 실패가 나머지 수집을 막지 않도록 모든 실패는 로그로만 남기고 넘어간다.
         """
         if not self._is_detail_url(post.url):
             return  # 상세 주소가 확인되지 않은 구분 — 목록 링크로만 통지(기존 동작)
 
+        # 되돌린 뒤에도 '어떤 후보가 실패했는지'가 로그에 남도록 따로 보관한다.
+        detail_url = post.url
+
         try:
-            resp = self.fetcher.get(post.url, referer=self.list_url)
+            resp = self.fetcher.get(detail_url, referer=self.list_url)
             html = self.fetcher.text(resp)
         except Exception as e:  # noqa: BLE001
-            log.warning("[%s] 상세 로드 실패 %s: %s", self.key, post.url, e)
+            log.warning(
+                "[%s] 상세 로드 실패 — 목록 링크로 되돌립니다 %s: %s", self.key, detail_url, e
+            )
+            self._fallback_to_list(post)
             return
 
         soup = BeautifulSoup(html, "lxml")
         if self._is_error_page(soup):
             # 오류 문구가 body 가 되어 Gemini 요약 입력이 되면 안 된다.
-            log.warning("[%s] 상세가 포털 ERROR PAGE — 본문 없이 진행: %s", self.key, post.url)
+            log.warning(
+                "[%s] 상세가 포털 ERROR PAGE — 목록 링크로 되돌립니다: %s", self.key, detail_url
+            )
+            self._fallback_to_list(post)
             return
 
         # 본문·첨부를 붙이기 **전에** 이 응답이 목록의 그 글이 맞는지 확인한다.
-        # 확인되지 않으면 아무것도 붙이지 않고 끝낸다(첨부 다운로드도 하지 않는다).
+        # 확인되지 않으면 아무것도 붙이지 않고(첨부 다운로드도 하지 않고) 링크도 되돌린다.
         if not self._identity_ok(soup, post):
+            self._fallback_to_list(post)
             return
 
+        # 여기부터 detail_url 은 이 게시물의 상세임이 확인됐다. 아래의 본문 파싱·첨부
+        # 실패는 '이 글의 상세를 다 못 읽은 것'일 뿐이므로 링크는 되돌리지 않는다 —
+        # 사용자가 원문을 직접 볼 수 있어야 한다.
         sections = self._sections(soup)
         missing = [label for label in _BODY_LABELS if label not in sections]
         if missing:
@@ -355,6 +374,15 @@ class BetterReplyScraper(BaseScraper):
                 log.info("[%s] 첨부 용량 초과 — 링크만 유지 %s: %s", self.key, att.filename, e)
             except Exception as e:  # noqa: BLE001
                 log.warning("[%s] 첨부 다운로드 실패 %s: %s", self.key, att.url, e)
+
+    def _fallback_to_list(self, post: Post) -> None:
+        """검증되지 않은 상세 후보 링크를 사용자에게 노출하지 않는다.
+
+        본문·첨부만 막고 링크를 그대로 두면, 제목만 보고 누른 사용자가 다른 사건의
+        상세로 이동할 수 있다. identity 가드의 목적과 어긋나므로 known-good 인 통합조회
+        목록으로 되돌린다. seen·발송 정책은 건드리지 않는다(링크만 바뀐다).
+        """
+        post.url = self.list_url
 
     def enrich_succeeded(self, post: Post) -> bool:
         """이 소스의 계약상 상세 수집이 성공했는가 — 본문이 만들어졌을 때만 True.
