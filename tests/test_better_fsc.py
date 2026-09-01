@@ -37,6 +37,8 @@ DETAIL_HTML = """
   <h2 class="title">겸영업무 해당 여부</h2>
   <table class="tbl-view">
     <tbody>
+      <tr><th>처리구분</th><td>완료</td></tr>
+      <tr><th>소관부서</th><td>은행과</td></tr>
       <tr><th>회신일</th><td>2026-08-20</td></tr>
       <tr><th>질의요지</th><td>겸영업무 신고 대상인지 여부를 질의함.</td></tr>
       <tr><th>회답</th><td>신고 대상에 해당하지 않습니다.</td></tr>
@@ -622,7 +624,7 @@ def test_identity_rejects_other_post_content(caplog):
     assert post.body == ""
     assert post.attachments == []
     assert fetcher.downloaded == []                  # 다운로드 호출 자체가 없다
-    assert "다른 게시물일 수 있어" in caplog.text
+    assert "상세 제목이 목록과 다름" in caplog.text
     assert "다른 게시물의 회답" not in post.body
 
 
@@ -684,6 +686,298 @@ def test_identity_tolerates_harmless_whitespace_differences():
     post = _post(_detail())
     sc.enrich(post)
     assert "[회답]" in post.body
+
+
+# --- REVIEW 2: 제목 대조는 페이지 전체가 아니라 '정식 제목' 자리에서 ---
+#
+# 잘못된 상세 B 가 와도 그 페이지의 이전글/다음글·관련글·푸터에 A 의 제목이 있으면
+# 페이지 전체 substring 검색은 통과해 버린다. 회신일까지 같으면 B 의 회답·첨부가
+# A 밑에 실린다 — 이 가드가 막아야 하는 바로 그 상황이다.
+
+# Codex repro: 정식 제목은 B 인데, 이전글/다음글 내비게이션에 A 의 제목이 있고
+# 회신일도 A 와 같다.
+NAV_CONTAINS_OTHER_TITLE_HTML = """
+<div id="content">
+  <h2>B 사건에 대한 질의</h2>
+  <table><tbody>
+    <tr><th>회신일</th><td>2026-08-20</td></tr>
+    <tr><th>질의요지</th><td>B 사건의 질의입니다.</td></tr>
+    <tr><th>회답</th><td>B 사건의 회답입니다.</td></tr>
+    <tr><th>이유</th><td>B 사건의 이유입니다.</td></tr>
+    <tr><th>첨부파일</th><td>
+      <a href="/fsc_new/file/displayFile.do?filePath=%2Fb&amp;orgFileName=b.hwp&amp;sysFileName=b.hwp">B첨부.hwp</a>
+    </td></tr>
+  </tbody></table>
+  <nav class="prev-next">
+    <a href="/fsc_new/replyCase/LawreqDetail.do?lawreqIdx=1">이전글 겸영업무 해당 여부</a>
+    <a href="/fsc_new/replyCase/LawreqDetail.do?lawreqIdx=3">다음글 겸영업무 해당 여부</a>
+  </nav>
+</div>
+"""
+
+# 푸터에 A 의 제목이 있는 변형.
+FOOTER_CONTAINS_OTHER_TITLE_HTML = """
+<div id="content">
+  <h2>B 사건에 대한 질의</h2>
+  <table><tbody>
+    <tr><th>회신일</th><td>2026-08-20</td></tr>
+    <tr><th>질의요지</th><td>B 사건의 질의입니다.</td></tr>
+    <tr><th>회답</th><td>B 사건의 회답입니다.</td></tr>
+    <tr><th>이유</th><td>B 사건의 이유입니다.</td></tr>
+  </tbody></table>
+  <footer>최근 조회: 겸영업무 해당 여부</footer>
+</div>
+"""
+
+# 실제 비조치의견서 페이지처럼, 상단 정식 제목과 회신영역에 '비슷하지만 다른' 문자열이
+# 함께 존재하는 경우(외부에서 확인된 사실).
+SIMILAR_TITLE_HTML = """
+<div id="content">
+  <h2>미등록 PG 계약체결 금지 관련 비조치의견서</h2>
+  <table><tbody>
+    <tr><th>회신일</th><td>2025-09-10</td></tr>
+    <tr><th>질의요지</th><td>미등록 PG 계약체결 금지 관련 질의입니다.</td></tr>
+    <tr><th>회답</th><td>비조치의견서를 직권발급합니다.</td></tr>
+    <tr><th>이유</th><td>전자금융거래법 위반 소지가 있습니다.</td></tr>
+  </tbody></table>
+</div>
+"""
+
+# 정식 제목을 특정할 수 없는 페이지(제목 라벨 없음 + 후보 heading 이 여럿).
+AMBIGUOUS_TITLE_HTML = """
+<div id="content">
+  <h2>금융규제·법령해석포털</h2>
+  <h3>회신사례 상세</h3>
+  <table><tbody>
+    <tr><th>회신일</th><td>2026-08-20</td></tr>
+    <tr><th>질의요지</th><td>겸영업무 신고 대상인지 여부를 질의함.</td></tr>
+    <tr><th>회답</th><td>신고 대상에 해당하지 않습니다.</td></tr>
+    <tr><th>이유</th><td>은행법 제28조에 따릅니다.</td></tr>
+  </tbody></table>
+</div>
+"""
+
+
+def test_title_scope_accepts_matching_dedicated_title():
+    """A. 정식 제목과 회신일이 맞으면 본문·첨부를 정상 수집한다."""
+    fetcher = _Fetcher(html=DETAIL_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail())
+    sc.enrich(post)
+    assert "[회답]" in post.body
+    assert [a.filename for a in post.attachments] == ["회신문.hwp"]
+    assert post.attachments[0].data == b"HWP"
+    assert len(fetcher.downloaded) == 1
+
+
+def test_title_in_navigation_does_not_pass_identity(caplog):
+    """B. 정식 제목이 B 인데 이전글/다음글에 A 제목이 있어도 통과하면 안 된다."""
+    fetcher = _Fetcher(html=NAV_CONTAINS_OTHER_TITLE_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail())              # 제목 A, 회신일 2026-08-20 (상세와 동일)
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == ""
+    assert post.attachments == []
+    assert fetcher.downloaded == []      # 첨부 추출/다운로드 전에 return
+    assert "상세 제목이 목록과 다름" in caplog.text
+    assert "B 사건" not in post.body
+
+
+def test_title_in_footer_does_not_pass_identity():
+    """C. 푸터에 A 제목이 있어도 정식 제목이 다르면 거부."""
+    fetcher = _Fetcher(html=FOOTER_CONTAINS_OTHER_TITLE_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail())
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+
+
+def test_similar_but_not_equal_title_is_rejected(caplog):
+    """E. 부분 문자열이 아니라 정확히 같은 제목일 때만 통과한다."""
+    fetcher = _Fetcher(html=SIMILAR_TITLE_HTML)
+    sc = _scraper(fetcher)
+    post = _post(
+        _detail("OpinionDetail.do"),
+        title="[비조치의견서] 미등록 PG 계약체결 금지 관련 비조치의견서 직권발급",
+        date="2025-09-10",
+    )
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert "상세 제목이 목록과 다름" in caplog.text
+
+
+def test_ambiguous_detail_title_fails_closed(caplog):
+    """정식 제목을 특정할 수 없으면 전체 페이지 검색으로 되돌아가지 않는다."""
+    fetcher = _Fetcher(html=AMBIGUOUS_TITLE_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail())
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert "정식 제목을 확인할 수 없어" in caplog.text
+
+
+def test_detail_title_from_labelled_value():
+    """'제목' 라벨이 붙은 값이 있으면 그것을 정식 제목으로 쓴다."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML_HEADING))
+    post = _opinion_post()
+    sc.enrich(post)
+    assert "[회답]" in post.body
+
+
+def test_title_whitespace_differences_are_tolerated():
+    """D. 줄바꿈·중복 공백·NBSP 차이는 정상 허용(문장부호는 보존)."""
+    html = DETAIL_HTML.replace(
+        '<h2 class="title">겸영업무 해당 여부</h2>',
+        '<h2 class="title">겸영업무\n   해당&nbsp;&nbsp;여부</h2>',
+    )
+    sc = _scraper(_Fetcher(html=html))
+    post = _post(_detail())
+    sc.enrich(post)
+    assert "[회답]" in post.body
+
+
+def test_identity_path_does_not_use_whole_page_substring():
+    """회귀 방어: production identity 경로에 페이지 전체 substring 검색이 없어야 한다.
+
+    (있으면 위 nav/footer 케이스가 조용히 다시 통과한다.)
+    """
+    import inspect
+
+    from src.scrapers.better_fsc import BetterReplyScraper as _S
+
+    source = "".join(
+        inspect.getsource(fn)
+        for fn in (_S._identity_ok, _S._detail_title, _S._heading_title,
+                   _S._labelled_values, _S._reply_date)
+    )
+    assert "soup.get_text" not in source
+
+
+# --- REVIEW 1: 한 자리 월/일 한국어 날짜 ---
+def _with_reply_date(value):
+    return DETAIL_HTML.replace("<td>2026-08-20</td>", f"<td>{value}</td>")
+
+
+def test_korean_single_digit_detail_date_matches_list_date():
+    """1. 목록 2026-08-20 ↔ 상세 '2026년 8월 20일' 은 같은 날이다."""
+    sc = _scraper(_Fetcher(html=_with_reply_date("2026년 8월 20일")))
+    post = _post(_detail(), date="2026-08-20")
+    sc.enrich(post)
+    assert "[회답]" in post.body
+
+
+def test_korean_single_digit_list_date_matches_detail_date():
+    """2. 반대 방향(목록이 한국어 표기)도 같다."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML))          # 상세는 2026-08-20
+    post = _post(_detail(), date="2026년 8월 20일")
+    sc.enrich(post)
+    assert "[회답]" in post.body
+
+
+def test_single_digit_month_and_day_canonicalize_equally():
+    """3. '2026-8-2' 와 '2026년 8월 2일' 은 같은 canonical date."""
+    sc = _scraper(_Fetcher(html=_with_reply_date("2026년 8월 2일")))
+    post = _post(_detail(), date="2026-8-2")
+    sc.enrich(post)
+    assert "[회답]" in post.body
+
+
+def test_date_parser_canonical_forms():
+    """지원 표기가 모두 같은 canonical 값이 되고, 달력에 없는 값은 거부된다."""
+    from src.scrapers.better_fsc import _parse_date
+
+    for text in (
+        "2026-08-20", "2026-8-20", "2026.08.20", "2026.8.20",
+        "2026/08/20", "2026/8/20", "2026년 08월 20일", "2026년 8월 20일", "20260820",
+    ):
+        assert _parse_date(text) == "20260820", text
+    for bad in ("2026-02-29", "2026-13-01", "2026-00-10", "2026-04-31"):
+        assert _parse_date(bad) == "", bad
+    # 주변 숫자를 날짜로 오인하지 않는다.
+    for bad in ("제2026-15호", "2026-08-2012", "20268 20", ""):
+        assert _parse_date(bad) == "", bad
+
+
+def test_invalid_detail_date_is_rejected_not_skipped(caplog):
+    """4/5. 상세 날짜가 달력에 없으면 '검사 생략'이 아니라 reject."""
+    fetcher = _Fetcher(html=_with_reply_date("2026-02-29"))
+    sc = _scraper(fetcher)
+    post = _post(_detail(), date="2026-08-20")
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert "동일 게시물 확인 불가" in caplog.text
+
+
+def test_unparsable_list_date_is_rejected_not_skipped(caplog):
+    """5. 목록 날짜가 해석 불가면 조용히 날짜 검사를 건너뛰지 않는다."""
+    fetcher = _Fetcher(html=DETAIL_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail(), date="언젠가")
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert "해석할 수 없어" in caplog.text
+
+
+def test_empty_list_date_keeps_existing_skip_policy():
+    """목록 날짜가 아예 빈 legacy 케이스는 기존대로 날짜 대조를 건너뛴다."""
+    sc = _scraper(_Fetcher(html=DETAIL_HTML))
+    post = _post(_detail(), date="")
+    sc.enrich(post)
+    assert "[회답]" in post.body        # 제목 대조만으로 통과(기존 정책 유지)
+
+
+# --- REVIEW 3: 번호 매김 라벨 ---
+NUMBERED_HEADING_HTML = """
+<div id="content">
+  <h2>겸영업무 해당 여부</h2>
+  <table><tbody><tr><th>회신일</th><td>2026-08-20</td></tr></tbody></table>
+  <div class="view">
+    <h4>(1) 질의요지</h4>
+    <p>겸영업무 신고 대상인지 여부를 질의함.</p>
+    <h4>2) 회답</h4>
+    <p>신고 대상에 해당하지 않습니다.</p>
+    <h4>3. 이유</h4>
+    <p>은행법 제28조에 따릅니다.</p>
+  </div>
+</div>
+"""
+
+
+def test_norm_label_strips_numbering_prefixes():
+    from src.scrapers.better_fsc import _norm_label
+
+    assert _norm_label("(1) 질의요지") == "질의요지"
+    assert _norm_label("1) 회답") == "회답"
+    assert _norm_label("2. 이유") == "이유"
+    assert _norm_label("1: 질의요지") == "질의요지"
+    # 기존 장식 처리는 그대로
+    assert _norm_label("□ 질의요지") == "질의요지"
+    assert _norm_label("[회답]") == "회답"
+    assert _norm_label("● 회답") == "회답"
+    assert _norm_label("질의 요지") == "질의요지"
+    # 정상 라벨의 글자를 삼키지 않는다
+    assert _norm_label("1차 회답") == "1차회답"
+
+
+def test_numbered_headings_are_parsed_end_to_end(caplog):
+    """번호가 붙은 heading 세 개가 production 경로에서 모두 잡힌다."""
+    sc = _scraper(_Fetcher(html=NUMBERED_HEADING_HTML))
+    post = _post(_detail())
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert "[질의요지]\n겸영업무 신고 대상인지 여부를 질의함." in post.body
+    assert "[회답]\n신고 대상에 해당하지 않습니다." in post.body
+    assert "[이유]\n은행법 제28조에 따릅니다." in post.body
+    assert "찾지 못해" not in caplog.text          # missing warning 없음
 
 
 # --- 상세 수집 성공 판정(enrich_succeeded) ---

@@ -19,9 +19,12 @@
      (공개된 일반 비조치의견서 URL 에서는 muNo=86 도 쓰인다).
 
 그래서 상세 응답을 받으면 본문·첨부를 붙이기 **전에** 목록 record 와 같은 글인지
-확인한다(_identity_ok — 제목·회신일·구분↔endpoint). 확인되지 않으면 아무것도 붙이지
-않고 제목·링크만 통지한다. 잘못된 회답을 다른 제목 밑에 보내는 것이 본문이 비는 것보다
-훨씬 나쁘기 때문에 fail-open 하지 않는다.
+확인한다(_identity_ok — 구분↔endpoint, 정식 제목 일치, 회신일 일치). 제목은 페이지
+전체 텍스트에서 찾지 않고 '제목이 놓인 자리'(_detail_title)에서만 읽어 정확히 같은지
+본다 — 잘못된 상세 B 의 이전글/다음글·푸터에 A 의 제목이 있어도 통과하면 안 되기
+때문이다. 확인되지 않으면 아무것도 붙이지 않고(첨부 수집·다운로드도 하지 않고) 제목·
+링크만 통지한다. 잘못된 회답을 다른 제목 밑에 보내는 것이 본문이 비는 것보다 훨씬
+나쁘기 때문에 fail-open 하지 않는다.
 
 상세 페이지에서는 질의요지·회답·이유를 뽑아 post.body 에 담는다. **세 항목이 모두
 있을 때만** 담는다 — 회답이 빠진 질의만으로 3줄 요약을 만들면 결론을 지어낸 요약이
@@ -41,6 +44,7 @@ import json
 import logging
 import re
 from collections.abc import Iterator
+from datetime import date
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -76,6 +80,18 @@ _FILE_TO_GUBUN = {f.lower(): g for g, (f, _) in _DETAIL_ENDPOINTS.items()}
 # 붙은 값만 본다(_reply_date).
 _REPLY_DATE_LABELS = ("회신일", "회신일자")
 
+# 상세의 '정식 제목' 이 라벨-값으로 노출될 때 쓰는 라벨.
+_TITLE_LABELS = ("제목",)
+
+# 상세 상단에 필드명으로 등장하는 것으로 외부에서 확인된 라벨들. 제목 heading 후보에서
+# 걸러내는 용도로만 쓴다(있으면 제외, 없어도 무방 — 잘못 포함해도 fail-closed 방향).
+_FIELD_LABELS = frozenset(
+    _BODY_LABELS + _REPLY_DATE_LABELS + _TITLE_LABELS + ("처리구분", "소관부서", "첨부파일")
+)
+
+# 제목이 heading 으로만 노출될 때 후보로 볼 태그.
+_TITLE_HEADING_TAGS = ("h1", "h2", "h3", "h4")
+
 # 라벨이 담길 만한 요소. 라벨 헤딩을 찾을 때 훑는 범위이며, 이 밖의 태그는 보지 않는다.
 _LABEL_HOST_TAGS = (
     "h2", "h3", "h4", "h5", "h6", "strong", "b", "p", "span", "div", "li", "dt", "th"
@@ -104,18 +120,32 @@ _ERROR_MARKERS = (
 )
 
 _WS_ALL = re.compile(r"\s+")
-# 라벨 앞뒤의 번호·불릿·괄호·구분기호. '□ 질의요지', '[회답]', '2. 이유' 를 모두 같은
-# 라벨로 보기 위한 정리용이다.
-_LABEL_LEAD = re.compile(r"^[\[\(<{【《〔◇□■○●▶▷▣※◎·•*\-–—.,0-9]+")
+# 번호 매김 접두어를 **토큰 하나로** 먼저 걷어낸다: '(1)', '1)', '1.', '1:'.
+# 문자 클래스로만 처리하면 '(1)질의요지' 에서 '(' 와 '1' 만 지워지고 ')' 가 남아
+# ')질의요지' 가 되어 라벨 매칭이 통째로 깨진다(닫는 괄호는 문자열 끝이 아니라
+# 라벨 앞에 있으므로 _LABEL_TAIL 도 잡지 못한다).
+# 숫자 뒤에 구분기호가 반드시 있어야 하므로 '1차 회답' 같은 정상 라벨은 건드리지 않는다.
+_NUMBERING_PREFIX = re.compile(r"^\(\d{1,2}\)|^\d{1,2}[.):：]")
+# 남은 불릿·괄호 장식. '□ 질의요지', '[회답]', '● 회답' 을 같은 라벨로 보기 위한 정리용.
+# 숫자는 넣지 않는다 — 번호는 위에서 토큰으로 처리하므로, 여기에 두면 '1차 회답' 같은
+# 정상 라벨의 첫 글자까지 삼킨다.
+_LABEL_LEAD = re.compile(r"^[\[\(<{【《〔◇□■○●▶▷▣※◎·•*\-–—.,]+")
 _LABEL_TAIL = re.compile(r"[\]\)>}】》〕:：.,·]+$")
 # 첨부 앵커 텍스트 뒤에 붙는 크기 표기('(42 KB)').
 _SIZE_SUFFIX = re.compile(r"\s*[\(\[]\s*[\d.,]+\s*[KMG]?B\s*[\)\]]\s*$", re.IGNORECASE)
 
 
 def _norm_label(text: str) -> str:
-    """라벨 정규화 — 공백·번호·불릿·괄호를 걷어내 정확 비교할 수 있게 만든다."""
+    """라벨 정규화 — 공백·번호·불릿·괄호를 걷어내 정확 비교할 수 있게 만든다.
+
+    순서가 중요하다: 공백 제거 → 번호 매김 접두어(토큰 단위) → 불릿·괄호 장식 → 꼬리.
+    번호를 문자 단위로 먼저 지우면 '(1) 질의요지' 의 닫는 괄호가 남는다.
+    장식과 번호가 겹쳐 붙는 '□ 1. 질의요지' 까지 받도록 두 단계를 한 번 더 돌린다.
+    """
     s = _WS_ALL.sub("", text or "")
-    s = _LABEL_LEAD.sub("", s)
+    for _ in range(2):
+        s = _NUMBERING_PREFIX.sub("", s)
+        s = _LABEL_LEAD.sub("", s)
     return _LABEL_TAIL.sub("", s)
 
 
@@ -129,13 +159,38 @@ def _norm_ws(text: str) -> str:
     return _WS_ALL.sub(" ", text or "").strip()
 
 
-def _date_digits(text: str) -> str:
-    """날짜 문자열에서 YYYYMMDD 8자리만. 못 읽으면 빈 문자열.
+# 날짜 표기. 값 **전체**가 날짜일 때만 인정한다(fullmatch) — 주변 숫자가 날짜에
+# 섞여 들어가면 동일 게시물 판정이 무의미해진다.
+_DATE_FORMATS = (
+    re.compile(r"(\d{4})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})\.?"),
+    re.compile(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?"),
+    re.compile(r"(\d{4})(\d{2})(\d{2})"),
+)
 
-    '2026-08-20' / '2026.08.20' / '2026년 8월 20일' 같은 표기 차이를 흡수한다.
+
+def _parse_date(text: str) -> str:
+    """날짜 문자열을 canonical 'YYYYMMDD' 로. 해석 못 하면 빈 문자열.
+
+    연·월·일을 **각각** 읽어 zero-pad 한다. 숫자만 이어붙여 앞 8자리를 자르는 방식은
+    '2026년 8월 20일'(→ 2026820, 7자리)을 통째로 놓치고, 그 결과 정상 상세를 '회신일
+    없음'으로 오판하거나(거짓 reject) 목록·상세가 모두 그 형식이면 날짜 대조가 조용히
+    생략된다. 자릿수만으로는 월/일 경계를 알 수 없어 zfill 로도 고칠 수 없다.
+
+    달력에 없는 값(2026-02-29, 2026-13-01, 2026-04-31 …)은 정상 날짜로 인정하지 않는다.
     """
-    digits = re.sub(r"\D", "", text or "")
-    return digits[:8] if len(digits) >= 8 else ""
+    s = _norm_ws(text)
+    if not s:
+        return ""
+    for pattern in _DATE_FORMATS:
+        m = pattern.fullmatch(s)
+        if not m:
+            continue
+        year, month, day = (int(g) for g in m.groups())
+        try:
+            return date(year, month, day).strftime("%Y%m%d")
+        except ValueError:
+            return ""   # 형식은 맞지만 달력에 없는 날 — 다른 형식으로 재해석하지 않는다
+    return ""
 
 
 class BetterReplyScraper(BaseScraper):
@@ -346,16 +401,33 @@ class BetterReplyScraper(BaseScraper):
         if not title:
             return False
 
-        page_text = _norm_ws(soup.get_text(" "))
-        if _norm_ws(title) not in page_text:
+        detail_title = self._detail_title(soup)
+        if not detail_title:
             log.warning(
-                "[%s] 상세에 목록 제목이 없음 — 다른 게시물일 수 있어 건너뜁니다: %s (%s)",
-                self.key, title, post.url,
+                "[%s] 상세의 정식 제목을 확인할 수 없어 동일 게시물 대조 불가 — "
+                "건너뜁니다: %s",
+                self.key, post.url,
+            )
+            return False
+        if _norm_ws(detail_title) != _norm_ws(title):
+            log.warning(
+                "[%s] 상세 제목이 목록과 다름(상세 %r ↔ 목록 %r) — 다른 게시물이므로 "
+                "건너뜁니다: %s",
+                self.key, detail_title, title, post.url,
             )
             return False
 
-        want = _date_digits(post.date)
-        if want:
+        raw_date = clean_text(post.date)
+        if raw_date:
+            want = _parse_date(raw_date)
+            if not want:
+                # 목록 날짜가 있는데 해석하지 못했다 = 검사 생략이 아니라 확인 불가.
+                log.warning(
+                    "[%s] 목록 회신일(%r)을 해석할 수 없어 동일 게시물 확인 불가 — "
+                    "건너뜁니다: %s",
+                    self.key, post.date, post.url,
+                )
+                return False
             got = self._reply_date(soup)
             if not got:
                 log.warning(
@@ -373,27 +445,76 @@ class BetterReplyScraper(BaseScraper):
         return True
 
     @classmethod
-    def _reply_date(cls, soup: BeautifulSoup) -> str:
-        """회신일 라벨이 붙은 값을 읽어 YYYYMMDD 로. 없으면 빈 문자열.
+    def _detail_title(cls, soup: BeautifulSoup) -> str:
+        """상세 페이지의 '정식 게시물 제목'. 신뢰할 수 없으면 빈 문자열.
 
-        페이지 전체에서 날짜를 긁지 않는다 — 푸터·본문에 우연히 있는 날짜가 통과하면
-        검증이 무의미해진다. 본문 추출과 같은 두 배치만 본다: 구조적 라벨-값 짝(th/td,
-        dt+dd)을 먼저 보고, 없으면 라벨만 든 요소의 바로 다음 형제를 본다.
+        페이지 전체 텍스트에서 목록 제목을 찾는 방식은 쓰지 않는다 — 잘못된 상세 B 가
+        와도 그 페이지의 이전글/다음글 링크·관련글·푸터에 A 의 제목이 있으면 통과해
+        버리고, 회신일까지 같으면 B 의 회답·첨부가 A 밑에 실린다. 그것을 막는 것이 이
+        가드의 목적이므로 '제목이 놓인 자리'로 범위를 좁힌다.
+
+        순서:
+          1) '제목' 라벨이 붙은 값(회신일과 같은 구조적 라벨-값 메커니즘).
+          2) 본문(질의요지) 앞에 오는 heading 중 필드 라벨이 아니고 링크·내비게이션·
+             푸터에 속하지 않는 것. **후보 텍스트가 정확히 한 가지일 때만** 인정한다 —
+             여럿이면 어느 것이 제목인지 알 수 없으므로 판단하지 않는다.
+          3) 그 밖에는 빈 문자열(호출자가 fail-closed 처리).
+
+        라이브 raw HTML 을 확인할 수 없으므로 클래스 이름(.board-title 등)은 쓰지
+        않는다. 위 두 경로 모두 문서 구조만 본다.
+        """
+        for value in cls._labelled_values(soup, _TITLE_LABELS):
+            return value
+        return cls._heading_title(soup)
+
+    @classmethod
+    def _heading_title(cls, soup: BeautifulSoup) -> str:
+        """본문 앞 heading 에서 제목을 고른다. 후보가 여럿이면 빈 문자열(판단 보류)."""
+        candidates: list[str] = []
+        # 문서 순서로 훑다가 첫 본문 라벨을 만나면 멈춘다 — 제목은 본문보다 앞에 있다.
+        for el in soup.find_all(list(_LABEL_HOST_TAGS) + ["h1"]):
+            if _norm_label(el.get_text(" ")) in _BODY_LABELS:
+                break
+            if el.name not in _TITLE_HEADING_TAGS:
+                continue
+            if cls._is_boundary(el) or cls._inside_boundary(el):
+                continue        # 내비게이션·푸터·링크 안의 heading 은 제목이 아니다
+            text = _norm_ws(el.get_text(" "))
+            if not text or _norm_label(text) in _FIELD_LABELS:
+                continue
+            candidates.append(text)
+        unique = set(candidates)
+        return candidates[0] if len(unique) == 1 else ""
+
+    @classmethod
+    def _labelled_values(cls, soup: BeautifulSoup, labels) -> Iterator[str]:
+        """라벨이 붙은 값 후보. 구조적 짝(th/td, dt+dd)을 먼저 보고, 없으면 라벨만 든
+        요소의 바로 다음 형제를 본다. 페이지 전체를 훑지 않는다.
         """
         for label, value in cls._label_pairs(soup):
-            if _norm_label(label) in _REPLY_DATE_LABELS:
-                digits = _date_digits(value)
-                if digits:
-                    return digits
+            if _norm_label(label) in labels and value:
+                yield value
         for el in soup.find_all(list(_LABEL_HOST_TAGS)):
-            if _norm_label(el.get_text(" ")) not in _REPLY_DATE_LABELS:
+            if _norm_label(el.get_text(" ")) not in labels:
                 continue
             sib = el.find_next_sibling()
             if sib is None:
                 continue
-            digits = _date_digits(clean_text(sib.get_text(" ")))
-            if digits:
-                return digits
+            text = clean_text(sib.get_text(" "))
+            if text:
+                yield text
+
+    @classmethod
+    def _reply_date(cls, soup: BeautifulSoup) -> str:
+        """회신일 라벨이 붙은 값을 canonical YYYYMMDD 로. 없거나 못 읽으면 빈 문자열.
+
+        페이지 전체에서 날짜를 긁지 않는다 — 푸터·본문에 우연히 있는 날짜가 통과하면
+        검증이 무의미해진다.
+        """
+        for value in cls._labelled_values(soup, _REPLY_DATE_LABELS):
+            parsed = _parse_date(value)
+            if parsed:
+                return parsed
         return ""
 
     @staticmethod
@@ -474,6 +595,11 @@ class BetterReplyScraper(BaseScraper):
     def _is_boundary(el) -> bool:
         """이 형제부터는 본문이 아니라 조작·내비게이션 영역인지."""
         return el.name in _BOUNDARY_TAGS or el.find(list(_BOUNDARY_TAGS)) is not None
+
+    @staticmethod
+    def _inside_boundary(el) -> bool:
+        """조작·내비게이션 영역(링크·nav·footer 등) '안' 에 있는 요소인지."""
+        return any(p.name in _BOUNDARY_TAGS for p in el.parents if p.name)
 
     # --- 첨부 ---
     def _collect_attachments(self, soup: BeautifulSoup, post: Post) -> None:
