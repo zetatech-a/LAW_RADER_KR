@@ -193,6 +193,21 @@ def test_other_source_with_no_detail_still_ok_but_flagged():
 class _MixedScraper(_Scraper):
     """상세 수집 대상과 비대상이 섞인 소스(회신사례)를 흉내낸다."""
 
+    SUPPORTS_PAGINATION = True
+
+    def __init__(self, key, posts, enrich=None, list_error=None, page2=None):
+        super().__init__(key, posts, enrich, list_error)
+        self._page2 = page2 or []
+
+    @property
+    def paginates(self):
+        return True
+
+    def fetch_list(self, limit, page=1):
+        if page == 1:
+            return super().fetch_list(limit, page)
+        return list(self._page2)
+
     def supports_enrich(self, post):
         return "Detail.do" in post.url
 
@@ -204,33 +219,124 @@ def _reply_post(url):
 
 _LIST = "https://better.fsc.go.kr/fsc_new/replyCase/TotalReplyList.do?stNo=11"
 _DETAIL = "https://better.fsc.go.kr/fsc_new/replyCase/LawreqDetail.do?lawreqIdx=1"
+_OPINION = "https://better.fsc.go.kr/fsc_new/replyCase/OpinionDetail.do?opinionIdx=2"
+
+_FULL_BODY = "[질의요지]\n질의\n\n[회답]\n회답\n\n[이유]\n이유"
 
 
-def _run_mixed(posts, enrich=None):
-    sc = _MixedScraper("better_reply", posts, enrich)
+def _run_mixed(posts, enrich=None, page2=None):
+    sc = _MixedScraper("better_reply", posts, enrich, page2=page2)
     return verify_source(sc, 30, True)[0]
 
 
-def test_reply_picks_supported_post_as_detail_sample():
-    """첫 글이 미지원 유형이어도 지원 유형을 찾아 상세 파서를 검증한다."""
-    enriched = []
+def _fill(urls_ok, enriched=None):
+    """지정한 URL 의 글만 완전한 본문을 채우는 enrich(나머지는 본문 없음)."""
 
     def _enrich(p):
-        enriched.append(p.url)
-        p.body = "[질의요지]\n질의\n\n[회답]\n회답\n\n[이유]\n이유"
+        if enriched is not None:
+            enriched.append(p.url)
+        if p.url in urls_ok:
+            p.body = _FULL_BODY
 
-    r = _run_mixed([_reply_post(_LIST), _reply_post(_DETAIL)], _enrich)
-    assert enriched == [_DETAIL]          # 목록 URL 글이 아니라 상세 글을 표본으로
+    return _enrich
+
+
+# --- endpoint 유형별 독립 검증 (Lawreq / Opinion) ---
+def test_reply_verifies_both_endpoint_types():
+    """A. 미지원 글이 앞에 있어도 두 endpoint 를 각각 한 건씩 검증한다."""
+    enriched = []
+    r = _run_mixed(
+        [_reply_post(_LIST), _reply_post(_DETAIL), _reply_post(_OPINION)],
+        _fill({_DETAIL, _OPINION}, enriched),
+    )
+    assert sorted(enriched) == sorted([_DETAIL, _OPINION])   # 둘 다 실제로 enrich
     assert r["status"] == OK
     assert r["detail_ok"] is True
 
 
-def test_reply_without_supported_sample_is_partial():
-    """지원 유형이 하나도 없으면 정상 성공으로 가장하지 않는다."""
+def test_reply_endpoint_verification_is_order_independent():
+    """B. 목록 순서가 반대여도 두 유형 모두 검증한다."""
+    enriched = []
+    r = _run_mixed(
+        [_reply_post(_OPINION), _reply_post(_DETAIL)],
+        _fill({_DETAIL, _OPINION}, enriched),
+    )
+    assert sorted(enriched) == sorted([_DETAIL, _OPINION])
+    assert r["status"] == OK
+
+
+def test_reply_opinion_failure_is_partial():
+    """C. 법령해석만 성공하고 비조치의견서가 실패하면 초록불이 아니다."""
+    r = _run_mixed([_reply_post(_DETAIL), _reply_post(_OPINION)], _fill({_DETAIL}))
+    assert r["status"] == PARTIAL
+    assert r["detail_ok"] is False
+    assert "비조치의견서" in r["detail"]
+
+
+def test_reply_lawreq_failure_is_partial():
+    """D. 반대로 비조치의견서만 성공해도 부분 실패다."""
+    r = _run_mixed([_reply_post(_DETAIL), _reply_post(_OPINION)], _fill({_OPINION}))
+    assert r["status"] == PARTIAL
+    assert r["detail_ok"] is False
+    assert "법령해석" in r["detail"]
+
+
+def test_reply_both_endpoints_ok_is_green():
+    """E. 둘 다 완전한 본문이어야 전체 성공."""
+    r = _run_mixed([_reply_post(_DETAIL), _reply_post(_OPINION)], _fill({_DETAIL, _OPINION}))
+    assert r["status"] == OK
+    assert r["detail_ok"] is True and r["enrich_ok"] is True
+
+
+def test_reply_missing_opinion_sample_is_partial():
+    """F. 비조치의견서 표본이 없으면 '성공'이 아니라 '검증하지 못함'."""
+    r = _run_mixed([_reply_post(_DETAIL)], _fill({_DETAIL}))
+    assert r["status"] == PARTIAL
+    assert r["detail_ok"] is False
+    assert "비조치의견서 / opiniondetail.do: 표본 없음" in r["enrich"]
+    assert "법령해석 / lawreqdetail.do" in r["enrich"]
+
+
+def test_reply_missing_lawreq_sample_is_partial():
+    """G. 반대 방향도 같다."""
+    r = _run_mixed([_reply_post(_OPINION)], _fill({_OPINION}))
+    assert r["status"] == PARTIAL
+    assert "법령해석 / lawreqdetail.do: 표본 없음" in r["enrich"]
+
+
+def test_reply_reuses_page2_as_sample_pool():
+    """H. 1페이지에 한 유형만 있어도, 이미 받아 둔 2페이지를 표본으로 재사용한다."""
+    enriched = []
+    r = _run_mixed(
+        [_reply_post(_DETAIL)],
+        _fill({_DETAIL, _OPINION}, enriched),
+        page2=[_reply_post(_OPINION)],
+    )
+    assert sorted(enriched) == sorted([_DETAIL, _OPINION])
+    assert r["status"] == OK
+
+
+def test_reply_unsupported_type_is_not_counted_as_sample():
+    """I. 미지원 구분은 endpoint 표본으로 세지 않는다."""
     r = _run_mixed([_reply_post(_LIST), _reply_post(_LIST + "&x=2")])
     assert r["status"] == PARTIAL
     assert r["enrich_ok"] is False
-    assert "상세 검증 표본 없음" in r["enrich"]
+    assert "법령해석 / lawreqdetail.do: 표본 없음" in r["enrich"]
+    assert "비조치의견서 / opiniondetail.do: 표본 없음" in r["enrich"]
+
+
+def test_reply_identity_reject_is_reported_as_failure():
+    """enrich 가 링크를 목록으로 되돌렸다 = 동일 게시물 확인 실패."""
+
+    def _enrich(p):
+        if p.url == _OPINION:
+            p.url = _LIST          # 스크래퍼의 identity fallback 을 흉내
+        else:
+            p.body = _FULL_BODY
+
+    r = _run_mixed([_reply_post(_DETAIL), _reply_post(_OPINION)], _enrich)
+    assert r["status"] == PARTIAL
+    assert "동일 게시물 확인 실패" in r["enrich"]
 
 
 def test_reply_attachment_only_is_not_enrich_ok():
@@ -243,7 +349,7 @@ def test_reply_attachment_only_is_not_enrich_ok():
     def _enrich(p):
         p.attachments.append(Attachment(filename="회신문.hwp", url="https://x/f"))
 
-    sc = _ContractScraper("better_reply", [_reply_post(_DETAIL)], _enrich)
+    sc = _ContractScraper("better_reply", [_reply_post(_DETAIL), _reply_post(_OPINION)], _enrich)
     r = verify_source(sc, 30, True)[0]
     assert r["enrich_ok"] is False        # 첨부만으로는 성공이 아니다
     assert r["status"] == PARTIAL         # 본문 표식도 없으므로 부분 실패

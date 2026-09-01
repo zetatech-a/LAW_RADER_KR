@@ -99,17 +99,26 @@ _LABEL_HOST_TAGS = (
     "h2", "h3", "h4", "h5", "h6", "strong", "b", "p", "span", "div", "li", "dt", "th"
 )
 
-# heading 폴백에서 본문 수집을 멈출 경계 태그.
+# heading 폴백에서 본문 수집을 멈출 경계.
 #
 # 실제 상세는 표 구조라 이 폴백은 보조 경로다. 그런데 마지막 항목('이유') 뒤에는 다음
-# 라벨이 없어서, 같은 부모 아래 이어지는 첨부 목록·목록/이전글/다음글 버튼·URL 복사·
-# 푸터가 통째로 '이유' 본문에 붙어 Gemini 에 법률적 이유로 전달된다. 그래서 fail-closed
-# 로 끊는다 — 링크·폼·버튼·내비게이션/푸터가 들어 있는 형제를 만나면 그 앞에서 멈춘다.
-# (회신문의 이유 서술에는 하이퍼링크·입력요소가 들어가지 않는다. 반면 뒤따르는 조작
-#  영역은 예외 없이 링크나 버튼이다.) 클래스 이름은 추측하지 않는다.
-_BOUNDARY_TAGS = (
-    "a", "nav", "footer", "header", "form", "button", "input", "select", "textarea", "hr"
+# 라벨이 없어서, 같은 부모 아래 이어지는 첨부 목록·목록/이전글/다음글 버튼·푸터가
+# 통째로 '이유' 본문에 붙어 Gemini 에 법률적 이유로 전달된다. 그래서 fail-closed 로
+# 끊되, **본문 문단 안의 인라인 링크는 경계가 아니다** — 회신문의 이유에는
+# '은행법 <a>제28조</a>에 따릅니다' 처럼 법령 링크가 흔한데, 링크가 있다는 이유만으로
+# 문단을 끊으면 정상 법률 본문을 통째로 잘라내 불완전한 이유를 요약하게 된다.
+#
+# 그래서 판정을 둘로 나눈다(클래스 이름은 추측하지 않는다 — 태그와 링크 경로만 본다).
+#   1) hard 경계: 이 태그가 자신이거나 자손에 있으면 그 자리부터 본문이 아니다.
+_HARD_BOUNDARY_TAGS = (
+    "nav", "footer", "header", "form", "button", "input", "select", "textarea", "hr"
 )
+#   2) 링크는 따로 판정한다 — _is_boundary 참고(홀로 놓인 앵커 / 공식 첨부 링크 /
+#      앵커 밖에 실질 텍스트가 없는 링크 전용 블록만 경계).
+# 조상에 있으면 본문·제목이 아닌 태그(링크 안의 텍스트는 조작 요소다).
+_BOUNDARY_ANCESTOR_TAGS = _HARD_BOUNDARY_TAGS + ("a",)
+# 링크 전용 블록 판정용 — 앵커 밖에 이만 남으면 실질 텍스트가 없는 것으로 본다.
+_SEPARATOR_ONLY = re.compile(r"^[\s|/·ㆍ,;:.\-–—<>«»\[\]()]*$")
 
 # 포털의 공식 첨부 다운로드 경로(이 계열만 내려받는다).
 _FILE_PATH = "/file/displayfile.do"
@@ -135,6 +144,13 @@ _LABEL_LEAD = re.compile(r"^[\[\(<{【《〔◇□■○●▶▷▣※◎·•*
 _LABEL_TAIL = re.compile(r"[\]\)>}】》〕:：.,·]+$")
 # 첨부 앵커 텍스트 뒤에 붙는 크기 표기('(42 KB)').
 _SIZE_SUFFIX = re.compile(r"\s*[\(\[]\s*[\d.,]+\s*[KMG]?B\s*[\)\]]\s*$", re.IGNORECASE)
+
+# 파일명이 아니라 UI 라벨일 뿐인 앵커 텍스트. 공백을 지운 뒤 **정확히 일치**할 때만
+# 라벨로 본다('다운' 부분일치 같은 넓은 규칙은 정상 파일명을 삼킨다).
+_GENERIC_LINK_LABELS = frozenset({"다운로드", "첨부파일", "파일다운로드", "첨부"})
+
+# 공식 다운로드 URL 이 원본 파일명을 싣는 쿼리 파라미터(외부에서 관찰된 사실).
+_ORG_FILENAME_PARAM = "orgFileName"
 
 
 def _norm_label(text: str) -> str:
@@ -595,7 +611,8 @@ class BetterReplyScraper(BaseScraper):
 
         경계는 두 가지다: 다음 본문 라벨, 그리고 조작·내비게이션 영역(_is_boundary).
         마지막 항목('이유')에는 뒤따르는 라벨이 없으므로 후자가 없으면 첨부 목록·
-        목록/이전글 버튼·푸터까지 법률적 '이유' 본문으로 끌려 들어간다.
+        목록/이전글 버튼·푸터까지 법률적 '이유' 본문으로 끌려 들어간다. 반대로 본문
+        문단 안의 인라인 링크(법령 링크 등)는 경계가 아니다 — _is_boundary 참고.
         """
         for el in soup.find_all(list(_LABEL_HOST_TAGS)):
             key = _norm_label(el.get_text(" "))
@@ -619,15 +636,50 @@ class BetterReplyScraper(BaseScraper):
             if body:
                 yield key, body
 
+    @classmethod
+    def _is_boundary(cls, el) -> bool:
+        """이 형제부터는 본문이 아니라 조작·내비게이션 영역인지.
+
+        **본문 문단 안의 인라인 링크는 경계가 아니다.** '자손에 <a> 가 있으면 경계'로
+        보면 '은행법 <a>제28조</a>에 따릅니다' 같은 정상 문단이 통째로 잘려 나간다.
+        링크가 경계가 되는 것은 아래 세 가지 — 모두 구조로 판정한다.
+        """
+        if el.name in _HARD_BOUNDARY_TAGS or el.find(list(_HARD_BOUNDARY_TAGS)) is not None:
+            return True
+        if el.name == "a":
+            return True                       # 형제 자리에 홀로 놓인 링크 = 조작 요소
+        if cls._has_attachment_link(el):
+            return True                       # 공식 첨부 다운로드 블록
+        return cls._link_only_block(el)       # 목록/이전글/다음글 같은 링크 전용 블록
+
     @staticmethod
-    def _is_boundary(el) -> bool:
-        """이 형제부터는 본문이 아니라 조작·내비게이션 영역인지."""
-        return el.name in _BOUNDARY_TAGS or el.find(list(_BOUNDARY_TAGS)) is not None
+    def _has_attachment_link(el) -> bool:
+        """공식 첨부 다운로드(/file/displayFile.do) 링크를 품은 블록인지."""
+        return any(
+            urlparse(a["href"]).path.lower().endswith(_FILE_PATH)
+            for a in el.find_all("a", href=True)
+        )
+
+    @staticmethod
+    def _link_only_block(el) -> bool:
+        """링크만으로 이뤄진 조작 블록인지(목록·이전글·다음글 등).
+
+        앵커 **밖에** 실질 텍스트가 있으면 본문 문단이다. 구분기호만 남는 경우에만
+        조작 블록으로 본다 — 문단 안 인라인 링크와 갈라내는 기준이다.
+        """
+        if el.find("a") is None:
+            return False
+        for node in el.find_all(string=True):
+            if node.find_parent("a") is not None:
+                continue
+            if not _SEPARATOR_ONLY.match(str(node)):
+                return False
+        return True
 
     @staticmethod
     def _inside_boundary(el) -> bool:
         """조작·내비게이션 영역(링크·nav·footer 등) '안' 에 있는 요소인지."""
-        return any(p.name in _BOUNDARY_TAGS for p in el.parents if p.name)
+        return any(p.name in _BOUNDARY_ANCESTOR_TAGS for p in el.parents if p.name)
 
     # --- 첨부 ---
     def _collect_attachments(self, soup: BeautifulSoup, post: Post) -> None:
@@ -649,14 +701,31 @@ class BetterReplyScraper(BaseScraper):
                 continue
             seen.add(url)
             post.attachments.append(
-                Attachment(filename=self._filename(anchor), url=url)
+                Attachment(filename=self._filename(anchor, url), url=url)
             )
 
-    @staticmethod
-    def _filename(anchor) -> str:
-        """앵커가 제공하는 정보에서 파일명을 뽑는다(크기 표기 '(42 KB)' 는 제거)."""
+    @classmethod
+    def _filename(cls, anchor, url: str) -> str:
+        """첨부 파일명. 크기 표기('(42 KB)')는 제거한다.
+
+        앵커 텍스트가 '다운로드' 같은 UI 라벨이면 그것을 파일명으로 쓰지 않는다 —
+        원본 이름과 확장자를 잃고, 첨부가 여럿이면 전부 같은 이름이 되어 메일에서
+        구분할 수 없다. 그런 경우 공식 다운로드 URL 의 orgFileName 을 쓴다.
+        """
         for raw in (anchor.get_text(" "), anchor.get("title") or "", anchor.get("download") or ""):
             name = _SIZE_SUFFIX.sub("", clean_text(raw)).strip()
-            if name:
+            if name and _WS_ALL.sub("", name) not in _GENERIC_LINK_LABELS:
                 return name
-        return "첨부파일"
+        return cls._org_filename(url) or "첨부파일"
+
+    @staticmethod
+    def _org_filename(url: str) -> str:
+        """공식 다운로드 URL 의 orgFileName 에서 원본 파일명을 읽는다. 없으면 빈 문자열.
+
+        parse_qs 가 percent 인코딩과 '+' 공백을 함께 풀어 주므로 따로 unquote 하지
+        않는다. 외부 문자열이므로 개행을 지우고 경로 조각을 떼어 파일명만 남긴다.
+        """
+        values = parse_qs(urlparse(url).query).get(_ORG_FILENAME_PARAM) or []
+        raw = (values[-1] if values else "").replace("\r", " ").replace("\n", " ")
+        name = clean_text(raw).replace("\\", "/").rsplit("/", 1)[-1].strip()
+        return _SIZE_SUFFIX.sub("", name).strip()

@@ -688,6 +688,193 @@ def test_identity_tolerates_harmless_whitespace_differences():
     assert "[회답]" in post.body
 
 
+# --- 본문 문단 안의 인라인 링크는 경계가 아니다 ---
+#
+# 회신문의 '이유'에는 '은행법 <a>제28조</a>에 따릅니다' 처럼 법령 링크가 흔하다.
+# 링크가 있다는 이유만으로 문단을 끊으면 정상 법률 본문이 통째로 잘려 Gemini 가
+# 불완전한 이유를 요약한다. 반면 목록/이전글 같은 링크 전용 블록과 공식 첨부 컨트롤은
+# 여전히 경계여야 한다.
+
+INLINE_LINK_HTML = """
+<div id="content">
+  <h2>겸영업무 해당 여부</h2>
+  <table><tbody><tr><th>회신일</th><td>2026-08-20</td></tr></tbody></table>
+  <div class="view">
+    <h4>질의요지</h4>
+    <p>겸영업무 신고 대상인지 여부를 질의함.</p>
+    <h4>회답</h4>
+    <p>신고 대상에 해당하지 않습니다.</p>
+    <h4>이유</h4>
+    <p>은행법 <a href="/law/28">제28조</a>에 따라 허용됩니다.</p>
+  </div>
+</div>
+"""
+
+# 인라인 링크가 중간에 있고 그 뒤에 추가 문단이 이어지는 경우 + 그 뒤 조작 블록.
+INLINE_LINK_MULTI_PARA_HTML = """
+<div id="content">
+  <h2>겸영업무 해당 여부</h2>
+  <table><tbody><tr><th>회신일</th><td>2026-08-20</td></tr></tbody></table>
+  <div class="view">
+    <h4>질의요지</h4>
+    <p>겸영업무 신고 대상인지 여부를 질의함.</p>
+    <h4>회답</h4>
+    <p>신고 대상에 해당하지 않습니다.</p>
+    <h4>이유</h4>
+    <p>법령 <a href="/law/28">제28조</a>에 따릅니다.</p>
+    <p>따라서 이 경우에는 허용됩니다.</p>
+    <div class="links">
+      <a href="/fsc_new/replyCase/TotalReplyList.do">목록</a>
+      <a href="/fsc_new/replyCase/LawreqDetail.do?lawreqIdx=1">이전글</a>
+    </div>
+    <p>이 문단은 조작 블록 뒤이므로 본문이 아니다.</p>
+  </div>
+</div>
+"""
+
+# 인라인 링크 문단 뒤에 공식 첨부 다운로드 컨트롤이 오는 경우.
+INLINE_LINK_THEN_FILE_HTML = """
+<div id="content">
+  <h2>겸영업무 해당 여부</h2>
+  <table><tbody><tr><th>회신일</th><td>2026-08-20</td></tr></tbody></table>
+  <div class="view">
+    <h4>질의요지</h4>
+    <p>질의 본문입니다.</p>
+    <h4>회답</h4>
+    <p>회답 본문입니다.</p>
+    <h4>이유</h4>
+    <p>은행법 <a href="/law/28">제28조</a>에 따라 허용됩니다.</p>
+    <div class="file">
+      <a href="/fsc_new/file/displayFile.do?filePath=%2Fa&amp;orgFileName=%ED%9A%8C%EC%8B%A0%EB%AC%B8.hwp&amp;sysFileName=1.hwp">회신문.hwp</a>
+    </div>
+    <p>첨부 컨트롤 뒤 안내문이라 본문이 아니다.</p>
+  </div>
+</div>
+"""
+
+
+def test_inline_link_does_not_truncate_section():
+    """1. 문단 안의 법령 링크가 있어도 세 항목이 모두 잡히고 본문이 온전하다."""
+    sc = _scraper(_Fetcher(html=INLINE_LINK_HTML))
+    post = _post(_detail())
+    sc.enrich(post)
+    for label in ("[질의요지]", "[회답]", "[이유]"):
+        assert label in post.body
+    assert "은행법" in post.body
+    assert "제28조" in post.body
+    assert "허용됩니다" in post.body
+
+
+def test_inline_link_keeps_following_prose_paragraph():
+    """2. 인라인 링크 문단 뒤의 추가 문단도 같은 항목에 포함된다."""
+    sc = _scraper(_Fetcher(html=INLINE_LINK_MULTI_PARA_HTML))
+    post = _post(_detail())
+    sc.enrich(post)
+    reason = post.body.split("[이유]\n", 1)[1]
+    assert "제28조" in reason
+    assert "따라서 이 경우에는 허용됩니다." in reason
+
+
+def test_link_only_control_block_still_bounds_the_section():
+    """3. 목록/이전글 같은 링크 전용 블록은 여전히 경계다."""
+    sc = _scraper(_Fetcher(html=INLINE_LINK_MULTI_PARA_HTML))
+    post = _post(_detail())
+    sc.enrich(post)
+    assert "목록" not in post.body
+    assert "이전글" not in post.body
+    assert "조작 블록 뒤이므로" not in post.body
+
+
+def test_attachment_control_still_bounds_the_section():
+    """4. 공식 displayFile.do 컨트롤 뒤 텍스트는 이유에 들어가지 않는다."""
+    fetcher = _Fetcher(html=INLINE_LINK_THEN_FILE_HTML)
+    sc = _scraper(fetcher)
+    post = _post(_detail())
+    sc.enrich(post)
+    assert "허용됩니다" in post.body                    # 링크 있는 본문 문단은 보존
+    assert "첨부 컨트롤 뒤 안내문" not in post.body
+    assert [a.filename for a in post.attachments] == ["회신문.hwp"]
+
+
+# --- 첨부 파일명: generic UI 라벨 대신 orgFileName ---
+#
+# 외부에서 확인된 사실: 공식 다운로드 URL 은 /fsc_new/file/displayFile.do 이고
+# filePath·orgFileName·sysFileName 파라미터를 싣는다. 아래 HTML 구조 자체는
+# 테스트용으로 구성한 synthetic fixture 다.
+
+_FILE_BASE = "/fsc_new/file/displayFile.do?filePath=%2Freply&sysFileName=1.hwp"
+
+
+def _file_detail_html(*anchors):
+    rows = "\n".join(anchors)
+    return f"""
+<div id="content"><h2>겸영업무 해당 여부</h2><table><tbody>
+  <tr><th>회신일</th><td>2026-08-20</td></tr>
+  <tr><th>질의요지</th><td>질의 본문입니다.</td></tr>
+  <tr><th>회답</th><td>회답 본문입니다.</td></tr>
+  <tr><th>이유</th><td>이유 본문입니다.</td></tr>
+  <tr><th>첨부파일</th><td>{rows}</td></tr>
+</tbody></table></div>
+"""
+
+
+def _filenames(html):
+    sc = _scraper(_Fetcher(html=html))
+    post = _post(_detail())
+    sc.enrich(post)
+    return [a.filename for a in post.attachments]
+
+
+def test_generic_download_label_uses_org_filename():
+    """1. anchor text 가 '다운로드' 여도 orgFileName 의 원본 파일명을 쓴다."""
+    href = (
+        _FILE_BASE
+        + "&orgFileName=%EB%B2%95%EB%A0%B9%ED%95%B4%EC%84%9D+%ED%9A%8C%EC%8B%A0%EB%AC%B8.hwpx"
+    )
+    assert _filenames(_file_detail_html(f'<a href="{href}">다운로드</a>')) == [
+        "법령해석 회신문.hwpx"
+    ]
+
+
+def test_generic_attachment_label_uses_org_filename():
+    """2. '첨부파일' 라벨도 마찬가지("+" 는 공백으로 디코딩된다)."""
+    href = (
+        _FILE_BASE
+        + "&orgFileName=%EB%B9%84%EC%A1%B0%EC%B9%98%EC%9D%98%EA%B2%AC%EC%84%9C"
+        "+%ED%9A%8C%EC%8B%A0%EB%AC%B8.hwp"
+    )
+    assert _filenames(_file_detail_html(f'<a href="{href}">첨부파일</a>')) == [
+        "비조치의견서 회신문.hwp"
+    ]
+
+
+def test_two_generic_labels_keep_distinct_original_filenames():
+    """3. 같은 '다운로드' 라벨이라도 첨부끼리 구분된다."""
+    a1 = f'<a href="{_FILE_BASE}&orgFileName=A.hwp">다운로드</a>'
+    a2 = f'<a href="{_FILE_BASE}&orgFileName=B.hwpx&sysFileName=2.hwp">다운로드</a>'
+    assert _filenames(_file_detail_html(a1, a2)) == ["A.hwp", "B.hwpx"]
+
+
+def test_meaningful_anchor_text_is_kept_without_org_filename():
+    """4. 의미 있는 앵커 텍스트는 그대로 쓰고 크기 표기만 제거한다."""
+    assert _filenames(
+        _file_detail_html(f'<a href="{_FILE_BASE}">회신문.hwp (42 KB)</a>')
+    ) == ["회신문.hwp"]
+
+
+def test_generic_label_without_org_filename_falls_back():
+    """5. orgFileName 이 없으면 generic 라벨 대신 명확한 기본값을 쓴다."""
+    assert _filenames(_file_detail_html(f'<a href="{_FILE_BASE}">다운로드</a>')) == [
+        "첨부파일"
+    ]
+
+
+def test_org_filename_is_reduced_to_a_basename():
+    """외부 문자열이므로 경로 조각은 떼고 파일명만 남긴다."""
+    href = _FILE_BASE + "&orgFileName=..%2F..%2Fetc%2Fpasswd"
+    assert _filenames(_file_detail_html(f'<a href="{href}">다운로드</a>')) == ["passwd"]
+
+
 # --- REVIEW 2: 제목 대조는 페이지 전체가 아니라 '정식 제목' 자리에서 ---
 #
 # 잘못된 상세 B 가 와도 그 페이지의 이전글/다음글·관련글·푸터에 A 의 제목이 있으면
