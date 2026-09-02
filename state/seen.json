@@ -1,6 +1,7 @@
 {
   "fsc_press": {
     "seen": [
+      "path:87637",
       "path:87634",
       "path:87633",
       "path:87628",
@@ -1683,13 +1684,13 @@
     "pending_detail": {
       "PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1": {
         "first_seen_at": "2026-08-28T00:26:57Z",
-        "attempts": 51,
+        "attempts": 52,
         "title": "군급식기본법 일부개정법률안 (유용원의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1",
         "date": "2026-08-27",
-        "status": "error",
-        "note": "ConnectTimeout: HTTPSConnectionPool(host='likms.assembly.go.kr', port=443): Max retries exceeded with url: /bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1 (Caused by ConnectTimeou",
-        "last_attempt_at": "2026-09-02T06:09:40Z"
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-09-02T06:53:51Z"
       }
     }
   }
