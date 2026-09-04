@@ -1,6 +1,7 @@
 {
   "fsc_press": {
     "seen": [
+      "path:87648",
       "path:87646",
       "path:87639",
       "path:87638",
@@ -93,6 +94,9 @@
   },
   "fsc_legislation": {
     "seen": [
+      "noticeId:4170",
+      "noticeId:4169",
+      "noticeId:4168",
       "noticeId:4167",
       "noticeId:4166",
       "noticeId:4165",
@@ -135,6 +139,7 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:226659",
       "nttId:226501",
       "nttId:226487",
       "nttId:226486",
@@ -1783,13 +1788,13 @@
       },
       "ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1": {
         "first_seen_at": "2026-09-04T00:29:50Z",
-        "attempts": 1,
+        "attempts": 2,
         "title": "영유아특별회계법 일부개정법률안 (정부)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1",
         "date": "2026-09-03",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-09-04T00:29:50Z"
+        "last_attempt_at": "2026-09-04T01:18:46Z"
       }
     }
   }
