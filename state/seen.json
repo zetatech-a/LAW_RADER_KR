@@ -1791,13 +1791,13 @@
       },
       "ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1": {
         "first_seen_at": "2026-09-04T00:29:50Z",
-        "attempts": 3,
+        "attempts": 4,
         "title": "영유아특별회계법 일부개정법률안 (정부)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1",
         "date": "2026-09-03",
-        "status": "error",
-        "note": "ConnectTimeout: HTTPSConnectionPool(host='likms.assembly.go.kr', port=443): Max retries exceeded with url: /bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1 (Caused by ConnectTimeou",
-        "last_attempt_at": "2026-09-04T01:54:39Z"
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-09-04T02:38:32Z"
       }
     }
   }
