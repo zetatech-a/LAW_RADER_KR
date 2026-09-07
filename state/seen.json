@@ -141,6 +141,11 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:227195",
+      "nttId:226954",
+      "nttId:226953",
+      "nttId:226952",
+      "nttId:226951",
       "nttId:226661",
       "nttId:226659",
       "nttId:226501",
@@ -558,6 +563,39 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_O2W6W0V9T0U3S1T3B3B8Z2A0Y7X2X5",
+      "PRC_N2N6M0K8L0J6K1F5E3F5D4E4C5C5L9",
+      "PRC_Z2H6I0G9H0F3E0E9M2M6L1M5K4K3J4",
+      "PRC_J2K6I0J8Q0R5Q0O9O5N9O2J8K5I4I3",
+      "PRC_B2Z6Z0X9Z0X3X1F3F0E9C5D7B3C4Y2",
+      "PRC_R2Z6X0Y8W3X1V1W3S3Q2Q0P3P8O3O6",
+      "PRC_L2J6K0G9G0E1F2E0C2C5K2L6J6K3I9",
+      "PRC_N2L6M0U4V1T5R1S5Q4R8Y2Z4Y6Y4W5",
+      "PRC_S2O6M0N4L1M6K1L3T1R1R5Q3R2P9P4",
+      "PRC_Z2X5X1F1E0E6C1D4B4C4Y4W0X4V7V1",
+      "PRC_R2R6P0Q8P2P1L0J9K3I1J2H8I3P5Q6",
+      "PRC_E2E6C0B8B2A1A0W9X3V2U0U4S6T9B2",
+      "PRC_U2U6D0B9B0Z4B1Z0Z3H7I5G6E7F4E7",
+      "PRC_A2A6I0J9H0I4G1H0F0N5N2M3N0L8L3",
+      "PRC_C2D6C0C9A0Z2A1V6W4U9V0T7S1S8A0",
+      "PRC_S2S5Q1R1Q0O6O1W4X4V5U1U6S5T7P5",
+      "PRC_G2F6F0E7F1M0N1L5K1K7J4J7F9F3E4",
+      "PRC_N2M6K0G7H0G2E1D0L4M2K1J9H7I5Q5",
+      "PRC_K2I6J0R7S2Q4Q0P9N0O8W0W3V5V2T8",
+      "PRC_F2D6E0L7M2L4J0J9I0J7Q3R0P1O2O1",
+      "PRC_E2F6D0L8M2K4K1J3J4I3I3Q1P1P4N6",
+      "PRC_M2N6L0L9K0L2S1T6R4Q9Q4O7P8X6X8",
+      "PRC_U2U6S0T8R2S1A0Y9Z3Y2Y4X0E7F0E6",
+      "PRC_Z2V6W0U7T2U4R1A7A5Z8Y0W6X7F0F6",
+      "PRC_T2R6Q0F6E2E2D1C6K4I3H3I8H2P2N7",
+      "PRC_W2X6E0G9E0E2C1B6C4J9K2J7J9H5I2",
+      "PRC_G2V6W0U8V2T0U1S8S3B1Z0Z2X5Z6X3",
+      "PRC_E2C6D0C7J1K0I1J5H1I8G4V3W7U6V1",
+      "PRC_A2B6X0X8W2U6V1T7U1C3C2B8Z1A0Y1",
+      "PRC_I2J6I0I8D3C1D1B5B1A9B5I7J3I0G0",
+      "PRC_W2U6V0T8T1C8A1A0Z5Z6Y3Y1G1H3F4",
+      "PRC_K2J6I0J3R3P1O1M5N5V5U0S1T8S3O2",
+      "PRC_Z2I5G0G1E0F6E1E1A2A6Z4X1Y5W5X6",
       "PRC_N2V6V0T9U0S1T1R4Z2A6Y0Z3X1Y4W7",
       "PRC_Z2Z6X0Y8W2X4V1W3S4Q2R2P1Q1O9P8",
       "PRC_Z2H6H0G9G0F1F1E4Z2A6Y3Z9X8Y7W0",
@@ -1783,23 +1821,23 @@
     "pending_detail": {
       "PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1": {
         "first_seen_at": "2026-08-28T00:26:57Z",
-        "attempts": 82,
+        "attempts": 83,
         "title": "군급식기본법 일부개정법률안 (유용원의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1",
         "date": "2026-08-27",
-        "status": "error",
-        "note": "ConnectTimeout: HTTPSConnectionPool(host='likms.assembly.go.kr', port=443): Max retries exceeded with url: /bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1 (Caused by ConnectTimeou",
-        "last_attempt_at": "2026-09-04T08:54:48Z"
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-09-07T00:14:42Z"
       },
       "ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1": {
         "first_seen_at": "2026-09-04T00:29:50Z",
-        "attempts": 13,
+        "attempts": 14,
         "title": "영유아특별회계법 일부개정법률안 (정부)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1",
         "date": "2026-09-03",
-        "status": "error",
-        "note": "ConnectTimeout: HTTPSConnectionPool(host='likms.assembly.go.kr', port=443): Max retries exceeded with url: /bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1 (Caused by ConnectTimeou",
-        "last_attempt_at": "2026-09-04T08:54:48Z"
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-09-07T00:14:42Z"
       }
     }
   }
