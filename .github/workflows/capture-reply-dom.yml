@@ -16,9 +16,14 @@ on:
       - "scripts/capture_better_reply_detail.py"
       - ".github/workflows/capture-reply-dom.yml"
 
+concurrency:
+  group: capture-reply-dom
+  cancel-in-progress: true
+
 jobs:
   capture:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

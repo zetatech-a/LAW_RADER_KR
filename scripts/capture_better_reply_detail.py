@@ -83,17 +83,13 @@ def _scraper() -> BetterReplyScraper:
 
 
 def warm_up(sc: BetterReplyScraper, idx_wanted: set, attempts: int) -> None:
-    """생산 흐름과 같은 순서로 세션을 만든다: 목록 페이지 GET → 목록 AJAX POST.
+    """생산 흐름과 **똑같이** 목록 AJAX POST 로 시작한다(HTML 목록 페이지는 치지 않는다).
 
-    상세를 곧바로 치지 않는 이유는 두 가지다. (1) 포털이 세션 쿠키를 요구할 수 있고,
-    (2) 목록 record 를 실제로 받아 두면 dataIdx 가 정말 그 제목·회신일의 글인지
-    (= lawreqIdx 매핑 가정) 확인할 수 있다.
+    이유는 두 가지다. (1) 포털이 세션 쿠키를 요구할 수 있고, (2) 목록 record 를 실제로
+    받아 두면 dataIdx 가 정말 그 제목·회신일의 글인지(= lawreqIdx 매핑 가정) 확인할 수
+    있다. HTML 목록 페이지(TotalReplyList.do)는 생산 코드가 GET 하지 않는 경로이고
+    러너에서 응답이 오지 않아 진단이 멈추므로 건드리지 않는다.
     """
-    try:
-        _retry(lambda: sc.fetcher.get(LIST_URL), attempts, "목록 페이지 GET")
-    except Exception as e:  # noqa: BLE001
-        print(f"⚠️ 목록 페이지 GET 실패(계속 진행): {type(e).__name__}: {e}")
-
     try:
         posts = _retry(lambda: sc.fetch_list(30, page=1), attempts, "목록 AJAX POST")
     except Exception as e:  # noqa: BLE001
@@ -228,7 +224,7 @@ def main(argv=None):
     ap.add_argument("--gubun", default="법령해석", choices=["법령해석", "비조치의견서"])
     ap.add_argument("--expect-title", action="append", default=[])
     ap.add_argument("--outline-limit", type=int, default=400)
-    ap.add_argument("--attempts", type=int, default=4, help="요청 재시도 횟수")
+    ap.add_argument("--attempts", type=int, default=3, help="요청 재시도 횟수")
     args = ap.parse_args(argv)
 
     sc = _scraper()
