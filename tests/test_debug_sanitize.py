@@ -25,6 +25,8 @@ HOSTILE_HTML = """
   <meta name="_csrf" content="csrf-secret-123">
   <meta name="_csrf_header" content="X-CSRF-TOKEN">
   <meta http-equiv="refresh" content="0;url=/callback?access_token=refresh-secret&amp;lawreqIdx=5449">
+  <meta property="og:url" content="https://example.test/callback?access_token=og-secret&amp;lawreqIdx=5449">
+  <meta property="og:title" content="금융규제 법령해석">
   <meta name="description" content="금융규제 법령해석 안내">
 </head>
 <body>
@@ -77,6 +79,9 @@ _SECRETS = (
     # meta refresh 의 대상 URL — content 는 URL 속성이 아니라 별도 문법이라 다른
     # 규칙이 하나도 닿지 않는다.
     "refresh-secret",
+    # content 가 URL 로 정해진 metadata(og:url …). 직렬화된 속성 안의 중첩 비밀은
+    # 마지막 텍스트 패스가 바깥 content="…" 를 통째로 소비해 버려 잡지 못한다.
+    "og-secret",
 )
 
 
@@ -155,6 +160,8 @@ def test_hostile_html_keeps_public_diagnostics_after_every_rule():
     assert "토큰 발급 절차에 관한 질의입니다" in out   # 자연어는 손대지 않는다
     assert "0;url=/callback?access_token=REDACTED" in out   # refresh 는 구조를 유지
     assert 'content="금융규제 법령해석 안내"' in out        # 일반 meta@content 는 무변경
+    assert 'content="금융규제 법령해석"' in out             # og:title 도 URL 이 아니다
+    assert "https://example.test/callback?access_token=REDACTED" in out
 
 
 def test_hostile_html_keeps_structure_and_public_content():
@@ -397,3 +404,96 @@ def test_public_meta_refresh_target_survives():
         '<meta http-equiv="refresh" content="0;url=/detail?lawreqIdx=5449">'
     )
     assert 'content="0;url=/detail?lawreqIdx=5449"' in safe
+
+
+# --- Codex: content 가 URL 로 정해진 metadata(og:url 계열) ---
+#
+# meta@content 자체는 URL 이 아니므로(description·og:title·keywords) 일반 URL 속성으로
+# 넣을 수 없고, 이름에 'url' 이 들어가는지 같은 추측도 하지 않는다. 표준으로 URL 이라고
+# 정해진 키만 정확 일치로 골라 기존 redact_debug_url 을 태운다. 마지막 텍스트 패스는
+# 직렬화된 content="…" 를 바깥 assignment 하나로 소비해 그 안의 중첩 비밀을 보지 못한다.
+def test_og_url_metadata_is_sanitized():
+    """Codex exact repro."""
+    safe = redact_debug_html(
+        '<meta property="og:url" '
+        'content="https://example.test/callback?access_token=VERY_SECRET&lawreqIdx=5449">'
+    )
+    assert "VERY_SECRET" not in safe
+    assert "access_token=REDACTED" in safe
+    assert "lawreqIdx=5449" in safe
+    assert "example.test/callback" in safe
+
+
+def test_open_graph_media_url_metadata_is_sanitized():
+    safe = redact_debug_html(
+        '<meta property="og:image" content="https://cdn.example/img.png?token=IMAGE_SECRET">'
+    )
+    assert "IMAGE_SECRET" not in safe
+    assert "cdn.example/img.png" in safe
+
+    safe = redact_debug_html(
+        '<meta property="og:video:secure_url" '
+        'content="https://cdn.example/video?sessionId=VIDEO_SECRET">'
+    )
+    assert "VIDEO_SECRET" not in safe
+    assert "cdn.example/video" in safe
+
+
+def test_twitter_card_url_metadata_is_sanitized():
+    for key in ("twitter:image", "twitter:player", "twitter:app:url:iphone"):
+        safe = redact_debug_html(
+            f'<meta name="{key}" content="https://cdn.example/x?token=TWITTER_SECRET">'
+        )
+        assert "TWITTER_SECRET" not in safe, key
+        assert "cdn.example/x" in safe, key
+
+
+def test_itemprop_url_metadata_is_sanitized():
+    for key in ("url", "contentUrl", "embedUrl", "thumbnailUrl"):
+        safe = redact_debug_html(
+            f'<meta itemprop="{key}" content="https://example.test/x?token=ITEMPROP_SECRET">'
+        )
+        assert "ITEMPROP_SECRET" not in safe, key
+        assert "example.test/x" in safe, key
+
+
+def test_url_metadata_reuses_the_whole_url_contract():
+    """userinfo·쿼리·프래그먼트 정화를 metadata 에서도 그대로 받는다."""
+    safe = redact_debug_html(
+        '<meta property="og:url" '
+        'content="https://alice:PASSWORD@example.test/detail?lawreqIdx=5449#FRAGMENT_SECRET">'
+    )
+    for secret in ("alice", "PASSWORD", "FRAGMENT_SECRET"):
+        assert secret not in safe, secret
+    assert "example.test/detail" in safe
+    assert "lawreqIdx=5449" in safe
+
+
+def test_url_metadata_keys_are_matched_exactly_not_by_substring():
+    """이름에 'url' 이 들어간다고 URL 로 보지 않는다 — 표준 키만 정확 일치."""
+    from src.debug_sanitize import _meta_content_is_url
+    from bs4 import BeautifulSoup
+
+    def _meta(markup):
+        return BeautifulSoup(markup, "lxml").find("meta")
+
+    assert _meta_content_is_url(_meta('<meta property="og:url" content="x">'))
+    assert _meta_content_is_url(_meta('<meta itemprop="ThumbnailUrl" content="x">'))
+    assert not _meta_content_is_url(_meta('<meta name="canonical-url-note" content="x">'))
+    assert not _meta_content_is_url(_meta('<meta itemprop="name" content="x">'))
+    assert not _meta_content_is_url(_meta('<meta property="og:title" content="x">'))
+    # RDFa·마이크로데이터는 값을 공백으로 여러 개 적을 수 있다.
+    assert _meta_content_is_url(_meta('<meta property="og:title og:url" content="x">'))
+
+
+def test_ordinary_metadata_survives_the_url_metadata_rule():
+    """URL metadata 규칙이 일반 metadata 로 번지면 안 된다."""
+    safe = redact_debug_html(
+        '<meta name="description" content="금융규제 포털 안내">'
+        '<meta name="keywords" content="금융, 법령해석, 비조치의견서">'
+        '<meta property="og:title" content="access_token이라는 용어에 관한 법령해석">'
+    )
+    assert 'content="금융규제 포털 안내"' in safe
+    assert 'content="금융, 법령해석, 비조치의견서"' in safe
+    # 'access_token=' assignment 가 아니라 그냥 낱말이므로 그대로 남는다.
+    assert "access_token이라는 용어에 관한 법령해석" in safe

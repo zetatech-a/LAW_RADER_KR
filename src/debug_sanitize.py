@@ -52,6 +52,25 @@ _REDACTED = "REDACTED"
 #   - 이름은 ASCII 식별자만 받는다. 한국어 문장('토큰 발급 절차…')을 건드리지 않는다.
 #   - 값은 따옴표가 있으면 그 안까지, 없으면 다음 경계 전까지다. 경계를 좁게 잡지
 #     않으면 뒤따르는 다른 파라미터나 HTML 태그까지 통째로 삼킨다.
+# content 가 URL 인 것이 **표준으로 정해진** metadata 키. meta@content 자체는 URL 이
+# 아니므로(description·og:title·keywords) _URL_VALUED_ATTRS 에 넣을 수 없고, 이름에
+# 'url' 이 들어가는지 같은 추측도 하지 않는다. 아래 정확 일치만 URL 로 취급한다.
+#   property / name 으로 오는 키(둘 다 실제로 쓰인다)
+_URL_META_KEYS = frozenset({
+    # Open Graph
+    "og:url",
+    "og:image", "og:image:url", "og:image:secure_url",
+    "og:video", "og:video:url", "og:video:secure_url",
+    "og:audio", "og:audio:url", "og:audio:secure_url",
+    "og:see_also",
+    # Twitter Card — URL 인 것이 확실한 키만
+    "twitter:image", "twitter:image:src",
+    "twitter:player", "twitter:player:stream",
+    "twitter:app:url:iphone", "twitter:app:url:ipad", "twitter:app:url:googleplay",
+})
+#   itemprop 으로 오는 키. 값이 og:/twitter: 처럼 접두어가 없어 따로 둔다.
+_URL_ITEMPROP_KEYS = frozenset({"url", "contenturl", "embedurl", "thumbnailurl"})
+
 # <meta http-equiv="refresh" content="0;url=…"> 의 content 문법.
 # meta@content 는 일반적으로 URL 이 아니므로(description·og:title …) _URL_VALUED_ATTRS
 # 에 넣을 수 없다. http-equiv 가 refresh 인 meta 만 이 문법으로 따로 읽는다.
@@ -200,6 +219,29 @@ def _has_userinfo(value: str) -> bool:
         return True          # 파싱조차 안 되는 값은 정화기로 보낸다(fail-safe)
 
 
+def _meta_content_is_url(el) -> bool:
+    """이 meta 의 content 가 URL 이라고 **구조적으로 확정되는지**.
+
+    property/name 은 og:·twitter: 계열의 정확 일치로, itemprop 은 마이크로데이터의
+    URL 속성 이름으로 판정한다. 목록에 없는 metadata(description·og:title·keywords …)
+    는 URL 이 아니므로 건드리지 않는다 — 추측으로 넓히면 진단 자료가 망가진다.
+    RDFa·마이크로데이터는 값을 공백으로 여러 개 적을 수 있어 토큰으로 쪼개 본다.
+    """
+    for attr, keys in (
+        ("property", _URL_META_KEYS),
+        ("name", _URL_META_KEYS),
+        ("itemprop", _URL_ITEMPROP_KEYS),
+    ):
+        value = el.get(attr)
+        if isinstance(value, list):                 # 파서가 다중값으로 준 경우
+            value = " ".join(value)
+        if not isinstance(value, str):
+            continue
+        if any(token.lower() in keys for token in value.split()):
+            return True
+    return False
+
+
 def _redact_meta_refresh_content(content: str) -> str:
     """meta refresh 의 content 에서 대상 URL 만 뽑아 URL 규칙으로 정화한다.
 
@@ -240,9 +282,11 @@ def redact_debug_html(html: str) -> str:
 
     _csrf_header / _csrf_parameter 의 content 는 토큰이 아니라 헤더 '이름'(예:
     X-CSRF-TOKEN)이라 남긴다 — 계약이 바뀌었는지 보려면 그 값이 필요하다.
-    http-equiv="refresh" 인 meta 의 content 만은 URL 을 싣는 자리이므로 따로 읽는다
-    (_redact_meta_refresh_content). 그 밖의 meta@content(description·og:title …)는
-    URL 이 아니므로 건드리지 않는다.
+    meta@content 중 URL 을 싣는 자리만 따로 읽는다 — http-equiv="refresh" 는 별도
+    문법이라 _redact_meta_refresh_content 로, og:url·twitter:image·itemprop="url" 처럼
+    content 가 URL 로 정해진 키는 _meta_content_is_url 로 골라 redact_debug_url 로
+    보낸다. 그 밖의 meta@content(description·og:title·keywords …)는 URL 이 아니므로
+    건드리지 않는다.
     파싱이 실패해도 원문을 그대로 흘리지 않고 값 패턴 정화는 반드시 적용한다.
 
     제목·본문 같은 공개 텍스트와 태그·클래스 구조는 건드리지 않는다. 정화가 진단을
@@ -263,6 +307,15 @@ def redact_debug_html(html: str) -> str:
             continue
         if isinstance(content, str) and content.strip():
             el["content"] = _redact_meta_refresh_content(content)
+
+    # content 가 URL 인 것이 표준으로 정해진 metadata(og:url, twitter:image, itemprop=url
+    # …). URL 임을 이미 알고 있으므로 _redact_attr_url 의 '정화할 게 있나' 판단을 거치지
+    # 않고 redact_debug_url 을 바로 태운다 — userinfo·쿼리·경로 파라미터·프래그먼트를
+    # 항상 구조적으로 본다. 이름 기준 정화보다 먼저 돌려 더 안전한 쪽이 남게 한다.
+    for el in soup.find_all("meta"):
+        content = el.get("content")
+        if isinstance(content, str) and content.strip() and _meta_content_is_url(el):
+            el["content"] = redact_debug_url(content)
 
     for el in soup.find_all(["input", "meta"]):
         name = (el.get("name") or el.get("id") or "").lower()
