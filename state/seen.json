@@ -569,6 +569,26 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_E2C6D0L9L0J7I1J0H1H4P0Q5O0P3N8",
+      "PRC_P2N6L0M9L0L4T1S0S5Q0R4P0Q6Y2W4",
+      "PRC_K2R6S0Q9R0P1Q1O7P1X6V1W5U9U5T4",
+      "PRC_U2S6T0R9S0Q1R1Y7Z1X5W1W2V0V8D3",
+      "PRC_C2D6B0C9B0I1J1H7I1G0H0F2N0O9M0",
+      "PRC_H2G6G0C9D0B4B1A3Y2Z5H2H1I4Q8R2",
+      "PRC_H2H6F0E9F0M4N1L0M0L8J2J0S6S2Q8",
+      "PRC_V2V6R0S9Q0O4P1N0O0W9W4V5T9U6S4",
+      "PRC_A2B6I0J9I0I7G1F0F3N0O3M4N4L8K8",
+      "PRC_L2M6K0L3S1R2S1Q4Q5O8Q1X4Y0W4V5",
+      "PRC_Z2X6Y0W7X0V9D1E8C4C7B2B1A1I4I4",
+      "PRC_D2E6C0C9B0C1J1K4J1H9H3F6G8C2C7",
+      "PRC_T2U6S0T9R0P1Q1Y0Y4W7Y3W9W7U7D5",
+      "PRC_V2V6T0C8C0A5B0Z9A5Y8Z5U0T2U2S6",
+      "PRC_U2S6T0S8S2Q5Z1Z7X4Y6W0X3V5W3E6",
+      "PRC_M2L6L0J8K1I1J1R7R1Q5O3P7N3O6V1",
+      "PRC_G2E6F0N8L3M1K1L4J4K3F3G9E7F6D7",
+      "PRC_D2B6J0K8I1J8H1I5G5O6O1N4N2M2K6",
+      "PRC_U2S6S0B9Z0Z4Y0Z9X3X9F0G3E9U8T5",
+      "PRC_W2V6V0D8E1C8B1B5Z5A7I3J8H0F9G4",
       "PRC_O2W6W0V9T0U3S1T3B3B8Z2A0Y7X2X5",
       "PRC_N2N6M0K8L0J6K1F5E3F5D4E4C5C5L9",
       "PRC_Z2H6I0G9H0F3E0E9M2M6L1M5K4K3J4",
@@ -1827,23 +1847,23 @@
     "pending_detail": {
       "PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1": {
         "first_seen_at": "2026-08-28T00:26:57Z",
-        "attempts": 95,
+        "attempts": 96,
         "title": "군급식기본법 일부개정법률안 (유용원의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1",
         "date": "2026-08-27",
-        "status": "error",
-        "note": "ConnectTimeout: HTTPSConnectionPool(host='likms.assembly.go.kr', port=443): Max retries exceeded with url: /bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1 (Caused by ConnectTimeou",
-        "last_attempt_at": "2026-09-07T08:40:00Z"
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-09-08T00:11:34Z"
       },
       "ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1": {
         "first_seen_at": "2026-09-04T00:29:50Z",
-        "attempts": 26,
+        "attempts": 27,
         "title": "영유아특별회계법 일부개정법률안 (정부)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1",
         "date": "2026-09-03",
-        "status": "error",
-        "note": "ConnectTimeout: HTTPSConnectionPool(host='likms.assembly.go.kr', port=443): Max retries exceeded with url: /bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1 (Caused by ConnectTimeou",
-        "last_attempt_at": "2026-09-07T08:40:00Z"
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-09-08T00:11:34Z"
       }
     }
   }
