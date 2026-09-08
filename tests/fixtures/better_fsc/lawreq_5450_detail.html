@@ -1,0 +1,181 @@
+<!--
+  better.fsc.go.kr 법령해석 상세 (lawreqIdx=5450, 회신일 2026-09-07).
+
+  실제 공개 상세페이지 DOM 에서 parser 관련 부분만 축약한 것이다.
+  GitHub Actions 러너에서 생산 Fetcher 로 GET 해(HTTP 200, 23,134자)
+  scripts/capture_better_reply_detail.py 가 찍은 div.sub-con 서브트리를 **그대로**
+  옮겼고, 파서 경계에 영향을 주는 최소 바깥 요소(로고 h1 · 푸터)만 덧붙였다.
+  페이지의 나머지(GNB·좌측 메뉴·스크립트)는 파서와 무관해 뺐다.
+-->
+<html>
+<head><title>금융규제민원</title></head>
+<body>
+<header>
+  <div class="hd-wrap">
+    <a href="/fsc_new/index.do"><h1 id="logo">금융규제·법령해석포털</h1></a>
+  </div>
+</header>
+<div id="wrapper">
+ <div id="container_wr">
+  <div id="left-menu"><h2 id="left-menu_nm"></h2></div>
+  <div class="sub-con">
+   <h3>
+    법령해석
+   </h3>
+   <div class="board-view">
+    <table cellpadding="0" cellspacing="0" class="tbl-view two">
+     <caption class="sound-only">
+      법령해석 상세보기 목록표 – 처리구분, 소관부서로 구성
+     </caption>
+     <tr>
+      <td class="subject" colspan="2">
+       신기술사업금융업자의 글로벌펀드(외국법에 따른 외국펀드) 결성·운용 가능여부
+      </td>
+     </tr>
+     <tr>
+      <th scope="row">
+       처리구분
+      </th>
+      <td>
+       완료
+      </td>
+     </tr>
+     <tr>
+      <th scope="row">
+       소관부서
+      </th>
+      <td>
+       중소금융과
+      </td>
+     </tr>
+    </table>
+   </div>
+   <div class="btn-wrap mr10">
+    <a class="btn btn-save" href="javascript:void(0);" onclick="openLawreqList();">
+     목록
+    </a>
+    <a class="btn btn-save" href="javascript:void(0);" onclick="urlCopy('https://better.fsc.go.kr/fsc_new/replyCase/LawreqDetail.do?stNo=11&amp;muNo=117&amp;muGpNo=75&amp;lawreqIdx=5450');">
+     URL 복사
+    </a>
+   </div>
+   <div class="res-wrap">
+    <div class="tit">
+     회신
+    </div>
+    <div class="board-view">
+     <table cellpadding="0" cellspacing="0" class="tbl-write">
+      <caption class="sound-only">
+       법령해석 회신확인표-처리구분, 공개여부,등록자,회신일, 첨부파일, 질의요지, 회답, 이유로 이루어짐
+      </caption>
+      <tr>
+       <td class="subject" colspan="2" style="font-size: 1.175rem;">
+        신기술사업금융업자의 글로벌펀드(외국법에 따른 외국펀드) 결성·운용 가능여부
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        처리구분
+       </th>
+       <td>
+        완료
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        공개여부
+       </th>
+       <td>
+        Y
+       </td>
+      </tr>
+      <!-- <tr>
+						<th>소관부서</th>
+						<td>-</td>
+					</tr> -->
+      <tr>
+       <th scope="row">
+        등록자
+       </th>
+       <td>
+        관리자
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        회신일
+       </th>
+       <td>
+        2026-09-07
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        첨부파일
+       </th>
+       <td>
+        <a href="/fsc_new/file/displayFile.do?filePath=/2026/09/07&amp;orgFileName=법령해석 회신문(260150)F.hwpx&amp;sysFileName=0180752ab85844dd91c87fe7eb5d681c.hwpx" title="법령해석 회신문(260150)F.hwpx 새창으로 다운로드">
+         <img alt="첨부파일 있음" src="/fsc_new/img/comm/icon-files.png"/>
+         법령해석 회신문(260150)F.hwpx
+        </a>
+        <br/>
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        질의요지
+       </th>
+       <td>
+        <p>
+         □신기술사업금융업자가 외국법에 따른 외국펀드(이하 “글로벌 펀드”)를 결성·운용하여 신기술사업자에게 투자하는 경우 여신전문금융업법 제41조제1항에 따른 신기술사업금융업자의 업무에 해당하는지 여부
+        </p>
+       </td>
+      </tr>
+      <tr>
+       <th class="bc-yellow" scope="row">
+        회답
+       </th>
+       <td class="bc-yellow">
+        <p>
+         □ 신기술사업금융업자가 외국법에 따른 외국펀드(이하 “글로벌 펀드”)를 결성·운용하여 신기술사업자에게 투자하는 것은 여신전문금융업법 제41조제1항에 따른 신기술사업금융업자의 업무에 해당한다고 볼 수 있습니다.
+        </p>
+       </td>
+      </tr>
+      <tr>
+       <th class="bc-blue" scope="row">
+        이유
+       </th>
+       <td class="bc-blue">
+        <p>
+         □ 여신전문금융업법 제41조에 따르면 신기술사업금융업자는 신기술사업자에 대한 투자, 융자, 신기술사업자에 대한 경영 및 기술의 지도, 신기술사업투자조합의 설립 및 자금의 관리․운용 등의 업무를 수행할 수 있습니다.
+        </p>
+        <p>
+         ㅇ 여신전문금융업법은 신기술사업금융업자가 신기술사업자에게 투자하는 방식이나 그 투자에 사용되는 기구를 국내에 설립된 조합 등을 한정하고 있지 않습니다. 따라서 신기술사업금융업자가 외국법에 따른 외국펀드를 활용하여 투자하는 것이 제41조에 따른 업무의 범위에서 제외된다고 보기는 어렵습니다.
+        </p>
+        <p>
+         □ 또한 여신전문금융업법 제2조제14의5에 따르면 신기술사업투자조합을 신기술사업자에게 투자하기 위하여 설립된 조합으로 규정하고 있으며, 같은조 제14의2는 신기술사업자의 범위에 외국환거래법 제3조제15호에 따른 비거주자를 포함하고 있습니다. 이러한 규정의 취지를 감안할 경우, 여신전문금융업법이 신기술사업금융업자의 투자업무를 국내에서 이루어지는 투자로 한정하고 있다고 보기도 어렵습니다.
+        </p>
+        <p>
+         □ 따라서 신기술사업금융업자가 외국법에 따른 펀드(글로벌펀드)를 결성·운용하여 신기술사업자에게 투자하는 것은 「여신전문금융업법」 제41조제1항제1호에 따른 신기술사업금융업자의 업무에 해당된다고 보는 것이 타당할 것입니다.
+         <br/>
+        </p>
+       </td>
+      </tr>
+     </table>
+    </div>
+   </div>
+  </div>
+ </div>
+</div>
+<footer class="main">
+  <div class="footer-inner">
+    <dl>
+      <dt>금융위원회</dt>
+      <dd>서울특별시 종로구 세종대로 209 금융위원회 대표전화 <a href="tel:0221002500">02-2100-2500</a></dd>
+      <dt>금융감독원</dt>
+      <dd>서울특별시 영등포구 여의도동 여의대로 38 대표전화 <a href="tel:0231455114">02-3145-5114</a></dd>
+    </dl>
+    <p>COPYRIGHT 2009 FINANCIAL SERVICES COMMISSION.ALL RIGHTS RESERVED.</p>
+  </div>
+</footer>
+</body>
+</html>

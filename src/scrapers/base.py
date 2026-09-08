@@ -185,10 +185,15 @@ class BaseScraper:
         return urlunparse(parts._replace(query=urlencode(q)))
 
     # --- 공통 유틸 ---
-    def _dump_debug(self, tag: str, content: str) -> None:
-        """셀렉터 튜닝용: 원본 HTML/JSON 을 debug/ 에 저장."""
+    def _dump_debug(self, tag: str, content: str, suffix: str = "txt") -> None:
+        """셀렉터 튜닝용: 원본 HTML/JSON 을 debug/ 에 저장.
+
+        응답 본문만 저장한다 — 헤더·쿠키 같은 요청 컨텍스트는 담지 않는다.
+        suffix 는 확장자다(기본 txt). 브라우저로 바로 열어 DOM 을 보고 싶은 HTML
+        스냅샷은 "html" 을 넘긴다.
+        """
         d = Path("debug")
         d.mkdir(exist_ok=True)
-        p = d / f"{self.key}_{tag}.txt"
+        p = d / f"{self.key}_{tag}.{suffix}"
         p.write_text(content, encoding="utf-8")
         log.info("[%s] 디버그 덤프 저장: %s", self.key, p)

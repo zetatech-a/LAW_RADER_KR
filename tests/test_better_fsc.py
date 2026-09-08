@@ -1376,3 +1376,231 @@ def test_pagination_and_enrich_flags_unchanged():
     assert sc.PAGE_PARAM is None
     assert sc.paginates is True
     assert sc.SUPPORTS_ENRICH is True     # 이제 상세 수집 파이프라인을 탄다
+
+
+# =============================================================================
+# 2026-09-07 운영 회귀 — lawreqIdx 5449 / 5450
+#
+# 이 두 건은 상세 수집까지 갔다가 identity 대조에서 전부 거부되었다. 상세 제목으로
+# 페이지 유형 heading('법령해석')이 잡혀 목록 제목과 어긋났기 때문이다(본문 0/2,
+# Gemini 대상 0건, 메일에 제목·링크만). 아래 fixture 는 실제 공개 상세페이지 DOM 에서
+# parser 관련 부분만 축약한 것이며(tests/fixtures/better_fsc/ 의 주석 참고), 이 회귀를
+# 구조로 잠근다.
+# =============================================================================
+_FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "better_fsc")
+
+LIVE_CASES = {
+    "5449": {
+        "title": "여신전문금융회사가 신기술사업자에 투자하는 경우 금리인하요구권 안내의무 적용 여부",
+        "attachment": "법령해석 회신문(260149)F.hwpx",
+        "answer_head": "□ 신기술사업자에 대한 투자는 「여신전문금융업법」 제50조의13(금리인하 요구)",
+    },
+    "5450": {
+        "title": "신기술사업금융업자의 글로벌펀드(외국법에 따른 외국펀드) 결성·운용 가능여부",
+        "attachment": "법령해석 회신문(260150)F.hwpx",
+        "answer_head": "□ 신기술사업금융업자가 외국법에 따른 외국펀드",
+    },
+}
+
+
+def _live_html(idx):
+    with open(os.path.join(_FIXTURES, f"lawreq_{idx}_detail.html"), encoding="utf-8") as f:
+        return f.read()
+
+
+def _live_post(idx):
+    """목록 record 그대로의 Post(제목 접두어·회신일 포함)."""
+    url = LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do") + f"&lawreqIdx={idx}"
+    return Post(
+        source_key="better_reply",
+        source_name="금융규제포털 · 법령해석·비조치의견서 회신사례",
+        post_id=f"dataIdx:{idx}",
+        title=f"[법령해석] {LIVE_CASES[idx]['title']}",
+        url=url,
+        date="2026-09-07",
+    )
+
+
+def _soup(idx):
+    from bs4 import BeautifulSoup
+
+    return BeautifulSoup(_live_html(idx), "lxml")
+
+
+# --- A/B. 실제 사건 제목 추출 ---
+def test_live_5449_detail_title_is_the_case_title():
+    assert BetterReplyScraper._detail_title(_soup("5449")) == LIVE_CASES["5449"]["title"]
+
+
+def test_live_5450_detail_title_is_the_case_title():
+    assert BetterReplyScraper._detail_title(_soup("5450")) == LIVE_CASES["5450"]["title"]
+
+
+# --- C. 페이지 유형 heading 은 제목이 아니다 ---
+def test_live_page_type_heading_is_never_the_detail_title():
+    """상세에 <h3>법령해석</h3> 이 있어도 그것을 제목으로 돌려주면 안 된다."""
+    for idx in LIVE_CASES:
+        soup = _soup(idx)
+        assert soup.find("h3").get_text(strip=True) == "법령해석"      # fixture 전제 확인
+        assert BetterReplyScraper._detail_title(soup) != "법령해석"
+        # heading 폴백 자체도 유형 heading 을 후보로 삼지 않는다.
+        assert BetterReplyScraper._heading_title(soup) == ""
+
+
+# --- D/E. identity 통과 ---
+def test_live_5449_identity_passes_and_keeps_detail_url():
+    fetcher = _Fetcher(html=_live_html("5449"))
+    sc = _scraper(fetcher)
+    post = _live_post("5449")
+    detail_url = post.url
+    sc.enrich(post)
+    assert post.url == detail_url          # 목록 URL 로 되돌아가지 않았다
+    assert post.body != ""
+
+
+def test_live_5450_identity_passes_and_keeps_detail_url():
+    fetcher = _Fetcher(html=_live_html("5450"))
+    sc = _scraper(fetcher)
+    post = _live_post("5450")
+    detail_url = post.url
+    sc.enrich(post)
+    assert post.url == detail_url
+    assert post.body != ""
+
+
+def test_live_identity_uses_the_reply_date_row():
+    """회신일(2026-09-07)이 다르면 여전히 거부한다 — 제목만으로 통과하지 않는다."""
+    html = _live_html("5449").replace("2026-09-07\n", "2019-03-04\n")
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _live_post("5449")
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert post.url == LIST_URL
+
+
+# --- F. 본문 3/3 ---
+def test_live_bodies_have_all_three_sections():
+    for idx, case in LIVE_CASES.items():
+        sc = _scraper(_Fetcher(html=_live_html(idx)))
+        post = _live_post(idx)
+        sc.enrich(post)
+        for label in ("[질의요지]", "[회답]", "[이유]"):
+            assert label in post.body, (idx, label)
+        assert post.body.index("[질의요지]") < post.body.index("[회답]") < post.body.index("[이유]")
+        assert case["answer_head"] in post.body
+        assert sc.enrich_succeeded(post) is True
+        # 본문에 조작·푸터 텍스트가 섞이지 않는다.
+        for garbage in ("URL 복사", "COPYRIGHT", "대표전화", case["attachment"]):
+            assert garbage not in post.body, (idx, garbage)
+
+
+# --- G. 첨부 ---
+def test_live_attachments_are_collected_with_the_original_filename():
+    for idx, case in LIVE_CASES.items():
+        fetcher = _Fetcher(html=_live_html(idx))
+        sc = _scraper(fetcher)
+        post = _live_post(idx)
+        sc.enrich(post)
+        assert [a.filename for a in post.attachments] == [case["attachment"]], idx
+        att = post.attachments[0]
+        assert att.url.startswith("https://better.fsc.go.kr/fsc_new/file/displayFile.do")
+        assert att.data == b"HWP"
+        assert len(fetcher.downloaded) == 1
+
+
+# --- H. Gemini 요약 대상 ---
+def test_live_enriched_posts_are_general_summary_targets():
+    """실제 Summarizer 일반 경로에서 요약 대상이 되고, 3줄 요약이 붙는다."""
+    for idx in LIVE_CASES:
+        sc = _scraper(_Fetcher(html=_live_html(idx)))
+        post = _live_post(idx)
+        sc.enrich(post)
+        assert len(_prepare_body(_llm_cfg(), post)) >= _llm_cfg().min_body_chars
+
+        # 실제 일반 요약 경로(summarize_all)를 태운다 — Gemini 호출만 가짜 응답으로.
+        summarizer = Summarizer(_llm_cfg())
+        prompts: list[str] = []
+
+        def _generate(prompt, deadline=None, **kw):
+            prompts.append(prompt)
+            return _envelope('{"summary": ["요지 1", "요지 2", "요지 3"]}')
+
+        summarizer._generate = _generate
+        assert summarizer.summarize_all({post.source_name: [post]}) == 1, idx
+        assert len(prompts) == 1, idx           # 이 글로 실제 호출이 일어났다
+        assert "질의요지" in prompts[0] and "회답" in prompts[0], idx
+        assert post.summary == ["요지 1", "요지 2", "요지 3"], idx
+
+
+# --- I. 메일 렌더 ---
+def test_live_post_renders_summary_and_attachment_in_the_mail():
+    sc = _scraper(_Fetcher(html=_live_html("5449")))
+    post = _live_post("5449")
+    sc.enrich(post)
+    post.summary = ["첫째 줄", "둘째 줄", "셋째 줄"]
+
+    html = build_html({post.source_name: [post]})
+    text = build_text({post.source_name: [post]})
+    for line in post.summary:
+        assert line in html and line in text
+    assert LIVE_CASES["5449"]["attachment"] in html
+    assert LIVE_CASES["5449"]["attachment"] in text
+    assert "lawreqIdx=5449" in text            # 검증된 상세 링크가 그대로 나간다
+
+
+# --- 회귀 방어: 유형 heading 이 다시 제목으로 잡히면 안 된다 ---
+def test_live_fixture_would_have_failed_before_the_fix():
+    """이 fixture 로 예전 동작(유형 heading 채택)이 재현되지 않는지 못 박는다.
+
+    예전 구현에서는 본문 라벨 앞의 유일한 heading 후보가 <h3>법령해석</h3> 이라
+    _detail_title 이 '법령해석' 을 돌려주고 목록 제목과 어긋나 전부 거부됐다.
+    """
+    for idx, case in LIVE_CASES.items():
+        soup = _soup(idx)
+        headings = [h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2", "h3", "h4"])]
+        assert "법령해석" in headings                      # 유형 heading 이 여전히 있다
+        assert case["title"] not in headings               # 사건 제목은 heading 이 아니다
+        assert BetterReplyScraper._detail_title(soup) == case["title"]
+
+
+# --- identity mismatch 시 HTML 스냅샷(진단용) ---
+#
+# 이번 운영 버그에서는 로그에 "상세 '법령해석' ↔ 목록 '<제목>'" 까지만 남아 실제 DOM 을
+# 볼 수 없었다. 정상 수집에서는 남기지 않고, 확인 실패에서만 응답 본문을 남긴다.
+def test_identity_mismatch_dumps_the_response_html(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sc = _scraper(_Fetcher(html=NAV_CONTAINS_OTHER_TITLE_HTML))
+    sc.enrich(_post(_detail() + "&lawreqIdx=5449"))
+
+    dumped = list((tmp_path / "debug").glob("*.html"))
+    assert len(dumped) == 1
+    assert dumped[0].name == "better_reply_identity_mismatch_5449.html"
+    body = dumped[0].read_text(encoding="utf-8")
+    assert body == NAV_CONTAINS_OTHER_TITLE_HTML      # 응답 본문 그대로(헤더·쿠키 없음)
+
+
+def test_error_page_dumps_the_response_html(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sc = _scraper(_Fetcher(html=ERROR_HTML))
+    sc.enrich(_post(_detail() + "&lawreqIdx=5449"))
+    assert (tmp_path / "debug" / "better_reply_error_5449.html").exists()
+
+
+def test_successful_enrich_does_not_dump_anything(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sc = _scraper(_Fetcher(html=_live_html("5450")))
+    post = _live_post("5450")
+    sc.enrich(post)
+    assert post.body != ""
+    assert not (tmp_path / "debug").exists()
+
+
+def test_detail_idx_is_read_from_the_url():
+    from src.scrapers.better_fsc import BetterReplyScraper as S
+
+    assert S._detail_idx("https://x/LawreqDetail.do?stNo=11&lawreqIdx=5449") == "5449"
+    assert S._detail_idx("https://x/OpinionDetail.do?opinionIdx=2285") == "2285"
+    # 파일명이 되므로 숫자가 아니면 쓰지 않는다(경로 조각 유입 방지).
+    assert S._detail_idx("https://x/LawreqDetail.do?lawreqIdx=../../etc/passwd") == "unknown"
+    assert S._detail_idx("https://x/TotalReplyList.do") == "unknown"

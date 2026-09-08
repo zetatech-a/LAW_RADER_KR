@@ -12,9 +12,15 @@
 확인했다. 그 밖의 구분('현장건의 과제' 등)은 상세 주소가 확인되지 않았으므로
 **추측하지 않고** 예전처럼 통합조회 목록 URL 을 링크로 둔다(제목만 통지).
 
-아직 라이브로 확인하지 못한 가정 두 가지(머지 전 확인 대상 — 아래 가드는 이 가정을
-검증해 주는 것이 아니라, 가정이 틀렸을 때 잘못된 콘텐츠가 발송되는 것을 막는다):
-  A. 목록 JSON 의 dataIdx 가 lawreqIdx/opinionIdx 와 실제로 같은 값인지.
+라이브로 확인된 것(2026-09-08, GitHub Actions 러너에서 실제 GET):
+  LawreqDetail.do?stNo=11&muNo=117&muGpNo=75&lawreqIdx={5449,5450} 이 HTTP 200 으로
+  각각 목록 record(2026-09-07 신규 2건)와 **같은 글**의 상세를 돌려준다 — 정식 제목과
+  회신일(2026-09-07)이 목록과 정확히 일치했다. 즉 법령해석에서 dataIdx=lawreqIdx 다.
+  그 상세의 DOM 구조는 _subject_cell_title 의 주석에 그대로 적어 두었다.
+
+아직 라이브로 확인하지 못한 가정(아래 가드는 이 가정을 검증해 주는 것이 아니라,
+가정이 틀렸을 때 잘못된 콘텐츠가 발송되는 것을 막는다):
+  A. 비조치의견서에서 목록 JSON 의 dataIdx 가 opinionIdx 와 같은 값인지.
   B. OpinionDetail.do 에 통합조회 목록의 muNo=117 을 넣어도 정상 조회되는지
      (공개된 일반 비조치의견서 URL 에서는 muNo=86 도 쓰인다).
 
@@ -22,7 +28,7 @@
 확인한다(_identity_ok — 구분↔endpoint, 정식 제목 일치, 회신일 일치). 제목은 페이지
 전체 텍스트에서 찾지 않고 '제목이 놓인 자리'(_detail_title)에서만 읽어 정확히 같은지
 본다 — 잘못된 상세 B 의 이전글/다음글·푸터에 A 의 제목이 있어도 통과하면 안 되기
-때문이다. 확인되지 않으면 본문·첨부를 붙이지 않는 것은 물론(다운로드도 하지 않는다)
+때문이다. 그 '자리'는 라이브 DOM 에서 확인한 제목 칸(class="subject" 셀)이다. 확인되지 않으면 본문·첨부를 붙이지 않는 것은 물론(다운로드도 하지 않는다)
 **사용자 링크도 통합조회 목록으로 되돌린다** — 검증되지 않은 후보 링크를 그대로 두면
 제목만 보고 누른 사용자가 다른 사건의 상세로 가기 때문이다. 잘못된 회답을 다른 제목
 밑에 보내는 것이 본문이 비는 것보다 훨씬 나쁘므로 fail-open 하지 않는다. 반대로 identity 확인에 성공한 뒤의 본문
@@ -84,6 +90,17 @@ _REPLY_DATE_LABELS = ("회신일", "회신일자")
 
 # 상세의 '정식 제목' 이 라벨-값으로 노출될 때 쓰는 라벨.
 _TITLE_LABELS = ("제목",)
+
+# 정식 사건 제목이 실제로 놓이는 자리(라이브 확인 — 아래 '실제 상세 DOM' 참고).
+#   <tr><td class="subject" colspan="2">…사건 제목…</td></tr>
+# 라벨(th)이 없는 한 칸짜리 행이라 라벨-값 짝(_label_pairs)에 잡히지 않는다. 상세정보
+# 표(table.tbl-view.two)와 회신 표(table.tbl-write)에 같은 값이 두 번 들어 있다.
+_SUBJECT_CELL_CLASS = "subject"
+
+# 상세가 스스로 찍는 '유형' heading. 라이브 상세에서 div.sub-con 의 첫 요소가
+# <h3>법령해석</h3> 이고, 본문 라벨 앞의 유일한 heading 후보라 예전 구현이 이것을
+# 정식 제목으로 골랐다(이번 버그). 사건 제목이 아니므로 heading 후보에서 제외한다.
+_PAGE_TYPE_HEADINGS = frozenset(_DETAIL_ENDPOINTS)
 
 # 상세 상단에 필드명으로 등장하는 것으로 외부에서 확인된 라벨들. 제목 heading 후보에서
 # 걸러내는 용도로만 쓴다(있으면 제외, 없어도 무방 — 잘못 포함해도 fail-closed 방향).
@@ -353,12 +370,16 @@ class BetterReplyScraper(BaseScraper):
             log.warning(
                 "[%s] 상세가 포털 ERROR PAGE — 목록 링크로 되돌립니다: %s", self.key, detail_url
             )
+            self._dump_identity_debug("error", detail_url, html)
             self._fallback_to_list(post)
             return
 
         # 본문·첨부를 붙이기 **전에** 이 응답이 목록의 그 글이 맞는지 확인한다.
         # 확인되지 않으면 아무것도 붙이지 않고(첨부 다운로드도 하지 않고) 링크도 되돌린다.
         if not self._identity_ok(soup, post):
+            # 로그에는 추출된 제목만 남아 실제 마크업을 볼 수 없다. 다음 진단이 추측에서
+            # 시작하지 않도록 응답 HTML 스냅샷을 남긴다(성공 시에는 남기지 않는다).
+            self._dump_identity_debug("identity_mismatch", detail_url, html)
             self._fallback_to_list(post)
             return
 
@@ -390,6 +411,33 @@ class BetterReplyScraper(BaseScraper):
                 log.info("[%s] 첨부 용량 초과 — 링크만 유지 %s: %s", self.key, att.filename, e)
             except Exception as e:  # noqa: BLE001
                 log.warning("[%s] 첨부 다운로드 실패 %s: %s", self.key, att.url, e)
+
+    def _dump_identity_debug(self, reason: str, detail_url: str, html: str) -> None:
+        """동일 게시물 확인에 실패했을 때만 상세 응답 HTML 을 debug/ 에 남긴다.
+
+        운영 로그에는 '상세 제목 ↔ 목록 제목' 문자열만 남아 실제 DOM 을 볼 수 없다.
+        그러면 다음 수정이 마크업을 추측하는 데서 시작한다. 정상 수집에서는 남기지
+        않으며, 저장하는 것은 응답 본문뿐이다 — 요청 헤더·쿠키는 담지 않는다.
+        파일명에 상세 식별자(lawreqIdx/opinionIdx)를 넣어 어느 글의 스냅샷인지 남긴다.
+        """
+        try:
+            self._dump_debug(f"{reason}_{self._detail_idx(detail_url)}", html, suffix="html")
+        except Exception as e:  # noqa: BLE001 - 진단 실패가 수집을 막으면 안 된다
+            log.warning("[%s] 디버그 스냅샷 저장 실패 %s: %s", self.key, detail_url, e)
+
+    @staticmethod
+    def _detail_idx(url: str) -> str:
+        """상세 URL 의 식별자(lawreqIdx/opinionIdx) 값. 없으면 'unknown'.
+
+        파일명이 되므로 경로 조각이 섞이지 않도록 숫자만 인정한다.
+        """
+        query = parse_qs(urlparse(url or "").query)
+        for _, param in _DETAIL_ENDPOINTS.values():
+            values = query.get(param) or []
+            value = (values[-1] if values else "").strip()
+            if value.isdigit():
+                return value
+        return "unknown"
 
     def _fallback_to_list(self, post: Post) -> None:
         """검증되지 않은 상세 후보 링크를 사용자에게 노출하지 않는다.
@@ -499,21 +547,63 @@ class BetterReplyScraper(BaseScraper):
 
         순서:
           1) '제목' 라벨이 붙은 값(회신일과 같은 구조적 라벨-값 메커니즘).
-          2) 본문(질의요지) 앞에 오는 heading 중 필드 라벨이 아니고 링크·내비게이션·
-             푸터에 속하지 않는 것. **후보 텍스트가 정확히 한 가지일 때만** 인정한다 —
-             여럿이면 어느 것이 제목인지 알 수 없으므로 판단하지 않는다.
-          3) 그 밖에는 빈 문자열(호출자가 fail-closed 처리).
+          2) **제목 칸**(class="subject" 셀) — 라이브 상세에서 정식 사건 제목이 실제로
+             놓여 있는 자리다. 라벨(th)이 없는 한 칸짜리 행이라 1)에는 잡히지 않는다.
+          3) 본문(질의요지) 앞에 오는 heading. 라이브 상세에는 유형 heading('법령해석')
+             밖에 없어 이 경로만으로는 사건 제목을 얻지 못하므로 유형 heading 은 후보에서
+             빼고, 그래도 후보가 남는 다른 배치(비조치의견서 등)를 위해서만 남겨 둔다.
+          4) 그 밖에는 빈 문자열(호출자가 fail-closed 처리).
 
-        라이브 raw HTML 을 확인할 수 없으므로 클래스 이름(.board-title 등)은 쓰지
-        않는다. 위 두 경로 모두 문서 구조만 본다.
+        2)·3) 모두 '후보 값이 정확히 한 가지일 때만' 인정한다 — 값이 갈리면 어느 것이
+        제목인지 알 수 없으므로 판단하지 않는다(추측하지 않고 fail-closed).
         """
         for value in cls._labelled_values(soup, _TITLE_LABELS):
             return value
+        subject = cls._subject_cell_title(soup)
+        if subject:
+            return subject
         return cls._heading_title(soup)
 
     @classmethod
+    def _subject_cell_title(cls, soup: BeautifulSoup) -> str:
+        """'제목 칸'(class="subject" 셀)의 값. 값이 갈리면 빈 문자열(판단 보류).
+
+        라이브 상세(better.fsc.go.kr LawreqDetail.do, 2026-09-08 확인)의 구조:
+            div.sub-con > h3 '법령해석'                        ← 유형 heading(제목 아님)
+              div.board-view > table.tbl-view.two
+                tr > td.subject[colspan=2] '…사건 제목…'       ← 정식 제목
+                tr > th '처리구분' / td '완료'
+                tr > th '소관부서' / td '중소금융과'
+              div.res-wrap > div.tit '회신' > div.board-view > table.tbl-write
+                tr > td.subject[colspan=2] '…사건 제목…'       ← 같은 값이 한 번 더
+                tr > th '회신일' / td '2026-09-07'
+                tr > th '첨부파일' / td > a[href=/fsc_new/file/displayFile.do?…]
+                tr > th '질의요지' / td > p …
+                tr > th.bc-yellow '회답' / td.bc-yellow > p …
+                tr > th.bc-blue '이유' / td.bc-blue > p …
+
+        두 표의 제목 칸 값이 서로 다르면(=구조가 바뀐 것) 어느 쪽이 이 글의 제목인지
+        알 수 없으므로 인정하지 않는다. 내비게이션·링크 안에 있는 셀도 제외한다.
+        """
+        values: list[str] = []
+        for cell in soup.find_all(["td", "th"]):
+            if _SUBJECT_CELL_CLASS not in (cell.get("class") or []):
+                continue
+            if cls._inside_boundary(cell):
+                continue          # 내비게이션·링크 안의 제목 칸은 이 글의 제목이 아니다
+            text = _norm_ws(cell.get_text(" "))
+            if text:
+                values.append(text)
+        return values[0] if len(set(values)) == 1 else ""
+
+    @classmethod
     def _heading_title(cls, soup: BeautifulSoup) -> str:
-        """본문 앞 heading 에서 제목을 고른다. 후보가 여럿이면 빈 문자열(판단 보류)."""
+        """본문 앞 heading 에서 제목을 고른다. 후보가 여럿이면 빈 문자열(판단 보류).
+
+        유형 heading('법령해석'/'비조치의견서')은 후보가 아니다 — 라이브 상세에서 그것이
+        본문 라벨 앞의 **유일한** heading 이라, 예전 구현은 그 값을 정식 제목으로 골라
+        목록 제목과 어긋났고 정상 회신이 통째로 버려졌다(2026-09-07 lawreqIdx 5449·5450).
+        """
         candidates: list[str] = []
         # 문서 순서로 훑다가 첫 본문 라벨을 만나면 멈춘다 — 제목은 본문보다 앞에 있다.
         for el in soup.find_all(list(_LABEL_HOST_TAGS) + ["h1"]):
@@ -526,6 +616,8 @@ class BetterReplyScraper(BaseScraper):
             text = _norm_ws(el.get_text(" "))
             if not text or _norm_label(text) in _FIELD_LABELS:
                 continue
+            if text in _PAGE_TYPE_HEADINGS:
+                continue        # '법령해석'/'비조치의견서' 는 페이지 유형이지 사건 제목이 아니다
             candidates.append(text)
         unique = set(candidates)
         return candidates[0] if len(unique) == 1 else ""
