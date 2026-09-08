@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.debug_sanitize import (  # noqa: E402
     _redact_attr_url,
+    _redact_meta_refresh_content,
     redact_debug_html,
     redact_debug_text,
     redact_debug_url,
@@ -23,6 +24,8 @@ HOSTILE_HTML = """
 <head>
   <meta name="_csrf" content="csrf-secret-123">
   <meta name="_csrf_header" content="X-CSRF-TOKEN">
+  <meta http-equiv="refresh" content="0;url=/callback?access_token=refresh-secret&amp;lawreqIdx=5449">
+  <meta name="description" content="금융규제 법령해석 안내">
 </head>
 <body>
   <form id="form" action="/reply/x.do?lawreqIdx=5449&amp;csrfToken=aaaabbbbccccddddeeeeffff00001111">
@@ -71,6 +74,9 @@ _SECRETS = (
     "text-secret",
     "quoted-secret",
     "pre-secret",
+    # meta refresh 의 대상 URL — content 는 URL 속성이 아니라 별도 문법이라 다른
+    # 규칙이 하나도 닿지 않는다.
+    "refresh-secret",
 )
 
 
@@ -147,6 +153,8 @@ def test_hostile_html_keeps_public_diagnostics_after_every_rule():
     assert "sessionId = REDACTED" in out            # 공백 표기도 보존
     assert "access_token=REDACTED" in out
     assert "토큰 발급 절차에 관한 질의입니다" in out   # 자연어는 손대지 않는다
+    assert "0;url=/callback?access_token=REDACTED" in out   # refresh 는 구조를 유지
+    assert 'content="금융규제 법령해석 안내"' in out        # 일반 meta@content 는 무변경
 
 
 def test_hostile_html_keeps_structure_and_public_content():
@@ -288,3 +296,104 @@ def test_html_attribute_userinfo_url_reaches_the_url_sanitizer():
     out = redact_debug_html('<a href="https://alice:html-secret@example.com/detail">x</a>')
     assert "alice" not in out and "html-secret" not in out
     assert 'href="https://example.com/detail"' in out
+
+
+# --- Codex: meta refresh 의 대상 URL ---
+#
+# <meta http-equiv="refresh" content="0;url=…"> 의 content 는 URL 을 싣지만
+# _URL_VALUED_ATTRS 가 아니고, 'delay;url=TARGET' 이라는 별도 문법이라 마지막
+# 텍스트 패스도 바깥 'url=…' 하나로 볼 뿐 그 안의 access_token 을 다시 URL 로 읽지
+# 않는다. meta@content 전체를 URL 로 취급할 수는 없으므로(description·og:title)
+# http-equiv=refresh 인 meta 만 따로 읽어 redact_debug_url 을 재사용한다.
+def test_meta_refresh_target_url_is_sanitized():
+    """1. Codex repro."""
+    safe = redact_debug_html(
+        '<meta http-equiv="refresh" '
+        'content="0;url=/callback?access_token=TOPSECRET&lawreqIdx=5449">'
+    )
+    assert "TOPSECRET" not in safe
+    assert "access_token=REDACTED" in safe
+    assert "lawreqIdx=5449" in safe
+    assert "/callback" in safe
+
+
+def test_meta_refresh_is_case_and_whitespace_tolerant():
+    """2. http-equiv 과 url 키워드는 대소문자를 가리지 않고, 공백 표기는 보존한다."""
+    safe = redact_debug_html(
+        '<meta http-equiv="Refresh" '
+        'content="5 ; URL = /cb?sessionId=SESSION_SECRET&opinionIdx=2284">'
+    )
+    assert "SESSION_SECRET" not in safe
+    assert "opinionIdx=2284" in safe
+    assert "5 ; URL = " in safe
+
+
+def test_meta_refresh_quoted_target_is_sanitized():
+    """3. 따옴표로 감싼 대상도 벗겨 정화한 뒤 같은 따옴표로 되감는다."""
+    for quote in ("'", "&quot;"):
+        safe = redact_debug_html(
+            f'<meta http-equiv="refresh" '
+            f'content="0;url={quote}https://example.com/cb?token=QUOTED_SECRET{quote}">'
+        )
+        assert "QUOTED_SECRET" not in safe, quote
+        assert "example.com/cb" in safe, quote
+
+
+def test_meta_refresh_first_semicolon_only_is_the_separator():
+    """4. 대상 안의 ';jsessionid=…' 을 refresh 구분자로 오인하면 안 된다."""
+    safe = redact_debug_html(
+        '<meta http-equiv="refresh" '
+        'content="0;url=/cb;jsessionid=JS_SECRET?lawreqIdx=5449#access_token=FRAG_SECRET">'
+    )
+    assert "JS_SECRET" not in safe and "FRAG_SECRET" not in safe
+    assert "lawreqIdx=5449" in safe
+    assert "0;url=/cb;" in safe
+
+
+def test_meta_refresh_target_userinfo_is_dropped():
+    """5. 대상 URL 의 userinfo 도 URL 정화기가 그대로 처리한다."""
+    safe = redact_debug_html(
+        '<meta http-equiv="refresh" content="0;url=https://alice:PASSWORD@example.com/detail">'
+    )
+    assert "alice" not in safe and "PASSWORD" not in safe
+    assert "https://example.com/detail" in safe
+
+
+def test_malformed_meta_refresh_is_redacted_whole():
+    """6. 해석할 수 없으면 content 를 통째로 지운다(fail-closed).
+
+    망가진 refresh 문자열을 진단에서 잃는 것보다 credential 이 남는 쪽이 위험하다.
+    """
+    safe = redact_debug_html(
+        '<meta http-equiv="refresh" content="weird access_token=MALFORMED_SECRET">'
+    )
+    assert "MALFORMED_SECRET" not in safe
+    assert 'content="REDACTED"' in safe
+    # 'url=' 이 없거나 지연시간 자리가 이상한 값도 마찬가지다.
+    for bad in ("0;noturl=abc", "junk;url=/x?token=T"):
+        assert _redact_meta_refresh_content(bad) == "REDACTED", bad
+
+
+def test_delay_only_meta_refresh_is_left_alone():
+    """URL 이 없는 순수 지연 refresh 는 비밀이 아니므로 그대로 둔다."""
+    safe = redact_debug_html('<meta http-equiv="refresh" content="5">')
+    assert 'content="5"' in safe
+    assert _redact_meta_refresh_content(" 0.5 ") == " 0.5 "
+
+
+def test_ordinary_meta_content_is_never_touched():
+    """7. 회귀 방어 — meta@content 를 일반 URL 속성으로 취급하면 안 된다."""
+    safe = redact_debug_html(
+        '<meta name="description" content="금융규제 법령해석 안내">'
+        '<meta property="og:title" content="게시물 제목">'
+    )
+    assert 'content="금융규제 법령해석 안내"' in safe
+    assert 'content="게시물 제목"' in safe
+
+
+def test_public_meta_refresh_target_survives():
+    """8. 공개 식별자만 실린 refresh 는 구조까지 그대로 남는다."""
+    safe = redact_debug_html(
+        '<meta http-equiv="refresh" content="0;url=/detail?lawreqIdx=5449">'
+    )
+    assert 'content="0;url=/detail?lawreqIdx=5449"' in safe

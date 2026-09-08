@@ -52,6 +52,14 @@ _REDACTED = "REDACTED"
 #   - 이름은 ASCII 식별자만 받는다. 한국어 문장('토큰 발급 절차…')을 건드리지 않는다.
 #   - 값은 따옴표가 있으면 그 안까지, 없으면 다음 경계 전까지다. 경계를 좁게 잡지
 #     않으면 뒤따르는 다른 파라미터나 HTML 태그까지 통째로 삼킨다.
+# <meta http-equiv="refresh" content="0;url=…"> 의 content 문법.
+# meta@content 는 일반적으로 URL 이 아니므로(description·og:title …) _URL_VALUED_ATTRS
+# 에 넣을 수 없다. http-equiv 가 refresh 인 meta 만 이 문법으로 따로 읽는다.
+#   지연시간 ; [공백] url [공백] = [공백] 대상
+# 첫 번째 ';' 만 구분자다 — 대상 URL 안의 ';jsessionid=…' 을 구분자로 오인하면 안 된다.
+_REFRESH_DELAY = re.compile(r"^\s*\d*(?:\.\d+)?\s*$")
+_REFRESH_TARGET = re.compile(r"^(?P<lead>\s*)(?P<kw>url)(?P<mid>\s*=\s*)(?P<target>.*)$", re.I | re.S)
+
 _SECRET_ASSIGNMENT = re.compile(
     r"""(?P<key>[A-Za-z][A-Za-z0-9_.\-]{0,63})
         (?P<sep>\s*=\s*)
@@ -192,11 +200,49 @@ def _has_userinfo(value: str) -> bool:
         return True          # 파싱조차 안 되는 값은 정화기로 보낸다(fail-safe)
 
 
+def _redact_meta_refresh_content(content: str) -> str:
+    """meta refresh 의 content 에서 대상 URL 만 뽑아 URL 규칙으로 정화한다.
+
+    URL 문법을 새로 만들지 않는다 — 'delay ; url = TARGET' 에서 TARGET 을 떼어
+    redact_debug_url 에 그대로 넘기고 같은 자리에 다시 끼운다. 대상 안의
+    ';jsessionid=…' · '?token=…' · '#…' · 'user:pass@host' 는 URL 정화기가 이미 아는
+    구조이므로 여기서 다시 쪼개지 않는다(첫 ';' 만 구분자로 본다).
+
+    정책:
+      - 'delay;url=TARGET'  → TARGET 만 정화하고 표기(대소문자·공백·따옴표)는 보존.
+      - 숫자 지연만 있는 값('5') → URL 이 없으므로 그대로 둔다.
+      - 그 밖의 해석 불가 값 → **content 전체를 지운다(fail-closed).** 진단에서
+        망가진 refresh 문자열을 잃는 것보다 credential 이 남는 쪽이 위험하다.
+    """
+    raw = content or ""
+    delay, semi, rest = raw.partition(";")
+    if not semi:
+        # 'url=' 이 없는 값. 순수 숫자 지연만 정상으로 인정한다.
+        return raw if _REFRESH_DELAY.match(raw) else _REDACTED
+    if not _REFRESH_DELAY.match(delay):
+        return _REDACTED
+    m = _REFRESH_TARGET.match(rest)
+    if not m:
+        return _REDACTED
+
+    target = m.group("target").strip()
+    quote = ""
+    if len(target) >= 2 and target[0] == target[-1] and target[0] in "\"'":
+        quote, target = target[0], target[1:-1]
+    return (
+        f"{delay};{m.group('lead')}{m.group('kw')}{m.group('mid')}"
+        f"{quote}{redact_debug_url(target)}{quote}"
+    )
+
+
 def redact_debug_html(html: str) -> str:
     """덤프용 정화: 이름이 비밀인 meta/input 값을 지우고 값 패턴도 지운다.
 
     _csrf_header / _csrf_parameter 의 content 는 토큰이 아니라 헤더 '이름'(예:
     X-CSRF-TOKEN)이라 남긴다 — 계약이 바뀌었는지 보려면 그 값이 필요하다.
+    http-equiv="refresh" 인 meta 의 content 만은 URL 을 싣는 자리이므로 따로 읽는다
+    (_redact_meta_refresh_content). 그 밖의 meta@content(description·og:title …)는
+    URL 이 아니므로 건드리지 않는다.
     파싱이 실패해도 원문을 그대로 흘리지 않고 값 패턴 정화는 반드시 적용한다.
 
     제목·본문 같은 공개 텍스트와 태그·클래스 구조는 건드리지 않는다. 정화가 진단을
@@ -207,6 +253,16 @@ def redact_debug_html(html: str) -> str:
         soup = BeautifulSoup(text, "lxml")
     except Exception:  # noqa: BLE001 — 진단 덤프가 파서 문제로 실패하면 안 된다
         return redact_debug_text(text)
+
+    # meta refresh 의 대상 URL. 아래 이름 기준 정화보다 **먼저** 돌린다 — 이름까지
+    # 비밀인 이상한 meta 라면 그 뒤 규칙이 content 를 통째로 지워 더 안전한 쪽이 남는다.
+    for el in soup.find_all("meta"):
+        equiv = el.get("http-equiv")
+        content = el.get("content")
+        if not isinstance(equiv, str) or equiv.strip().lower() != "refresh":
+            continue
+        if isinstance(content, str) and content.strip():
+            el["content"] = _redact_meta_refresh_content(content)
 
     for el in soup.find_all(["input", "meta"]):
         name = (el.get("name") or el.get("id") or "").lower()
