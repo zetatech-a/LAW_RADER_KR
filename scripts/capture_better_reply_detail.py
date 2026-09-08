@@ -24,6 +24,14 @@ element 에 있는가' 를 눈으로 확인하기 위한 도구다(추측한 sel
   하나만 만들어 그것으로 파싱·출력·저장을 모두 한다(제목·본문 같은 공개 텍스트와
   태그·클래스 구조는 정화가 건드리지 않으므로 진단 가치는 그대로다).
 
+  **예외 메시지(str(e))는 찍지 않는다 — 예외 종류만 남긴다.** requests 계열 예외는
+  실패한 URL 을 메시지에 그대로 담는데(최종 리다이렉트 주소·쿼리·;jsessionid·프래그먼트
+  포함), 그 문자열은 URL 이라는 보장도 없어 redact_debug_url 을 태울 수 없다. 응답을
+  아무리 잘 정화해도 이 경로로 credential 이 로그에 남는다. 실패 진단에 필요한 것은
+  '어떤 동작이 몇 번째 시도에서 어떤 예외로 실패했는가' 이고, 요청 대상 URL 은 요청
+  전에 이미 정화본으로 찍어 두었다. 같은 이유로 traceback·logging.exception·
+  exc_info 도 쓰지 않는다(트레이스백 마지막 줄이 곧 예외 메시지다).
+
 사용:
   python scripts/capture_better_reply_detail.py --idx 5449 --expect-title "…"
   python scripts/capture_better_reply_detail.py --idx 5450 --gubun 법령해석
@@ -126,7 +134,7 @@ def warm_up(sc: BetterReplyScraper, idx_wanted: set, attempts: int) -> None:
     try:
         posts = _retry(lambda: sc.fetch_list(30, page=1), attempts, "목록 AJAX POST")
     except Exception as e:  # noqa: BLE001
-        print(f"⚠️ 목록 수집 실패(계속 진행): {type(e).__name__}: {e}")
+        print(f"⚠️ 목록 수집 실패(계속 진행): {type(e).__name__}")
         return
     print(f"목록 1페이지 {len(posts)}건 — 대상 idx 매칭:")
     for post in posts:
@@ -165,7 +173,7 @@ def capture(sc: BetterReplyScraper, idx: str, gubun: str, expect_title: str,
         resp = _retry(lambda: sc.fetcher.get(url, referer=LIST_URL), attempts, "상세 GET")
         html = sc.fetcher.text(resp)
     except Exception as e:  # noqa: BLE001
-        print(f"❌ HTTP 실패: {type(e).__name__}: {e}")
+        print(f"❌ HTTP 실패: {type(e).__name__}")
         return 2
 
     # 여기서부터 원본 HTML 은 쓰지 않는다. 파일도 로그도 정화본에서만 만든다.
@@ -282,7 +290,16 @@ def main(argv=None):
     rc = 0
     for i, idx in enumerate(idxs):
         expect = args.expect_title[i] if i < len(args.expect_title) else ""
-        rc |= capture(sc, idx, args.gubun, expect.strip(), args.outline_limit, args.attempts)
+        try:
+            rc |= capture(
+                sc, idx, args.gubun, expect.strip(), args.outline_limit, args.attempts
+            )
+        except Exception as e:  # noqa: BLE001
+            # 마지막 안전망. 여기서 예외가 새어 나가면 파이썬이 트레이스백을 stderr 로
+            # 찍는데, 그 마지막 줄이 곧 예외 메시지다(= 같은 유출 경로). 이 스크립트에
+            # 필요한 진단은 위에서 이미 찍은 안전한 URL·시도 횟수·예외 종류뿐이다.
+            print(f"❌ 캡처 중단(idx={idx}): {type(e).__name__}")
+            rc |= 2
         print()
     return rc
 

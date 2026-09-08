@@ -15,6 +15,8 @@ fetcher 로 결정적으로 검증한다.
 """
 import os
 import sys
+
+import pytest
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1842,3 +1844,144 @@ def test_5_live_fixtures_still_pass_with_identical_subject_cells():
             assert label in post.body, (idx, label)
         assert [a.filename for a in post.attachments] == [case["attachment"]], idx
         assert sc.enrich_succeeded(post) is True, idx
+
+
+# =============================================================================
+# Codex 리뷰 — 요청 예외 문자열이 sanitizer 를 우회해 Actions 로그에 남으면 안 된다
+#
+# 응답 HTML·href·프래그먼트는 모두 정화하는데, 요청 실패 경로만 str(e) 를 그대로
+# 찍고 있었다. requests 계열 예외는 실패한 URL(최종 리다이렉트 주소·쿼리·
+# ;jsessionid·프래그먼트 포함)을 메시지에 담으므로 같은 credential 이 그 길로 샌다.
+# 정책: 예외 '종류'까지만 남기고 메시지는 버린다.
+# =============================================================================
+_EXC_SECRETS = ("JS_SECRET", "TOKEN_SECRET", "FRAGMENT_SECRET", "SESSION_SECRET")
+
+
+def _leaky_error(cls=RuntimeError):
+    """실패한 URL 을 메시지에 담는, requests 계열과 같은 모양의 예외."""
+    return cls(
+        "failed at https://better.fsc.go.kr/x"
+        ";jsessionid=JS_SECRET"
+        "?token=TOKEN_SECRET"
+        "#access_token=FRAGMENT_SECRET"
+    )
+
+
+def _assert_no_exception_secrets(capsys):
+    captured = capsys.readouterr()
+    for stream, text in (("stdout", captured.out), ("stderr", captured.err)):
+        for secret in _EXC_SECRETS:
+            assert secret not in text, (stream, secret)
+    return captured
+
+
+def test_retry_logs_only_the_exception_type(capsys, monkeypatch):
+    """1. _retry 의 시도별 실패 로그에 예외 메시지가 실리지 않는다."""
+    import scripts.capture_better_reply_detail as cap
+
+    monkeypatch.setattr(cap.time, "sleep", lambda *_a, **_k: None)
+
+    def _boom():
+        raise _leaky_error()
+
+    with pytest.raises(RuntimeError):
+        cap._retry(_boom, 2, "상세 GET")
+
+    out = _assert_no_exception_secrets(capsys).out
+    assert "RuntimeError" in out                 # 예외 종류는 남는다
+    assert "상세 GET 시도 1/2" in out            # 동작 이름·시도 횟수도 남는다
+    assert "상세 GET 시도 2/2" in out
+
+
+def test_warm_up_failure_logs_only_the_exception_type(capsys, monkeypatch):
+    """2. 목록 수집 실패 outer except 도 메시지를 찍지 않는다."""
+    import scripts.capture_better_reply_detail as cap
+
+    monkeypatch.setattr(cap.time, "sleep", lambda *_a, **_k: None)
+    sc = cap._scraper()
+    monkeypatch.setattr(
+        sc, "fetch_list",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("https://host/list?sessionId=SESSION_SECRET")
+        ),
+    )
+
+    cap.warm_up(sc, {"5449"}, attempts=1)
+
+    out = _assert_no_exception_secrets(capsys).out
+    assert "RuntimeError" in out
+    assert "목록 수집 실패" in out
+
+
+def test_capture_http_failure_logs_only_the_exception_type(capsys, monkeypatch):
+    """3. 상세 GET 실패 시 rc=2 를 돌려주되 메시지는 남기지 않는다."""
+    import scripts.capture_better_reply_detail as cap
+
+    monkeypatch.setattr(cap.time, "sleep", lambda *_a, **_k: None)
+
+    class _BoomFetcher:
+        def get(self, url, *, referer=None, **kw):
+            raise _leaky_error()
+
+    sc = cap._scraper()
+    sc.fetcher = _BoomFetcher()
+    assert cap.capture(sc, "5449", "법령해석", "", 50, 1) == 2
+
+    out = _assert_no_exception_secrets(capsys).out
+    assert "HTTP 실패" in out and "RuntimeError" in out
+
+
+def test_capture_still_prints_the_sanitized_target_url(capsys, monkeypatch):
+    """4. 이번 수정이 URL 진단 자체를 없애면 안 된다 — 공개 식별자는 계속 보인다."""
+    import scripts.capture_better_reply_detail as cap
+
+    monkeypatch.setattr(cap.time, "sleep", lambda *_a, **_k: None)
+
+    class _BoomFetcher:
+        def get(self, url, *, referer=None, **kw):
+            raise _leaky_error()
+
+    sc = cap._scraper()
+    sc.fetcher = _BoomFetcher()
+    cap.capture(sc, "5449", "법령해석", "", 50, 1)
+
+    out = capsys.readouterr().out
+    assert "lawreqIdx=5449" in out               # 요청 전에 찍는 정화된 URL
+    assert "LawreqDetail.do" in out
+
+
+def test_capture_failure_leaves_no_traceback_on_stderr(capsys, monkeypatch):
+    """5. 실패 경로가 트레이스백을 흘리지 않는다(마지막 줄이 곧 예외 메시지다)."""
+    import scripts.capture_better_reply_detail as cap
+
+    monkeypatch.setattr(cap.time, "sleep", lambda *_a, **_k: None)
+
+    class _BoomFetcher:
+        def get(self, url, *, referer=None, **kw):
+            raise _leaky_error()
+
+    sc = cap._scraper()
+    sc.fetcher = _BoomFetcher()
+    cap.capture(sc, "5449", "법령해석", "", 50, 1)
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "Traceback" not in captured.out and "Traceback" not in captured.err
+
+
+def test_main_catches_unexpected_errors_without_printing_the_message(capsys, monkeypatch):
+    """main 의 마지막 안전망도 종류까지만 남긴다(트레이스백 유출 방지)."""
+    import scripts.capture_better_reply_detail as cap
+
+    monkeypatch.setattr(cap, "warm_up", lambda *a, **kw: None)
+
+    def _boom(*_a, **_kw):
+        raise _leaky_error()
+
+    monkeypatch.setattr(cap, "capture", _boom)
+    assert cap.main(["--idx", "5449"]) == 2
+
+    captured = _assert_no_exception_secrets(capsys)
+    assert "캡처 중단(idx=5449)" in captured.out
+    assert "RuntimeError" in captured.out
+    assert "Traceback" not in captured.err
