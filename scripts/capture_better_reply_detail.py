@@ -23,6 +23,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -81,8 +82,46 @@ def _scraper() -> BetterReplyScraper:
     return BetterReplyScraper(src, Fetcher(timeout=30.0, delay=0.5))
 
 
-def capture(idx: str, gubun: str, expect_title: str, outline_limit: int) -> int:
-    sc = _scraper()
+def warm_up(sc: BetterReplyScraper, idx_wanted: set, attempts: int) -> None:
+    """생산 흐름과 같은 순서로 세션을 만든다: 목록 페이지 GET → 목록 AJAX POST.
+
+    상세를 곧바로 치지 않는 이유는 두 가지다. (1) 포털이 세션 쿠키를 요구할 수 있고,
+    (2) 목록 record 를 실제로 받아 두면 dataIdx 가 정말 그 제목·회신일의 글인지
+    (= lawreqIdx 매핑 가정) 확인할 수 있다.
+    """
+    try:
+        _retry(lambda: sc.fetcher.get(LIST_URL), attempts, "목록 페이지 GET")
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ 목록 페이지 GET 실패(계속 진행): {type(e).__name__}: {e}")
+
+    try:
+        posts = _retry(lambda: sc.fetch_list(30, page=1), attempts, "목록 AJAX POST")
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ 목록 수집 실패(계속 진행): {type(e).__name__}: {e}")
+        return
+    print(f"목록 1페이지 {len(posts)}건 — 대상 idx 매칭:")
+    for post in posts:
+        for want in idx_wanted:
+            if post.post_id.endswith(f":{want}") or f"Idx={want}" in post.url:
+                print(f"  · dataIdx={want}: [{post.date}] {post.title}")
+                print(f"    {post.url}")
+    print()
+
+
+def _retry(fn, attempts: int, what: str):
+    last = None
+    for i in range(1, max(1, attempts) + 1):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            print(f"  ({what} 시도 {i}/{attempts} 실패: {type(e).__name__})")
+            time.sleep(min(10.0, 2.0 * i))
+    raise last
+
+
+def capture(sc: BetterReplyScraper, idx: str, gubun: str, expect_title: str,
+            outline_limit: int, attempts: int) -> int:
     url = sc._detail_url({"pastreqType": gubun, "dataIdx": idx})
     if not url:
         print(f"❌ 상세 URL 을 만들 수 없습니다(구분={gubun!r}).")
@@ -94,7 +133,7 @@ def capture(idx: str, gubun: str, expect_title: str, outline_limit: int) -> int:
     print("=" * 72)
 
     try:
-        resp = sc.fetcher.get(url, referer=LIST_URL)
+        resp = _retry(lambda: sc.fetcher.get(url, referer=LIST_URL), attempts, "상세 GET")
         html = sc.fetcher.text(resp)
     except Exception as e:  # noqa: BLE001
         print(f"❌ HTTP 실패: {type(e).__name__}: {e}")
@@ -189,12 +228,17 @@ def main(argv=None):
     ap.add_argument("--gubun", default="법령해석", choices=["법령해석", "비조치의견서"])
     ap.add_argument("--expect-title", action="append", default=[])
     ap.add_argument("--outline-limit", type=int, default=400)
+    ap.add_argument("--attempts", type=int, default=4, help="요청 재시도 횟수")
     args = ap.parse_args(argv)
 
+    sc = _scraper()
+    idxs = [i.strip() for i in args.idx if i.strip()]
+    warm_up(sc, set(idxs), args.attempts)
+
     rc = 0
-    for i, idx in enumerate(args.idx):
+    for i, idx in enumerate(idxs):
         expect = args.expect_title[i] if i < len(args.expect_title) else ""
-        rc |= capture(idx.strip(), args.gubun, expect.strip(), args.outline_limit)
+        rc |= capture(sc, idx, args.gubun, expect.strip(), args.outline_limit, args.attempts)
         print()
     return rc
 
