@@ -1985,3 +1985,102 @@ def test_main_catches_unexpected_errors_without_printing_the_message(capsys, mon
     assert "캡처 중단(idx=5449)" in captured.out
     assert "RuntimeError" in captured.out
     assert "Traceback" not in captured.err
+
+
+# =============================================================================
+# Codex 리뷰 — 내비게이션 링크를 담은 제목 칸은 canonical 후보가 아니다
+#
+# _inside_boundary 는 셀의 **조상**만 본다. 이전글/다음글 목록은 링크를 셀 **안에**
+# 두므로(<td class="subject"><a href="/previous">A 사건</a></td>) 조상에는 걸리는 것이
+# 없고, 옆 글 제목이 canonical 후보로 섞인다. 그 제목이 마침 목록 제목과 같으면
+# identity 가 통과해 다른 사건의 회답·첨부가 실린다.
+# =============================================================================
+_NAV_SUBJECT = '<td class="subject"><a href="/previous">A 사건</a></td>'
+
+
+def _subject_page_cells(cells, heading="제목 없음", date="2026-08-20"):
+    return f"""
+<div id="content">
+  <h2>{heading}</h2>
+  <table class="tbl-view two"><tbody>{cells}</tbody></table>
+  <table class="tbl-write"><tbody>
+    <tr><th>회신일</th><td>{date}</td></tr>
+    <tr><th>질의요지</th><td>질의 본문입니다.</td></tr>
+    <tr><th>회답</th><td>회답 본문입니다.</td></tr>
+    <tr><th>이유</th><td>이유 본문입니다.</td></tr>
+    <tr><th>첨부파일</th><td>
+      <a href="/fsc_new/file/displayFile.do?filePath=%2Fx&amp;orgFileName=a.hwp&amp;sysFileName=1.hwp">첨부.hwp</a>
+    </td></tr>
+  </tbody></table>
+</div>
+"""
+
+
+def _subject_of(html):
+    from bs4 import BeautifulSoup
+
+    return BetterReplyScraper._subject_cell_title(BeautifulSoup(html, "lxml"))
+
+
+def test_A_navigation_subject_does_not_conflict_with_the_canonical_title():
+    """A. 이전글 제목이 섞여도 canonical 두 칸이 같으면 그 값이 제목이다."""
+    cells = '<td class="subject">B 사건</td><td class="subject">B 사건</td>' + _NAV_SUBJECT
+    assert _subject_of(_subject_page_cells(cells)) == "B 사건"
+
+
+def test_B_navigation_only_subject_counts_as_absence():
+    """B. 링크 전용 제목 칸만 있으면 canonical 근거가 '없는' 것이다(3-state 의 None)."""
+    assert _subject_of(_subject_page_cells(_NAV_SUBJECT)) is None
+    # 근거가 없으므로 heading 폴백이 살아 있다(기존 호환 경로).
+    assert _title_of(_subject_page_cells(_NAV_SUBJECT, heading="H 사건")) == "H 사건"
+
+
+def test_C_previous_post_title_matching_the_list_never_passes_identity():
+    """C. 공격 재현 — 이전글 제목이 목록 제목과 같고 회신일도 같은 경우."""
+    cells = '<td class="subject">B 사건</td><td class="subject">B 사건</td>' + _NAV_SUBJECT
+    html = _subject_page_cells(cells)
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail(), title="[법령해석] A 사건", date="2026-08-20")
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert post.url == LIST_URL
+    assert sc.enrich_succeeded(post) is False
+
+
+def test_D_canonical_conflict_with_navigation_still_forbids_the_heading_fallback():
+    """D. canonical 이 갈리면 내비게이션 제목이 있어도 폴백 없이 거부한다."""
+    cells = ('<td class="subject">B 사건</td><td class="subject">C 사건</td>' + _NAV_SUBJECT)
+    html = _subject_page_cells(cells, heading="A 사건")
+    assert _subject_of(html) == ""
+    assert _title_of(html) == ""
+
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail(), title="[법령해석] A 사건", date="2026-08-20")
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == [] and post.url == LIST_URL
+
+
+def test_inline_link_inside_a_subject_cell_is_not_navigation():
+    """회귀 방어 — 앵커 밖에 실질 텍스트가 있으면 본문 문단과 같은 취급이다."""
+    cell = '<td class="subject">사건 제목 <a href="/law">관련 법령</a></td>'
+    assert _subject_of(_subject_page_cells(cell)) == "사건 제목 관련 법령"
+
+
+def test_E_live_fixtures_are_unaffected_by_the_boundary_check():
+    """E. 5449/5450 의 제목 칸은 링크가 없는 평범한 셀이라 그대로 통과한다."""
+    for idx, case in LIVE_CASES.items():
+        fetcher = _Fetcher(html=_live_html(idx))
+        sc = _scraper(fetcher)
+        post = _live_post(idx)
+        detail_url = post.url
+        sc.enrich(post)
+        assert _subject_of(_live_html(idx)) == case["title"], idx
+        assert post.url == detail_url, idx
+        for label in ("[질의요지]", "[회답]", "[이유]"):
+            assert label in post.body, (idx, label)
+        assert [a.filename for a in post.attachments] == [case["attachment"]], idx
+        assert sc.enrich_succeeded(post) is True, idx

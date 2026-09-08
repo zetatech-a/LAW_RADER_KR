@@ -43,6 +43,24 @@ _SECRET_VALUE_PATTERNS = (
 )
 _REDACTED = "REDACTED"
 
+# 눈에 보이는 텍스트에 그대로 찍힌 'key=value'. 오류 페이지가 요청 URL 을 화면에
+# echo 하거나 <pre> 로 파라미터를 늘어놓을 때 실제로 생긴다 — 그 자리는 속성도
+# 스크립트도 아니라 위의 규칙이 하나도 닿지 않는다.
+#
+# 이름은 _is_secret_field 로 판정한다(문자열을 따로 나열하지 않는다). 그래야
+# _PUBLIC_URL_KEYS 가 그대로 존중되어 lawreqIdx=5449 같은 공개 식별자가 살아남는다.
+#   - 이름은 ASCII 식별자만 받는다. 한국어 문장('토큰 발급 절차…')을 건드리지 않는다.
+#   - 값은 따옴표가 있으면 그 안까지, 없으면 다음 경계 전까지다. 경계를 좁게 잡지
+#     않으면 뒤따르는 다른 파라미터나 HTML 태그까지 통째로 삼킨다.
+_SECRET_ASSIGNMENT = re.compile(
+    r"""(?P<key>[A-Za-z][A-Za-z0-9_.\-]{0,63})
+        (?P<sep>\s*=\s*)
+        (?P<quote>["']?)
+        (?P<value>[^"'\s&;#<>]*)
+        (?P=quote)""",
+    re.VERBOSE,
+)
+
 # 값이 URL 인 HTML 속성. 문자열이 아니라 URL 로 취급해 정화한다.
 _URL_VALUED_ATTRS = (
     "action", "formaction", "href", "src", "poster", "cite",
@@ -68,12 +86,26 @@ def _is_secret_field(name: str) -> bool:
     return any(h in low for h in _SECRET_FIELD_HINTS)
 
 
+def _redact_assignment(m: "re.Match[str]") -> str:
+    """'key=value' 한 건. 이름이 비밀이면 값만 지우고, 아니면 원문 그대로 둔다."""
+    if not _is_secret_field(m.group("key")):
+        return m.group(0)
+    quote = m.group("quote")
+    return f"{m.group('key')}{m.group('sep')}{quote}{_REDACTED}{quote}"
+
+
 def redact_debug_text(text: str) -> str:
-    """값 패턴만 지운다. HTML 로 파싱할 수 없는 문자열에 쓴다."""
+    """값 패턴과 비밀 이름의 'key=value' 를 지운다. 이름·공개 값은 남긴다.
+
+    값 패턴(JSESSIONID=…, 긴 16진수)만으로는 부족하다 — 화면에 그대로 찍힌
+    'access_token=…' 은 속성도 스크립트도 아니라 다른 규칙이 닿지 않는다.
+    이름 판정은 _is_secret_field 를 그대로 쓰므로 lawreqIdx 같은 공개 키는 값까지
+    남는다.
+    """
     out = text or ""
     for pat in _SECRET_VALUE_PATTERNS:
         out = pat.sub(_REDACTED, out)
-    return out
+    return _SECRET_ASSIGNMENT.sub(_redact_assignment, out)
 
 
 def redact_debug_url(url: str) -> str:
@@ -83,6 +115,10 @@ def redact_debug_url(url: str) -> str:
     않고, 패턴은 쿼리 파라미터 '이름'을 모른다. 경로 파라미터(;jsessionid=…)까지 보는
     이유는 쿠키가 막힌 클라이언트에 서블릿 컨테이너가 그 자리에 세션 ID 를 붙이기
     때문이다(likms 가 그 형태다).
+
+    **URL 에 userinfo(user:pass@host)가 있으면 통째로 버린다.** 진단에 필요한 것은
+    host/port 구조이지 자격 증명이 아니고, username 자체도 credential·PII 일 수 있어
+    REDACTED 로 남길 이유가 없다. host 와 port 는 그대로 둔다(IPv6 대괄호 포함).
 
     **프래그먼트는 비어 있지 않으면 통째로 지운다.** 쿼리처럼 이름만 골라 남기지
     않는다 — 프래그먼트는 'key=value' 형태라는 보장이 없고(#opaque-token,
@@ -115,6 +151,9 @@ def redact_debug_url(url: str) -> str:
     # URL 에 '#REDACTED' 가 새로 붙는다.
     return urlunparse(
         parts._replace(
+            # userinfo 는 마지막 '@' 앞까지다. netloc 이 없으면(상대 URL) 빈 문자열이라
+            # 경로 안의 '@'(/mail/user@example.com)는 건드리지 않는다.
+            netloc=parts.netloc.rsplit("@", 1)[-1],
             path=redact_debug_text(parts.path),
             params=_values(parts.params, ";"),
             query=_values(parts.query, "&"),
@@ -131,14 +170,26 @@ def _redact_attr_url(value: str) -> str:
     없어서 예전에는 URL 정화기를 아예 타지 않았고, 그 토큰이 아티팩트와 Actions
     로그에 평문으로 남았다.
 
-    셋 다 없는 값까지 재조립하면 정화와 무관한 곳이 바뀐다 — urlunparse 는 프래그먼트가
+    **userinfo(user:pass@host)도 마찬가지다.** 쿼리도 프래그먼트도 없는
+    href="https://alice:secret@example.com/detail" 는 예전에는 URL 정화기를 타지
+    않아 자격 증명이 그대로 남았다.
+
+    넷 다 없는 값까지 재조립하면 정화와 무관한 곳이 바뀐다 — urlunparse 는 프래그먼트가
     빈 '#'/'…#' 에서 '#' 자체를 지우므로(href="#" → href=""), 그런 값은 여기서 걸러
     낸다. 값이 없는 프래그먼트에는 정화할 것도 없다.
     """
     _head, hashed, fragment = value.partition("#")
-    if "?" in value or ";" in value or (hashed and fragment):
+    if "?" in value or ";" in value or (hashed and fragment) or _has_userinfo(value):
         return redact_debug_url(value)
     return redact_debug_text(value)
+
+
+def _has_userinfo(value: str) -> bool:
+    """URL 의 authority 에 user[:pass]@ 가 붙어 있는지. 상대 URL 은 netloc 이 없다."""
+    try:
+        return "@" in urlparse(value).netloc
+    except ValueError:
+        return True          # 파싱조차 안 되는 값은 정화기로 보낸다(fail-safe)
 
 
 def redact_debug_html(html: str) -> str:

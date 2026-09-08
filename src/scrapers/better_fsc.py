@@ -583,10 +583,10 @@ class BetterReplyScraper(BaseScraper):
         """'제목 칸'(class="subject" 셀)에서 읽은 정식 제목. 세 가지 상태를 구분한다.
 
         반환값 계약:
-          None          제목 칸이 없다(값이 빈 칸, 내비게이션·링크 안의 칸은 '없음'으로
-                        본다) → canonical 근거 자체가 없으므로 호출자가 heading 폴백을
-                        타도 된다. 이 배치가 확인되지 않은 다른 구분(비조치의견서 등)
-                        과의 호환을 위해 남겨 둔 경로다.
+          None          쓸 수 있는 제목 칸이 없다(칸 자체가 없거나, 값이 비었거나,
+                        내비게이션·링크 자리의 칸뿐이다) → canonical 근거 자체가 없으므로
+                        호출자가 heading 폴백을 타도 된다. 이 배치가 확인되지 않은 다른
+                        구분(비조치의견서 등)과의 호환을 위해 남겨 둔 경로다.
           非빈 문자열   제목 칸이 하나 이상 있고 정규화한 값이 모두 같다 → 확정 제목.
           ""            제목 칸이 여럿인데 값이 서로 다르다 → canonical 근거끼리 충돌.
                         어느 것이 이 글의 제목인지 알 수 없으므로 **폴백 금지**이고
@@ -607,15 +607,25 @@ class BetterReplyScraper(BaseScraper):
                 tr > th.bc-blue '이유' / td.bc-blue > p …
 
         두 표의 제목 칸 값이 서로 다르면(=구조가 바뀐 것, 또는 다른 글의 응답) 어느 쪽이
-        이 글의 제목인지 알 수 없으므로 인정하지 않는다. 내비게이션·링크 안에 있는 셀은
-        이 글의 제목을 주장하는 자리가 아니므로 아예 세지 않는다.
+        이 글의 제목인지 알 수 없으므로 인정하지 않는다.
+
+        내비게이션 자리의 제목 칸은 아예 세지 않는다. 조상만 보는 _inside_boundary 로는
+        부족하다 — 이전글/다음글 목록은
+            <td class="subject"><a href="/previous">A 사건</a></td>
+        처럼 링크를 **셀 안에** 두므로 조상에는 걸리는 것이 없고, 그 제목이 canonical
+        후보로 섞여 들어간다. 옆 글 제목이 마침 목록 제목과 같으면 identity 가 통과해
+        다른 사건의 회답이 실린다. 그래서 셀 자신도 _is_boundary 로 판정한다.
+
+        _is_boundary 의 인라인 링크 정책은 그대로 따른다 — 앵커 밖에 실질 텍스트가 있는
+        '사건 제목 <a>관련 법령</a>' 은 본문 문단과 같은 이유로 경계가 아니고, 앵커밖에
+        없는 링크 전용 셀만 걸러진다.
         """
         values: list[str] = []
         for cell in soup.find_all(["td", "th"]):
             if _SUBJECT_CELL_CLASS not in (cell.get("class") or []):
                 continue
-            if cls._inside_boundary(cell):
-                continue          # 내비게이션·링크 안의 제목 칸은 이 글의 제목이 아니다
+            if cls._is_boundary(cell) or cls._inside_boundary(cell):
+                continue          # 내비게이션·링크 자리의 제목 칸은 이 글의 제목이 아니다
             text = _norm_ws(cell.get_text(" "))
             if text:
                 values.append(text)

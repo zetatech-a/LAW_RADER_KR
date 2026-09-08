@@ -37,6 +37,11 @@ HOSTILE_HTML = """
   <a href="#">top</a>
   <form action="/cb#access_token=form-secret"></form>
   <script src="/x.js#token=script-secret"></script>
+  <a href="https://alice:userinfo-secret@example.com/detail?lawreqIdx=5449">userinfo</a>
+  <p>/callback?access_token=text-secret&amp;lawreqIdx=5449</p>
+  <div>csrfToken="quoted-secret"</div>
+  <pre>sessionId = pre-secret</pre>
+  <p>토큰 발급 절차에 관한 질의입니다</p>
   <script>
     window.token = "super-secret";
   </script>
@@ -59,6 +64,13 @@ _SECRETS = (
     "fragment-session",
     "form-secret",
     "script-secret",
+    # URL authority 의 userinfo(user:pass@host). username 자체도 credential·PII 다.
+    "userinfo-secret",
+    "alice",
+    # 화면에 그대로 찍힌 'key=value' — 속성도 스크립트도 아니라 다른 규칙이 닿지 않는다.
+    "text-secret",
+    "quoted-secret",
+    "pre-secret",
 )
 
 
@@ -126,6 +138,17 @@ def test_url_without_fragment_does_not_gain_one():
         assert "#" not in redact_debug_url(clean), clean
 
 
+def test_hostile_html_keeps_public_diagnostics_after_every_rule():
+    """정화가 진단을 망치면 덤프를 남기는 의미가 없다 — 공개 정보는 남는다."""
+    out = redact_debug_html(HOSTILE_HTML)
+    assert "example.com/detail" in out              # host/path 구조는 유지
+    assert "lawreqIdx=5449" in out
+    assert 'csrfToken="REDACTED"' in out            # 이름은 남고 값만 사라진다
+    assert "sessionId = REDACTED" in out            # 공백 표기도 보존
+    assert "access_token=REDACTED" in out
+    assert "토큰 발급 절차에 관한 질의입니다" in out   # 자연어는 손대지 않는다
+
+
 def test_hostile_html_keeps_structure_and_public_content():
     out = redact_debug_html(HOSTILE_HTML)
     # 필드 이름·구조는 남는다 — 없으면 무엇이 바뀌었는지 진단할 수 없다.
@@ -177,3 +200,91 @@ def test_assembly_and_reply_share_one_implementation():
     assert assembly._redact_url is redact_debug_url
     assert assembly._redact_values is redact_debug_text
     assert better_fsc.redact_debug_html is redact_debug_html
+
+
+# --- Codex: 화면 텍스트에 찍힌 'key=value' (속성·스크립트가 아닌 자리) ---
+#
+# 오류 페이지가 요청 URL 을 그대로 echo 하거나 <pre> 로 파라미터를 늘어놓으면
+# input/meta·script·URL 속성 규칙이 하나도 닿지 않는다. 이름 판정은 _is_secret_field
+# 를 그대로 재사용하므로 _PUBLIC_URL_KEYS 가 존중된다.
+def test_text_secret_assignment_is_redacted_and_public_key_survives():
+    out = redact_debug_text("/callback?access_token=very-secret&lawreqIdx=5449")
+    assert "very-secret" not in out
+    assert "access_token=REDACTED" in out
+    assert "lawreqIdx=5449" in out
+
+
+def test_text_session_assignment_is_redacted():
+    assert "session-secret" not in redact_debug_text("sessionId=session-secret")
+    # 공백을 둔 표기도 잡고, 표기 자체는 보존한다.
+    assert redact_debug_text("csrfToken = abc") == "csrfToken = REDACTED"
+
+
+def test_text_quoted_secret_value_is_redacted_without_swallowing_the_rest():
+    out = redact_debug_text('csrfToken="quoted-secret" 뒤 문장은 남는다')
+    assert "quoted-secret" not in out
+    assert out.endswith("뒤 문장은 남는다")
+
+
+def test_text_assignment_rule_leaves_prose_alone():
+    """자연어까지 지우는 과도한 규칙이 되면 안 된다."""
+    for prose in (
+        "토큰 발급 절차에 관한 질의입니다",
+        "token: 중요한 의미",
+        "질의요지: 금리인하요구권 안내의무 적용 여부",
+    ):
+        assert redact_debug_text(prose) == prose
+
+
+def test_html_text_node_secret_is_redacted():
+    out = redact_debug_html("<p>/callback?access_token=html-secret&lawreqIdx=5449</p>")
+    assert "html-secret" not in out
+    assert "lawreqIdx=5449" in out
+
+
+def test_public_ids_in_text_survive_the_assignment_rule():
+    for pair in ("lawreqIdx=5449", "opinionIdx=2324", "dataIdx=5450", "billId=PRC_ABC"):
+        assert pair in redact_debug_text(f"조회 파라미터: {pair}")
+
+
+# --- Codex: URL authority 의 userinfo(user:pass@host) ---
+#
+# 진단에 필요한 것은 host/port 구조이지 자격 증명이 아니다. username 자체도
+# credential·PII 일 수 있어 REDACTED 로 남길 이유가 없어 통째로 버린다.
+def test_userinfo_is_dropped_and_host_survives():
+    out = redact_debug_url("https://alice:very-secret@example.com/detail")
+    assert out == "https://example.com/detail"
+
+
+def test_username_only_userinfo_is_dropped():
+    assert redact_debug_url("https://alice@example.com/detail") == "https://example.com/detail"
+
+
+def test_userinfo_drop_keeps_host_and_port():
+    assert redact_debug_url("//alice:secret@example.com:8443/path") == "//example.com:8443/path"
+
+
+def test_userinfo_drop_keeps_ipv6_authority():
+    out = redact_debug_url("https://alice:secret@[2001:db8::1]:8443/path")
+    assert out == "https://[2001:db8::1]:8443/path"
+
+
+def test_userinfo_query_and_fragment_are_handled_together():
+    out = redact_debug_url(
+        "https://alice:secret@example.com/detail?lawreqIdx=5449&sessionId=SESSION#TOKEN"
+    )
+    assert "alice" not in out and "secret" not in out and "SESSION" not in out
+    assert "lawreqIdx=5449" in out
+    assert out.endswith("#REDACTED")
+
+
+def test_at_sign_in_a_relative_path_is_not_touched():
+    """netloc 이 없는 상대 URL 의 '@' 는 userinfo 가 아니다."""
+    assert redact_debug_url("/mail/user@example.com") == "/mail/user@example.com"
+
+
+def test_html_attribute_userinfo_url_reaches_the_url_sanitizer():
+    """쿼리도 프래그먼트도 없는 userinfo URL 은 예전에 정화기를 아예 타지 않았다."""
+    out = redact_debug_html('<a href="https://alice:html-secret@example.com/detail">x</a>')
+    assert "alice" not in out and "html-secret" not in out
+    assert 'href="https://example.com/detail"' in out
