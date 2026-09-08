@@ -6,7 +6,7 @@ element 에 있는가' 를 눈으로 확인하기 위한 도구다(추측한 sel
 하는 일:
   1. 생산 코드와 **같은 방식**으로 상세 URL 을 만든다(BetterReplyScraper._detail_url).
   2. 생산 Fetcher 로 GET 한다(목록 URL 을 Referer 로).
-  3. 응답 HTML 원본만 debug/ 에 저장한다(헤더·쿠키는 저장하지 않는다).
+  3. 응답 HTML 의 **정화본**을 debug/ 에 저장한다(src.debug_sanitize).
   4. 파서 판단에 필요한 구조만 stdout 으로 출력한다:
      - heading(h1~h6) 목록과 조상 경로
      - tr 의 th/td 짝, dl 의 dt/dd 짝
@@ -14,6 +14,15 @@ element 에 있는가' 를 눈으로 확인하기 위한 도구다(추측한 sel
        (= 정식 사건 제목의 structural source)
      - 첨부(/file/displayFile.do) 앵커
      - 본문 outline(자기 텍스트가 있는 element 만)
+
+보안:
+  debug/ 는 verify 워크플로가 아티팩트로 올리고, stdout 은 Actions 로그로 남는다.
+  둘 다 영속 경계이므로 **파일도 로그도 정화본에서만 만든다** — 응답 HTML 에는 살아
+  있는 CSRF 토큰·세션 값이 meta/hidden input/URL 쿼리/인라인 스크립트로 들어 있을 수
+  있고, href 나 subtree 를 원본에서 찍으면 파일만 정화해도 같은 값이 로그로 샌다.
+  생산 파서와 달리 이 스크립트는 원본을 붙들고 있을 이유가 없으므로, 받자마자 정화본
+  하나만 만들어 그것으로 파싱·출력·저장을 모두 한다(제목·본문 같은 공개 텍스트와
+  태그·클래스 구조는 정화가 건드리지 않으므로 진단 가치는 그대로다).
 
 사용:
   python scripts/capture_better_reply_detail.py --idx 5449 --expect-title "…"
@@ -32,6 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bs4 import BeautifulSoup  # noqa: E402
 
 from src.config import SourceConfig  # noqa: E402
+from src.debug_sanitize import redact_debug_html, redact_debug_url  # noqa: E402
 from src.fetcher import Fetcher  # noqa: E402
 from src.scrapers.better_fsc import BetterReplyScraper  # noqa: E402
 
@@ -123,7 +133,7 @@ def warm_up(sc: BetterReplyScraper, idx_wanted: set, attempts: int) -> None:
         for want in idx_wanted:
             if post.post_id.endswith(f":{want}") or f"Idx={want}" in post.url:
                 print(f"  · dataIdx={want}: [{post.date}] {post.title}")
-                print(f"    {post.url}")
+                print(f"    {redact_debug_url(post.url)}")
     print()
 
 
@@ -148,7 +158,7 @@ def capture(sc: BetterReplyScraper, idx: str, gubun: str, expect_title: str,
 
     print("=" * 72)
     print(f"idx={idx}  구분={gubun}")
-    print(f"URL: {url}")
+    print(f"URL: {redact_debug_url(url)}")
     print("=" * 72)
 
     try:
@@ -158,15 +168,18 @@ def capture(sc: BetterReplyScraper, idx: str, gubun: str, expect_title: str,
         print(f"❌ HTTP 실패: {type(e).__name__}: {e}")
         return 2
 
-    print(f"HTTP {resp.status_code} / {len(html)} chars / encoding={resp.encoding}")
+    # 여기서부터 원본 HTML 은 쓰지 않는다. 파일도 로그도 정화본에서만 만든다.
+    safe_html = redact_debug_html(html)
+    print(f"HTTP {resp.status_code} / 원본 {len(html)}자 / 정화본 {len(safe_html)}자 "
+          f"/ encoding={resp.encoding}")
 
     d = Path("debug")
     d.mkdir(exist_ok=True)
-    raw = d / f"better_reply_detail_{idx}.html"
-    raw.write_text(html, encoding="utf-8")          # 응답 body 만 저장(헤더·쿠키 제외)
-    print(f"raw HTML 저장: {raw}")
+    dump = d / f"better_reply_detail_{idx}.html"
+    dump.write_text(safe_html, encoding="utf-8")
+    print(f"정화된 HTML 저장: {dump}")
 
-    soup = BeautifulSoup(html, "lxml")
+    soup = BeautifulSoup(safe_html, "lxml")
     for t in soup.find_all(list(_SKIP)):
         t.decompose()
 
@@ -220,7 +233,8 @@ def capture(sc: BetterReplyScraper, idx: str, gubun: str, expect_title: str,
     print("\n--- 첨부(/file/displayFile.do) 앵커 ---")
     for a in soup.find_all("a", href=True):
         if "displayfile.do" in urlparse(a["href"]).path.lower():
-            print(f"  text={_norm(a.get_text(' '))[:60]!r}  href={a['href'][:160]}")
+            print(f"  text={_norm(a.get_text(' '))[:60]!r}  "
+                  f"href={redact_debug_url(a['href'])[:160]}")
             print(f"      ancestors: {_path(a)}")
 
     # 회귀 fixture 를 추측 없이 만들기 위해, 제목·회신일·본문·첨부를 모두 담는

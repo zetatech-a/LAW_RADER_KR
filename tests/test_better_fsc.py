@@ -1577,7 +1577,10 @@ def test_identity_mismatch_dumps_the_response_html(tmp_path, monkeypatch):
     assert len(dumped) == 1
     assert dumped[0].name == "better_reply_identity_mismatch_5449.html"
     body = dumped[0].read_text(encoding="utf-8")
-    assert body == NAV_CONTAINS_OTHER_TITLE_HTML      # 응답 본문 그대로(헤더·쿠키 없음)
+    # 응답 본문만 남는다(요청 헤더·쿠키 없음) + 진단에 필요한 구조·공개 텍스트는 보존.
+    assert "B 사건에 대한 질의" in body
+    assert 'class="subject"' in body or "B 사건의 회답" in body
+    assert "Cookie" not in body and "User-Agent" not in body
 
 
 def test_error_page_dumps_the_response_html(tmp_path, monkeypatch):
@@ -1604,3 +1607,227 @@ def test_detail_idx_is_read_from_the_url():
     # 파일명이 되므로 숫자가 아니면 쓰지 않는다(경로 조각 유입 방지).
     assert S._detail_idx("https://x/LawreqDetail.do?lawreqIdx=../../etc/passwd") == "unknown"
     assert S._detail_idx("https://x/TotalReplyList.do") == "unknown"
+
+
+# =============================================================================
+# Codex 리뷰 1 — 아티팩트로 나가는 debug HTML 은 정화본이어야 한다
+#
+# 요청 헤더·쿠키를 저장하지 않는 것만으로는 부족하다. 응답 HTML 자체가 살아 있는
+# CSRF 토큰·세션 값·인라인 토큰을 싣고 오고, debug/ 는 verify 워크플로가 아티팩트로
+# 올린다. 캡처 스크립트는 같은 내용을 Actions 로그로도 찍으므로 로그도 같은 경계다.
+# =============================================================================
+SECRET_DETAIL_HTML = """
+<div id="content">
+  <head><meta name="_csrf" content="csrf-secret-123"></head>
+  <h2>B 사건에 대한 질의</h2>
+  <input type="hidden" name="sessionId" value="session-secret">
+  <input type="hidden" name="lawreqIdx" value="5449">
+  <table><tbody>
+    <tr><th>회신일</th><td>2026-08-20</td></tr>
+    <tr><th>질의요지</th><td>B 사건의 질의입니다.</td></tr>
+    <tr><th>회답</th><td>B 사건의 회답입니다.</td></tr>
+    <tr><th>이유</th><td>B 사건의 이유입니다.</td></tr>
+  </tbody></table>
+  <a href="/fsc_new/replyCase/LawreqDetail.do?lawreqIdx=5449&amp;token=xyz">관련</a>
+  <script>window.token = "super-secret";</script>
+</div>
+"""
+
+
+def _dumped_html(tmp_path):
+    files = list((tmp_path / "debug").glob("*.html"))
+    assert len(files) == 1, files
+    return files[0].read_text(encoding="utf-8")
+
+
+def test_identity_mismatch_dump_is_sanitized(tmp_path, monkeypatch):
+    """A. _dump_identity_debug 가 저장한 HTML 에 비밀이 남지 않는다."""
+    monkeypatch.chdir(tmp_path)
+    sc = _scraper(_Fetcher(html=SECRET_DETAIL_HTML))
+    post = _post(_detail() + "&lawreqIdx=5449")
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []        # identity 는 여전히 거부
+
+    body = _dumped_html(tmp_path)
+    for secret in ("csrf-secret-123", "session-secret", "super-secret", "token=xyz"):
+        assert secret not in body, secret
+    # 진단 가치는 남는다 — 필드 이름·구조·공개 식별자·본문.
+    assert 'name="_csrf"' in body and 'name="sessionId"' in body
+    assert "lawreqIdx=5449" in body
+    assert "B 사건에 대한 질의" in body
+
+
+def test_error_page_dump_is_sanitized(tmp_path, monkeypatch):
+    """ERROR PAGE 덤프도 같은 정화를 거친다."""
+    monkeypatch.chdir(tmp_path)
+    html = ERROR_HTML.replace(
+        "<div class=\"error\">",
+        '<div class="error"><meta name="_csrf" content="csrf-secret-123">',
+    )
+    sc = _scraper(_Fetcher(html=html))
+    sc.enrich(_post(_detail() + "&lawreqIdx=5449"))
+    assert "csrf-secret-123" not in _dumped_html(tmp_path)
+
+
+def test_production_parsing_uses_raw_html_not_the_sanitized_copy():
+    """정화는 덤프 전용이다 — 본문·첨부는 원본에서 뽑아야 한다.
+
+    정화본으로 파싱하면 32자 이상 16진수를 값 패턴으로 지우므로 실제 첨부 URL 의
+    sysFileName 이 REDACTED 가 되어 다운로드가 깨진다.
+    """
+    fetcher = _Fetcher(html=_live_html("5450"))
+    sc = _scraper(fetcher)
+    post = _live_post("5450")
+    sc.enrich(post)
+    assert post.attachments[0].url.endswith("0180752ab85844dd91c87fe7eb5d681c.hwpx")
+    assert "REDACTED" not in post.attachments[0].url
+    assert "REDACTED" not in post.body
+
+
+# --- B/C. 캡처 스크립트: 파일도 stdout 도 정화본에서만 만든다 ---
+def test_capture_script_persists_and_logs_only_sanitized_html(tmp_path, monkeypatch, capsys):
+    """저장 파일과 Actions stdout 어디에도 비밀이 평문으로 남지 않는다."""
+    import scripts.capture_better_reply_detail as cap
+
+    monkeypatch.chdir(tmp_path)
+
+    class _Resp:
+        status_code = 200
+        encoding = "utf-8"
+
+    class _CapFetcher:
+        def get(self, url, *, referer=None, **kw):
+            return _Resp()
+
+        @staticmethod
+        def text(resp):
+            return SECRET_DETAIL_HTML
+
+    sc = cap._scraper()
+    sc.fetcher = _CapFetcher()
+    assert cap.capture(sc, "5449", "법령해석", "B 사건에 대한 질의", 50, 1) == 0
+
+    stdout = capsys.readouterr().out
+    saved = (tmp_path / "debug" / "better_reply_detail_5449.html").read_text(encoding="utf-8")
+    for secret in ("csrf-secret-123", "session-secret", "super-secret", "token=xyz"):
+        assert secret not in saved, ("file", secret)
+        assert secret not in stdout, ("stdout", secret)
+    # 진단 출력은 살아 있다(제목 위치·구조를 계속 볼 수 있어야 한다).
+    assert "B 사건에 대한 질의" in stdout
+    assert "정화된 HTML 저장" in stdout
+
+
+# =============================================================================
+# Codex 리뷰 2 — 제목 칸 충돌에서 heading 폴백을 타면 안 된다
+#
+# 제목 칸이 '없음'과 '있는데 값이 갈림'은 다른 상태다. 후자에서 heading 으로 내려가면
+# 페이지 어딘가의 heading 이 목록 제목과 우연히 같을 때 identity 가 통과해, 다른
+# 사건의 회답·첨부가 그 제목 밑에 실린다.
+# =============================================================================
+def _subject_page(subjects, heading="A 사건", date="2026-08-20"):
+    cells = "".join(f'<tr><td class="subject" colspan="2">{s}</td></tr>' for s in subjects)
+    return f"""
+<div id="content">
+  <h2>{heading}</h2>
+  <table class="tbl-view two"><tbody>{cells}</tbody></table>
+  <table class="tbl-write"><tbody>
+    <tr><th>회신일</th><td>{date}</td></tr>
+    <tr><th>질의요지</th><td>질의 본문입니다.</td></tr>
+    <tr><th>회답</th><td>회답 본문입니다.</td></tr>
+    <tr><th>이유</th><td>이유 본문입니다.</td></tr>
+    <tr><th>첨부파일</th><td>
+      <a href="/fsc_new/file/displayFile.do?filePath=%2Fx&amp;orgFileName=a.hwp&amp;sysFileName=1.hwp">첨부.hwp</a>
+    </td></tr>
+  </tbody></table>
+</div>
+"""
+
+
+def _title_of(html):
+    from bs4 import BeautifulSoup
+
+    return BetterReplyScraper._detail_title(BeautifulSoup(html, "lxml"))
+
+
+def test_subject_cell_contract_is_three_state():
+    """None=칸 없음(폴백 가능) / 값=확정 / ""=충돌(폴백 금지)."""
+    from bs4 import BeautifulSoup
+
+    def _subject(html):
+        return BetterReplyScraper._subject_cell_title(BeautifulSoup(html, "lxml"))
+
+    assert _subject(_subject_page([])) is None
+    assert _subject(_subject_page(["A 사건", "A 사건"])) == "A 사건"
+    assert _subject(_subject_page(["B 사건", "C 사건"])) == ""
+
+
+def test_1_no_subject_cell_falls_back_to_heading():
+    """1. 제목 칸이 없으면 기존 heading 폴백 호환이 유지된다."""
+    assert _title_of(_subject_page([], heading="A 사건")) == "A 사건"
+
+
+def test_2_identical_subject_cells_give_the_canonical_title():
+    """2. 같은 값이 두 번이면 그 값이 정식 제목이다."""
+    assert _title_of(_subject_page(["A 사건", "A 사건"], heading="다른 heading")) == "A 사건"
+
+
+def test_3_conflicting_subjects_never_fall_back_to_heading():
+    """3. Codex repro — 제목 칸이 갈리는데 heading 이 목록 제목과 같은 경우."""
+    html = _subject_page(["B 사건", "C 사건"], heading="A 사건")
+    assert _title_of(html) == ""                       # heading 'A 사건' 을 쓰지 않는다
+
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail(), title="[법령해석] A 사건", date="2026-08-20")
+    detail_url = post.url
+    from bs4 import BeautifulSoup
+
+    # 회신일은 목록과 같다 — 거부 사유가 날짜가 아니라 제목임을 못 박는다.
+    assert BetterReplyScraper._reply_date(BeautifulSoup(html, "lxml")) == "20260820"
+
+    sc.enrich(post)
+    assert post.body == ""
+    assert post.attachments == []
+    assert fetcher.downloaded == []                    # 다운로드 호출 0회
+    assert post.url == LIST_URL                        # 후보 상세 링크도 되돌린다
+    assert post.url != detail_url
+    assert sc.enrich_succeeded(post) is False
+
+
+def test_4_conflict_is_rejected_even_when_one_subject_matches_the_list():
+    """4. 후보 중 하나가 목록 제목과 같다는 이유로 고르면 안 된다."""
+    html = _subject_page(["A 사건", "B 사건"], heading="A 사건")
+    assert _title_of(html) == ""
+
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail(), title="[법령해석] A 사건", date="2026-08-20")
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert post.url == LIST_URL
+
+
+def test_conflict_identity_is_reported_as_unverifiable(caplog):
+    """충돌은 '제목이 다름'이 아니라 '정식 제목 확인 불가'로 남는다."""
+    sc = _scraper(_Fetcher(html=_subject_page(["B 사건", "C 사건"], heading="A 사건")))
+    post = _post(_detail(), title="[법령해석] A 사건", date="2026-08-20")
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert "정식 제목을 확인할 수 없어" in caplog.text
+
+
+def test_5_live_fixtures_still_pass_with_identical_subject_cells():
+    """5. 5449/5450 은 제목 칸 두 개가 같으므로 기존 동작 그대로다."""
+    for idx, case in LIVE_CASES.items():
+        fetcher = _Fetcher(html=_live_html(idx))
+        sc = _scraper(fetcher)
+        post = _live_post(idx)
+        detail_url = post.url
+        sc.enrich(post)
+        assert _title_of(_live_html(idx)) == case["title"], idx
+        assert post.url == detail_url, idx
+        for label in ("[질의요지]", "[회답]", "[이유]"):
+            assert label in post.body, (idx, label)
+        assert [a.filename for a in post.attachments] == [case["attachment"]], idx
+        assert sc.enrich_succeeded(post) is True, idx

@@ -57,6 +57,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+from ..debug_sanitize import redact_debug_html
 from ..fetcher import AttachmentTooLarge
 from ..models import Attachment, Post
 from .base import BaseScraper, clean_text
@@ -417,11 +418,21 @@ class BetterReplyScraper(BaseScraper):
 
         운영 로그에는 '상세 제목 ↔ 목록 제목' 문자열만 남아 실제 DOM 을 볼 수 없다.
         그러면 다음 수정이 마크업을 추측하는 데서 시작한다. 정상 수집에서는 남기지
-        않으며, 저장하는 것은 응답 본문뿐이다 — 요청 헤더·쿠키는 담지 않는다.
-        파일명에 상세 식별자(lawreqIdx/opinionIdx)를 넣어 어느 글의 스냅샷인지 남긴다.
+        않는다.
+
+        **정화본만 저장한다.** 요청 헤더·쿠키를 담지 않는 것만으로는 부족하다 —
+        응답 HTML 자체가 meta[name=_csrf]·hidden input·URL 쿼리·인라인 스크립트에
+        살아 있는 토큰을 싣고 오고, debug/ 는 verify 워크플로가 아티팩트로 올린다.
+        파싱에 쓰는 것은 원본이고(호출자가 이미 파싱했다), 여기서 만든 안전한 사본만
+        파일로 나간다. 파일명에 상세 식별자(lawreqIdx/opinionIdx)를 넣어 어느 글의
+        스냅샷인지 남긴다.
         """
         try:
-            self._dump_debug(f"{reason}_{self._detail_idx(detail_url)}", html, suffix="html")
+            self._dump_debug(
+                f"{reason}_{self._detail_idx(detail_url)}",
+                redact_debug_html(html),
+                suffix="html",
+            )
         except Exception as e:  # noqa: BLE001 - 진단 실패가 수집을 막으면 안 된다
             log.warning("[%s] 디버그 스냅샷 저장 실패 %s: %s", self.key, detail_url, e)
 
@@ -554,19 +565,32 @@ class BetterReplyScraper(BaseScraper):
              빼고, 그래도 후보가 남는 다른 배치(비조치의견서 등)를 위해서만 남겨 둔다.
           4) 그 밖에는 빈 문자열(호출자가 fail-closed 처리).
 
-        2)·3) 모두 '후보 값이 정확히 한 가지일 때만' 인정한다 — 값이 갈리면 어느 것이
-        제목인지 알 수 없으므로 판단하지 않는다(추측하지 않고 fail-closed).
+        **3)의 heading 폴백은 '제목 칸이 아예 없을 때'만 탄다.** 제목 칸이 있는데 값이
+        서로 다르면(= canonical 근거끼리 충돌) 그것은 '근거 없음'이 아니라 '판정 불가'
+        이므로 heading 으로 내려가지 않는다. 내려가면 페이지 어딘가의 heading 이 목록
+        제목과 우연히 같을 때 identity 가 통과해, 서로 다른 사건의 회답·첨부가 그
+        제목 밑에 실린다 — 이 가드가 막아야 하는 바로 그 상황이다.
         """
         for value in cls._labelled_values(soup, _TITLE_LABELS):
             return value
         subject = cls._subject_cell_title(soup)
-        if subject:
-            return subject
+        if subject is not None:
+            return subject        # 확정 제목, 또는 충돌이면 ""(폴백 없이 fail-closed)
         return cls._heading_title(soup)
 
     @classmethod
-    def _subject_cell_title(cls, soup: BeautifulSoup) -> str:
-        """'제목 칸'(class="subject" 셀)의 값. 값이 갈리면 빈 문자열(판단 보류).
+    def _subject_cell_title(cls, soup: BeautifulSoup) -> str | None:
+        """'제목 칸'(class="subject" 셀)에서 읽은 정식 제목. 세 가지 상태를 구분한다.
+
+        반환값 계약:
+          None          제목 칸이 없다(값이 빈 칸, 내비게이션·링크 안의 칸은 '없음'으로
+                        본다) → canonical 근거 자체가 없으므로 호출자가 heading 폴백을
+                        타도 된다. 이 배치가 확인되지 않은 다른 구분(비조치의견서 등)
+                        과의 호환을 위해 남겨 둔 경로다.
+          非빈 문자열   제목 칸이 하나 이상 있고 정규화한 값이 모두 같다 → 확정 제목.
+          ""            제목 칸이 여럿인데 값이 서로 다르다 → canonical 근거끼리 충돌.
+                        어느 것이 이 글의 제목인지 알 수 없으므로 **폴백 금지**이고
+                        상세 제목은 무효다(호출자는 identity 를 fail-closed 처리한다).
 
         라이브 상세(better.fsc.go.kr LawreqDetail.do, 2026-09-08 확인)의 구조:
             div.sub-con > h3 '법령해석'                        ← 유형 heading(제목 아님)
@@ -582,8 +606,9 @@ class BetterReplyScraper(BaseScraper):
                 tr > th.bc-yellow '회답' / td.bc-yellow > p …
                 tr > th.bc-blue '이유' / td.bc-blue > p …
 
-        두 표의 제목 칸 값이 서로 다르면(=구조가 바뀐 것) 어느 쪽이 이 글의 제목인지
-        알 수 없으므로 인정하지 않는다. 내비게이션·링크 안에 있는 셀도 제외한다.
+        두 표의 제목 칸 값이 서로 다르면(=구조가 바뀐 것, 또는 다른 글의 응답) 어느 쪽이
+        이 글의 제목인지 알 수 없으므로 인정하지 않는다. 내비게이션·링크 안에 있는 셀은
+        이 글의 제목을 주장하는 자리가 아니므로 아예 세지 않는다.
         """
         values: list[str] = []
         for cell in soup.find_all(["td", "th"]):
@@ -594,6 +619,8 @@ class BetterReplyScraper(BaseScraper):
             text = _norm_ws(cell.get_text(" "))
             if text:
                 values.append(text)
+        if not values:
+            return None                       # 제목 칸 없음 — heading 폴백 허용
         return values[0] if len(set(values)) == 1 else ""
 
     @classmethod
