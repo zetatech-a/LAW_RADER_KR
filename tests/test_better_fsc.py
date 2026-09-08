@@ -1629,6 +1629,9 @@ SECRET_DETAIL_HTML = """
     <tr><th>이유</th><td>B 사건의 이유입니다.</td></tr>
   </tbody></table>
   <a href="/fsc_new/replyCase/LawreqDetail.do?lawreqIdx=5449&amp;token=xyz">관련</a>
+  <a href="/callback#access_token=fragment-secret">callback</a>
+  <a href="#session=fragment-session">프래그먼트만</a>
+  <a href="#">top</a>
   <script>window.token = "super-secret";</script>
 </div>
 """
@@ -1649,12 +1652,17 @@ def test_identity_mismatch_dump_is_sanitized(tmp_path, monkeypatch):
     assert post.body == "" and post.attachments == []        # identity 는 여전히 거부
 
     body = _dumped_html(tmp_path)
-    for secret in ("csrf-secret-123", "session-secret", "super-secret", "token=xyz"):
+    for secret in (
+        "csrf-secret-123", "session-secret", "super-secret", "token=xyz",
+        "fragment-secret", "fragment-session",      # URL 프래그먼트에 실린 credential
+    ):
         assert secret not in body, secret
     # 진단 가치는 남는다 — 필드 이름·구조·공개 식별자·본문.
     assert 'name="_csrf"' in body and 'name="sessionId"' in body
     assert "lawreqIdx=5449" in body
     assert "B 사건에 대한 질의" in body
+    assert 'href="/callback#REDACTED"' in body       # 프래그먼트 값만 사라진다
+    assert 'href="#"' in body                        # 값 없는 로컬 앵커는 그대로
 
 
 def test_error_page_dump_is_sanitized(tmp_path, monkeypatch):
@@ -1709,7 +1717,10 @@ def test_capture_script_persists_and_logs_only_sanitized_html(tmp_path, monkeypa
 
     stdout = capsys.readouterr().out
     saved = (tmp_path / "debug" / "better_reply_detail_5449.html").read_text(encoding="utf-8")
-    for secret in ("csrf-secret-123", "session-secret", "super-secret", "token=xyz"):
+    for secret in (
+        "csrf-secret-123", "session-secret", "super-secret", "token=xyz",
+        "fragment-secret", "fragment-session",
+    ):
         assert secret not in saved, ("file", secret)
         assert secret not in stdout, ("stdout", secret)
     # 진단 출력은 살아 있다(제목 위치·구조를 계속 볼 수 있어야 한다).

@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.debug_sanitize import (  # noqa: E402
+    _redact_attr_url,
     redact_debug_html,
     redact_debug_text,
     redact_debug_url,
@@ -31,6 +32,11 @@ HOSTILE_HTML = """
   </form>
   <a href="/foo?lawreqIdx=5449&amp;sessionId=abc&amp;token=xyz">링크</a>
   <a href="/bar;jsessionid=SESSIONPATHVALUE?lawreqIdx=5449">경로 파라미터</a>
+  <a href="/callback#access_token=fragment-secret">callback</a>
+  <a href="#session=fragment-session">프래그먼트만</a>
+  <a href="#">top</a>
+  <form action="/cb#access_token=form-secret"></form>
+  <script src="/x.js#token=script-secret"></script>
   <script>
     window.token = "super-secret";
   </script>
@@ -48,6 +54,11 @@ _SECRETS = (
     "super-secret",
     "SESSIONPATHVALUE",
     "aaaabbbbccccddddeeeeffff00001111",
+    # URL 프래그먼트에 실린 credential. 쿼리와 문법이 달라 이름으로 고를 수 없다.
+    "fragment-secret",
+    "fragment-session",
+    "form-secret",
+    "script-secret",
 )
 
 
@@ -57,6 +68,62 @@ def test_hostile_html_loses_every_secret_value():
         assert secret not in out, secret
     # 쿼리 파라미터 값도 이름 기준으로 지워진다.
     assert "=abc" not in out and "=xyz" not in out and "=zzzz" not in out
+
+
+def test_hostile_html_keeps_public_url_paths_after_fragment_redaction():
+    """4~6. href/action/src 어디에 실려도 프래그먼트 값은 사라지고 경로는 남는다."""
+    out = redact_debug_html(HOSTILE_HTML)
+    assert 'href="/callback#REDACTED"' in out
+    assert 'href="#REDACTED"' in out
+    assert 'action="/cb#REDACTED"' in out
+    assert 'src="/x.js#REDACTED"' in out
+
+
+def test_bare_local_anchor_is_left_alone():
+    """7. 회귀 — 값 없는 프래그먼트는 정화할 것이 없다. href="#" → href="" 금지."""
+    assert 'href="#"' in redact_debug_html(HOSTILE_HTML)
+    assert _redact_attr_url("#") == "#"
+    assert _redact_attr_url("/a#") == "/a#"
+    assert _redact_attr_url("/plain") == "/plain"
+
+
+# --- URL 프래그먼트 (Codex P2: Redact secret-bearing URL fragments) ---
+#
+# 프래그먼트는 쿼리와 문법이 다르고 'key=value' 라는 보장도 없다(#opaque-token,
+# #route/session/value, #/cb?access_token=…). OAuth implicit flow 에서는 액세스 토큰
+# 자체가 이 자리에 실린다. 이름으로 고르려 하면 예상 못 한 형태를 놓치므로, 비어 있지
+# 않은 프래그먼트는 통째로 지운다 — 진단에서 그 '값'은 없어도 된다.
+def test_1_access_token_fragment_is_redacted():
+    out = redact_debug_url("/callback#access_token=very-secret")
+    assert "very-secret" not in out
+    assert "access_token=very-secret" not in out
+    assert out == "/callback#REDACTED"
+
+
+def test_2_fragment_only_session_is_redacted():
+    out = redact_debug_url("#session=xyz")
+    assert "xyz" not in out
+    assert "REDACTED" in out
+
+
+def test_3_public_query_id_survives_fragment_redaction():
+    out = redact_debug_url("/reply.do?lawreqIdx=5449#access_token=very-secret")
+    assert "lawreqIdx=5449" in out          # 프래그먼트를 지우느라 쿼리를 지우면 안 된다
+    assert "very-secret" not in out
+    assert out.endswith("#REDACTED")
+
+
+def test_opaque_and_nested_fragments_are_redacted_whole():
+    """이름이 없는 형태도 남기지 않는다 — 이번 정책의 핵심."""
+    for dirty in ("#opaque-token", "#/callback?access_token=abc", "#route/session/value"):
+        out = redact_debug_url(dirty)
+        assert out == "#REDACTED", dirty
+
+
+def test_url_without_fragment_does_not_gain_one():
+    """'#' 이 없던 URL 에 '#REDACTED' 가 새로 붙으면 안 된다."""
+    for clean in ("/plain", "https://x/y?lawreqIdx=5449", "/bar;jsessionid=A?opinionIdx=2324"):
+        assert "#" not in redact_debug_url(clean), clean
 
 
 def test_hostile_html_keeps_structure_and_public_content():

@@ -83,6 +83,13 @@ def redact_debug_url(url: str) -> str:
     않고, 패턴은 쿼리 파라미터 '이름'을 모른다. 경로 파라미터(;jsessionid=…)까지 보는
     이유는 쿠키가 막힌 클라이언트에 서블릿 컨테이너가 그 자리에 세션 ID 를 붙이기
     때문이다(likms 가 그 형태다).
+
+    **프래그먼트는 비어 있지 않으면 통째로 지운다.** 쿼리처럼 이름만 골라 남기지
+    않는다 — 프래그먼트는 'key=value' 형태라는 보장이 없고(#opaque-token,
+    #route/session/value, #/cb?access_token=…), OAuth implicit flow 에서는 액세스
+    토큰 자체가 이 자리에 실린다. 이름 기반으로 고르려 하면 예상하지 못한 형태의
+    credential 을 놓친다. 진단 아티팩트에서 프래그먼트 '값'은 없어도 되지만
+    credential 이 남는 것은 안 되므로, 값을 잃는 쪽으로 안전하게 기운다.
     """
     try:
         parts = urlparse(url or "")
@@ -104,22 +111,32 @@ def redact_debug_url(url: str) -> str:
         return sep.join(out)
 
     # 값 패턴은 조각마다 적용한다. 조립이 끝난 URL 에 다시 돌리면 경계를 넘어 삼킨다.
+    # 프래그먼트가 없으면 빈 문자열을 그대로 둔다 — _REDACTED 를 넣으면 '#' 이 없던
+    # URL 에 '#REDACTED' 가 새로 붙는다.
     return urlunparse(
         parts._replace(
             path=redact_debug_text(parts.path),
             params=_values(parts.params, ";"),
             query=_values(parts.query, "&"),
+            fragment=_REDACTED if parts.fragment else "",
         )
     )
 
 
 def _redact_attr_url(value: str) -> str:
-    """URL 속성값 정화. 정화할 파라미터가 없으면 구조를 그대로 둔다.
+    """URL 속성값 정화. 정화할 것이 없으면 구조를 그대로 둔다.
 
-    이름 기준 정화가 필요한 것은 쿼리(?a=b)와 경로 파라미터(;a=b)뿐이다. 둘 다 없는
-    값까지 재조립하면 정화와 무관한 곳이 바뀐다(href="#" → href="").
+    정화가 필요한 것은 쿼리(?a=b)·경로 파라미터(;a=b)·**비어 있지 않은 프래그먼트**
+    (#access_token=…)다. 프래그먼트만 있는 값(href="#access_token=…")은 '?' 도 ';' 도
+    없어서 예전에는 URL 정화기를 아예 타지 않았고, 그 토큰이 아티팩트와 Actions
+    로그에 평문으로 남았다.
+
+    셋 다 없는 값까지 재조립하면 정화와 무관한 곳이 바뀐다 — urlunparse 는 프래그먼트가
+    빈 '#'/'…#' 에서 '#' 자체를 지우므로(href="#" → href=""), 그런 값은 여기서 걸러
+    낸다. 값이 없는 프래그먼트에는 정화할 것도 없다.
     """
-    if "?" in value or ";" in value:
+    _head, hashed, fragment = value.partition("#")
+    if "?" in value or ";" in value or (hashed and fragment):
         return redact_debug_url(value)
     return redact_debug_text(value)
 
