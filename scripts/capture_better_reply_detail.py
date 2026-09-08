@@ -72,6 +72,29 @@ def _own_text(el) -> str:
     return _norm("".join(str(c) for c in el.children if getattr(c, "name", None) is None))
 
 
+def _parser_block(soup):
+    """제목(td.subject 계열)과 본문 라벨('이유')을 **함께** 담는 최소 조상 element."""
+    seed = None
+    for el in soup.find_all(True):
+        if el.name in _SKIP:
+            continue
+        classes = el.get("class") or []
+        if "subject" in classes:
+            seed = el
+            break
+    if seed is None:
+        return None
+    node = seed
+    while node is not None:
+        if any(
+            _norm(x.get_text(" ")) == "이유"
+            for x in node.find_all(["th", "h2", "h3", "h4", "strong", "p", "span", "div"])
+        ):
+            return node
+        node = node.parent
+    return None
+
+
 def _scraper() -> BetterReplyScraper:
     src = SourceConfig(
         key="better_reply",
@@ -199,6 +222,17 @@ def capture(sc: BetterReplyScraper, idx: str, gubun: str, expect_title: str,
         if "displayfile.do" in urlparse(a["href"]).path.lower():
             print(f"  text={_norm(a.get_text(' '))[:60]!r}  href={a['href'][:160]}")
             print(f"      ancestors: {_path(a)}")
+
+    # 회귀 fixture 를 추측 없이 만들기 위해, 제목·회신일·본문·첨부를 모두 담는
+    # 최소 상위 element 의 마크업을 그대로 출력한다(스크립트가 고른 것이 아니라
+    # 문서 구조에서 올라가며 찾은 것이다).
+    print("\n--- parser 관련 최소 subtree 원본 마크업 ---")
+    block = _parser_block(soup)
+    if block is None:
+        print("  (제목·본문을 함께 담는 블록을 찾지 못함)")
+    else:
+        print(f"  root: {_desc(block)}  ancestors: {_path(block)}")
+        print(block.prettify()[:12000])
 
     print(f"\n--- outline(자기 텍스트가 있는 element, 최대 {outline_limit}줄) ---")
     body = soup.body or soup
