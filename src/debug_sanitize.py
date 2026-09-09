@@ -130,6 +130,27 @@ _SECRET_JSON_MEMBER = re.compile(
     r'(?P<value>' + _JSON_STRING + r'|-?\d[\d.eE+\-]*|true|false|null)'
 )
 
+# 오류·진단 페이지가 요청 메타데이터를 그대로 echo 하면 HTTP 헤더 표기가 <pre> 로
+# 들어온다. 그 자리는 'key=value' 도 JSON member 도 아니라 위 두 문법이 닿지 않는다.
+#   X-CSRF-TOKEN: VERY_SECRET      ← 이 저장소가 실제로 쓰는 헤더(assembly._CSRF_HEADER)
+#   Authorization: Bearer …
+# **이름 기준 일반 'key: value' 파서를 만들지 않는다.** 그러면 'token: 이 단어는…'
+# 같은 한국어 산문이 헤더로 오인된다. 표준 credential 헤더의 **정확 일치**만 본다.
+_SECRET_HEADER_NAMES = frozenset({
+    "authorization", "proxy-authorization",
+    "x-csrf-token", "x-xsrf-token", "x-auth-token",
+    "x-api-key", "api-key", "x-goog-api-key",   # x-goog-api-key: src/summarizer.py
+    "cookie", "set-cookie",
+})
+# 이름 : 값. 값은 줄 끝 또는 HTML 태그 경계('<' '>') 전까지다 — 직렬화된 HTML 은 한
+# 줄로 나오는 일이 흔해서 경계가 없으면 뒤따르는 태그를 통째로 삼킨다. 이름 앞에는
+# 식별자 문자가 없어야 한다(낱말 중간에서 시작하지 않게).
+_SECRET_HEADER = re.compile(
+    r"(?<![A-Za-z0-9_.\-])(?P<name>[A-Za-z][A-Za-z0-9\-]{0,63})"
+    r"(?P<sep>[ \t]*:[ \t]*)"
+    r"(?P<value>[^\r\n<>]*)"
+)
+
 # 값이 URL 인 HTML 속성. 문자열이 아니라 URL 로 취급해 정화한다.
 _URL_VALUED_ATTRS = (
     "action", "formaction", "href", "src", "poster", "cite",
@@ -234,6 +255,20 @@ def _redact_assignment(m: "re.Match[str]") -> str:
     return f"{key}{sep}{quote}{_REDACTED}{quote}"
 
 
+def _redact_header(m: "re.Match[str]") -> str:
+    """HTTP 헤더 표기 한 줄. 알려진 credential 헤더면 값 전체를 지운다.
+
+    이름과 콜론은 남긴다 — 어떤 헤더가 오갔는지가 진단 정보다. 값은 부분이 아니라
+    통째로 지운다: Authorization 은 'Bearer <토큰>', Cookie 는 'a=b; SID=…' 처럼
+    형식이 제각각이라 안쪽을 골라내려 하면 형태 하나를 놓친다.
+    """
+    if m.group("name").lower() not in _SECRET_HEADER_NAMES:
+        return m.group(0)
+    if not m.group("value").strip():
+        return m.group(0)          # 값이 없으면 지울 것도 없다(레이블 텍스트 등)
+    return f"{m.group('name')}{m.group('sep')}{_REDACTED}"
+
+
 def _redact_json_member(m: "re.Match[str]") -> str:
     """JSON object member 한 건. 이름이 비밀이면 값 토큰 전체를 지운다.
 
@@ -260,11 +295,15 @@ def redact_debug_text(text: str) -> str:
     data-json='{"access_token":"…"}' 처럼 JSON 이 속성값 안에 들어 있으면, 바깥
     data-json='…' 이 먼저 매치돼 따옴표 안 전체를 소비해 버려서 안쪽 JSON 을 다시
     보지 않는다(바깥 키가 비밀이 아니라 그대로 반환된다). 순서는
-    값 패턴 → JSON member → key=value 다.
+    값 패턴 → HTTP 헤더 → JSON member → key=value 다. 헤더를 먼저 돌리는 것은 헤더
+    값이 JSON 이나 key=value 를 품고 있어도 통째로 지우는 편이 더 강하기 때문이다.
+    (한 패스가 매치 구간을 소비해도 뒤 패스가 결과 전체를 다시 훑으므로 중첩된
+    비밀이 검사 없이 통과하지는 않는다.)
     """
     out = text or ""
     for pat in _SECRET_VALUE_PATTERNS:
         out = pat.sub(_REDACTED, out)
+    out = _SECRET_HEADER.sub(_redact_header, out)
     out = _SECRET_JSON_MEMBER.sub(_redact_json_member, out)
     return _SECRET_ASSIGNMENT.sub(_redact_assignment, out)
 
@@ -283,6 +322,11 @@ def redact_debug_url(url: str) -> str:
     경로 파라미터(;jsessionid=…)까지 보는 이유는 쿠키가 막힌 클라이언트에 서블릿
     컨테이너가 그 자리에 세션 ID 를 붙이기 때문이다(likms 가 그 형태다).
 
+    **data: URL 은 통째로 버린다.** payload 자체가 값이라 남길 '구조' 가 없고, base64
+    안의 credential 은 어떤 텍스트 규칙에도 걸리지 않는다. 디코딩하거나 MIME 타입을
+    파싱하지 않는다. 이 함수가 중앙이라 href/src, object@data, og:image 계열 metadata,
+    meta refresh 대상까지 한 곳에서 같은 정책을 받는다.
+
     **URL 에 userinfo(user:pass@host)가 있으면 통째로 버린다.** 진단에 필요한 것은
     host/port 구조이지 자격 증명이 아니고, username 자체도 credential·PII 일 수 있어
     REDACTED 로 남길 이유가 없다. host 와 port 는 그대로 둔다(IPv6 대괄호 포함).
@@ -294,6 +338,9 @@ def redact_debug_url(url: str) -> str:
     credential 을 놓친다. 진단 아티팩트에서 프래그먼트 '값'은 없어도 되지만
     credential 이 남는 것은 안 되므로, 값을 잃는 쪽으로 안전하게 기운다.
     """
+    if _is_data_url(url):
+        return _REDACTED
+
     try:
         parts = urlparse(url or "")
     except ValueError:
@@ -343,14 +390,28 @@ def _redact_attr_url(value: str) -> str:
     href="https://alice:secret@example.com/detail" 는 예전에는 URL 정화기를 타지
     않아 자격 증명이 그대로 남았다.
 
+    **data: URL 은 여기서 바로 버린다.** payload 가 곧 값이라 정화할 '구조' 가 없고,
+    base64 안의 credential 은 어떤 텍스트 규칙에도 걸리지 않는다. 디코딩·MIME 파싱을
+    하지 않는다 — 진단에서 그 payload 는 없어도 되지만 credential 이 남는 것은 안 된다.
+    쿼리도 프래그먼트도 userinfo 도 없는 data URL 은 예전에는 아래 판단에 걸리지 않아
+    URL 정화기를 아예 타지 않았다.
+
     넷 다 없는 값까지 재조립하면 정화와 무관한 곳이 바뀐다 — urlunparse 는 프래그먼트가
     빈 '#'/'…#' 에서 '#' 자체를 지우므로(href="#" → href=""), 그런 값은 여기서 걸러
     낸다. 값이 없는 프래그먼트에는 정화할 것도 없다.
     """
+    if _is_data_url(value):
+        return _REDACTED
+
     _head, hashed, fragment = value.partition("#")
     if "?" in value or ";" in value or (hashed and fragment) or _has_userinfo(value):
         return redact_debug_url(value)
     return redact_debug_text(value)
+
+
+def _is_data_url(value: str) -> bool:
+    """data: 스킴인지. 앞뒤 공백과 대소문자를 무시한다."""
+    return (value or "").strip()[:5].lower() == "data:"
 
 
 def _has_userinfo(value: str) -> bool:
@@ -484,8 +545,9 @@ def redact_debug_html(html: str) -> str:
     content 가 URL 로 정해진 키는 _meta_content_is_url 로 골라 redact_debug_url 로
     보낸다. 그 밖의 meta@content(description·og:title·keywords …)는 URL 이 아니므로
     건드리지 않는다.
-    액티브 콘텐츠(인라인 script, <style>, style 속성, on* 이벤트 핸들러)는 값을
-    고르지 않고 통째로 비운다 — 진단에 필요 없는데 credential 을 실어 나른다.
+    액티브 콘텐츠(script 본문, <style>, style 속성, on* 이벤트 핸들러, iframe@srcdoc)는
+    값을 고르지 않고 통째로 비운다 — 진단에 필요 없는데 credential 을 실어 나른다.
+    data: URL 도 마찬가지로 URL 문맥 어디에서든 통째로 버린다(redact_debug_url).
     파싱이 실패해도 원문을 그대로 흘리지 않고 값 패턴 정화는 반드시 적용한다.
 
     제목·본문 같은 공개 텍스트와 태그·클래스 구조는 건드리지 않는다. 정화가 진단을
@@ -527,10 +589,14 @@ def redact_debug_html(html: str) -> str:
             continue
         el[attr] = _REDACTED
 
-    # 인라인 스크립트에 토큰이 박혀 오는 경우가 흔하다. 셀렉터 진단에는 쓰이지 않는다.
+    # 스크립트 본문에 토큰이 박혀 오는 경우가 흔하다. 셀렉터 진단에는 쓰이지 않는다.
+    # **src 가 있어도 본문을 비운다.** 예전에는 src 가 있으면 건너뛰었는데, 브라우저가
+    # 무시할 뿐 본문은 응답에 그대로 실려 오고 아티팩트에도 그대로 남았다. 본문은 URL
+    # 속성이 아니라 URL 규칙도 닿지 않는다.
+    # 속성은 지우지 않는다 — src 는 아래 URL 속성 패스가 정화하고, 그 host/path 구조는
+    # 진단에 필요하다.
     for el in soup.find_all("script"):
-        if not (el.get("src") or "").strip():
-            el.string = ""
+        el.string = ""
 
     # CSS 도 같은 이유로 통째로 비운다. style 속성 안의 url(/x?access_token=…) 은
     # URL 속성이 아니라서 URL 규칙이 닿지 않고, 마지막 텍스트 패스는 직렬화된
@@ -549,9 +615,15 @@ def redact_debug_html(html: str) -> str:
     # style 속성과 인라인 이벤트 핸들러(on*). 둘 다 액티브 콘텐츠라 진단에 쓰이지
     # 않으면서 URL·문자열을 실어 나른다. 여기서 JavaScript 정화기를 만들지 않는다 —
     # 통째로 지우는 것으로 끝낸다.
+    #
+    # srcdoc 도 같이 지운다. 값이 임의의 HTML 문서 통째라 어떤 문맥이든 품을 수 있고
+    # (그 안의 <script> 는 위 패스가 보지 못한다), 재귀 HTML 정화기를 만들 이유는 없다 —
+    # 임베드된 문서의 내용은 이 저장소의 파서 진단 대상이 아니다.
     for el in soup.find_all(True):
         if el.has_attr("style"):
             del el["style"]
+        if el.has_attr("srcdoc"):
+            del el["srcdoc"]
         for attr in [a for a in el.attrs if a.lower().startswith("on")]:
             del el[attr]
 

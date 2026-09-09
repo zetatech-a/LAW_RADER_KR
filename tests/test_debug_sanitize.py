@@ -64,6 +64,12 @@ HOSTILE_HTML = """
   <div class="styled" style="background:url(/x?access_token=CSS_SECRET)">스타일 있는 제목</div>
   <style>.avatar { background-image: url(/y?access_token=STYLE_SECRET); }</style>
   <div id="handler" onclick="fetch('/z?access_token=HANDLER_SECRET')">핸들러 있는 본문</div>
+  <script src="/app.js?token=SCRIPT_SRC_SECRET">fetch("/cb?code=SCRIPT_BODY_SECRET")</script>
+  <pre>X-CSRF-TOKEN: HEADER_CSRF_SECRET
+Authorization: Bearer HEADER_AUTH_SECRET
+CODE: INFO-000</pre>
+  <iframe src="data:text/plain;base64,SU5MSU5FX0RBVEFfU0VDUkVU"></iframe>
+  <iframe id="embedded" class="frame" srcdoc="&lt;script&gt;fetch('/cb?code=SRCDOC_SECRET')&lt;/script&gt;"></iframe>
   <object data="/cb?access_token=OBJECT_SECRET&amp;lawreqIdx=5449"></object>
   <img srcset="/small.jpg?token=SRCSET_A 1x, /large.jpg?token=SRCSET_B 2x">
   <td class="subject">여신전문금융회사가 신기술사업자에 투자하는 경우 …</td>
@@ -124,6 +130,16 @@ _SECRETS = (
     "CSS_SECRET",
     "STYLE_SECRET",
     "HANDLER_SECRET",
+    # src 가 있는 script 의 본문. 브라우저는 무시하지만 응답에는 그대로 실려 온다.
+    "SCRIPT_SRC_SECRET",
+    "SCRIPT_BODY_SECRET",
+    # HTTP 헤더 표기. 'key=value' 도 JSON member 도 아니라 두 문법이 닿지 않는다.
+    "HEADER_CSRF_SECRET",
+    "HEADER_AUTH_SECRET",
+    # data: URL — payload 가 곧 값이라 어떤 텍스트 규칙에도 걸리지 않는다.
+    "SU5MSU5FX0RBVEFfU0VDUkVU",
+    # srcdoc — 값이 임의의 HTML 문서 통째라 안쪽 <script> 를 다른 패스가 보지 못한다.
+    "SRCDOC_SECRET",
 )
 
 
@@ -227,6 +243,14 @@ def test_hostile_html_keeps_public_diagnostics_after_every_rule():
     assert 'class="styled"' in out and "스타일 있는 제목" in out
     assert 'id="handler"' in out and "핸들러 있는 본문" in out
     assert "style=" not in out and "onclick=" not in out
+    assert "srcdoc" not in out
+    assert 'id="embedded"' in out and 'class="frame"' in out   # 요소·구조는 남는다
+    # script 는 본문만 비우고 src 구조는 남긴다.
+    assert "/app.js?token=REDACTED" in out
+    # 알려진 credential 헤더만 값이 사라지고, 이름과 일반 필드는 남는다.
+    assert "X-CSRF-TOKEN: REDACTED" in out
+    assert "Authorization: REDACTED" in out
+    assert "CODE: INFO-000" in out
 
 
 def test_hostile_html_keeps_structure_and_public_content():
@@ -586,9 +610,12 @@ def test_ordinary_metadata_survives_the_url_metadata_rule():
 #   og:url 계열 URL metadata          URL 규칙으로 정화(allow-set 정확 일치)
 #   URL fragment / userinfo           통째로 제거
 #   URL 쿼리·경로 파라미터            zero-trust — 공개 명시 키만 값 보존
-#   인라인 script                     내용 제거
+#   HTTP credential 헤더 표기         알려진 이름만 값 전체 REDACTED
+#   data: URL                         URL 문맥 어디서든 통째로 REDACTED
+#   인라인 script                     src 유무와 무관하게 본문 제거
 #   인라인 CSS(style 속성/<style>)     제거
 #   on* 이벤트 핸들러                  제거
+#   iframe@srcdoc                     제거
 #   요청 예외 메시지                   애초에 출력하지 않는다(capture 스크립트)
 #   공개 식별자(lawreqIdx …)           값까지 보존
 # ============================================================================
@@ -612,6 +639,9 @@ def test_security_contract_matrix():
         "Type=json",                        # 공개 페이지네이션 값
         '"CODE":"INFO-000"',                # 일반 응답 JSON
         'class="styled"',                   # CSS 를 지워도 구조는 남는다
+        "CODE: INFO-000",                   # 일반 콜론 필드는 헤더가 아니다
+        "/app.js?token=REDACTED",           # script src 구조는 남는다
+        'class="frame"',                    # srcdoc 을 지워도 요소는 남는다
         "example.com/detail",               # host/path
         'content="금융규제 법령해석 안내"',    # 일반 meta@content
         "여신전문금융회사가 신기술사업자에 투자하는 경우",   # 공개 제목
@@ -1128,3 +1158,207 @@ def test_style_removal_does_not_disturb_other_attributes():
     assert 'href="/d.do?lawreqIdx=5449"' in out
     assert 'title="공개 제목"' in out
     assert "style=" not in out
+
+
+# --- Codex P2 #1: Clear inline content from scripts that also have src ---
+#
+# 예전에는 src 가 있으면 본문을 건너뛰었다. 브라우저는 src 가 있을 때 본문을 무시하지만
+# **본문은 응답에 그대로 실려 오고 아티팩트에도 그대로 남는다.** 본문은 URL 속성이
+# 아니라 URL 규칙도 닿지 않고, 그 안의 ?code=… 은 'code' 를 전역 비밀 이름에 넣지
+# 않기로 한 정책 때문에 assignment 규칙으로도 걸리지 않는다.
+def test_script_with_src_loses_its_body():
+    """1. Codex repro — 태그와 src 는 남고 본문만 사라진다."""
+    out = redact_debug_html('<script src="/external.js">fetch("/callback?code=OAUTH_SECRET")</script>')
+    assert "OAUTH_SECRET" not in out
+    assert '<script src="/external.js"></script>' in out
+
+
+def test_script_src_and_body_secrets_both_go():
+    """2. src 자체의 credential 은 기존 URL 규칙이, 본문은 이번 수정이 처리한다."""
+    out = redact_debug_html('<script src="/app.js?token=SRC_SECRET">fetch("/cb?code=BODY_SECRET")</script>')
+    assert "SRC_SECRET" not in out and "BODY_SECRET" not in out
+    assert "/app.js?token=REDACTED" in out          # 이름과 경로 구조는 남는다
+
+
+def test_inline_script_without_src_still_loses_its_body():
+    """3. 회귀 — src 없는 인라인 스크립트의 기존 동작 그대로."""
+    out = redact_debug_html('<script>window.token = "INLINE_SECRET";</script>')
+    assert "INLINE_SECRET" not in out
+    assert "<script></script>" in out
+
+
+def test_public_script_src_keeps_the_current_url_contract():
+    """4. 이번 수정으로 URL 정책을 바꾸지 않았다 — ver 은 공개 allowlist 그대로."""
+    out = redact_debug_html('<script src="/static/app.js?ver=1"></script>')
+    assert 'src="/static/app.js?ver=1"' in out
+
+
+def test_script_attributes_survive_the_body_clear():
+    """속성은 지우지 않는다 — 어떤 스크립트였는지가 진단 정보다."""
+    out = redact_debug_html(
+        '<script id="boot" type="module" defer src="/b.js">const t="ATTR_BODY_SECRET";</script>'
+    )
+    assert "ATTR_BODY_SECRET" not in out
+    assert 'id="boot"' in out and 'type="module"' in out and 'src="/b.js"' in out
+
+
+# --- Codex P2 #2: Redact colon-delimited credential headers ---
+#
+# 오류 페이지가 요청 메타데이터를 echo 하면 HTTP 헤더 표기가 <pre> 로 들어온다.
+# 그 자리는 'key=value' 도 JSON member 도 아니다. 일반 'key: value' 파서를 만들지
+# 않는다 — 그러면 'token: 이 단어는…' 같은 산문이 헤더로 오인된다. 표준 credential
+# 헤더의 **정확 일치**만 보고, 값은 부분이 아니라 통째로 지운다.
+def test_repo_csrf_header_value_is_redacted():
+    """A. 이 저장소가 실제로 쓰는 헤더(assembly._CSRF_HEADER = "X-CSRF-TOKEN")."""
+    out = redact_debug_html("<pre>X-CSRF-TOKEN: VERY_SECRET</pre>")
+    assert "VERY_SECRET" not in out
+    assert "X-CSRF-TOKEN: REDACTED" in out          # 이름과 콜론은 남는다
+
+
+def test_authorization_header_value_is_redacted_whole():
+    """B. 'Bearer <토큰>' 은 값 안을 골라내려 하면 형태 하나를 놓친다."""
+    out = redact_debug_html("<pre>Authorization: Bearer AUTH_SECRET</pre>")
+    assert "AUTH_SECRET" not in out and "Bearer" not in out
+    assert "Authorization: REDACTED" in out
+
+
+def test_multiple_headers_and_a_public_colon_field():
+    """C. 알려진 헤더만 지운다 — 일반 콜론 필드는 진단 자료로 남는다."""
+    out = redact_debug_html(
+        "<pre>X-CSRF-TOKEN: CSRF_SECRET\nAuthorization: Bearer AUTH_SECRET\nCODE: INFO-000</pre>"
+    )
+    assert "CSRF_SECRET" not in out and "AUTH_SECRET" not in out
+    assert "CODE: INFO-000" in out
+
+
+def test_header_rule_leaves_ordinary_colon_prose_alone():
+    """D. 이름 기준 일반 파서를 만들지 않은 이유."""
+    for prose in (
+        "token: 이 단어는 일반 설명입니다",
+        "회신일: 2026-09-07",
+        "처리구분: 완료",
+        "session: 아래 회의에서 논의되었습니다",
+    ):
+        assert redact_debug_text(prose) == prose
+
+
+def test_cookie_header_value_is_redacted_whole():
+    """E. Cookie 는 'a=b; SID=…' 라 부분 정화로는 형태를 다 못 잡는다."""
+    out = redact_debug_html("<pre>Cookie: foo=bar; session=COOKIE_SECRET</pre>")
+    assert "COOKIE_SECRET" not in out and "foo=bar" not in out
+    assert "Cookie: REDACTED" in out
+
+
+def test_header_names_are_matched_case_insensitively():
+    """F. 헤더 이름은 대소문자를 가리지 않는다."""
+    assert redact_debug_text("authorization: lower_secret") == "authorization: REDACTED"
+    assert redact_debug_text("X-Api-Key: MIXED_SECRET") == "X-Api-Key: REDACTED"
+
+
+def test_gemini_api_key_header_is_covered():
+    """src/summarizer.py 가 쓰는 x-goog-api-key 도 credential 헤더다."""
+    assert "GEMINI_SECRET" not in redact_debug_text("x-goog-api-key: GEMINI_SECRET")
+
+
+def test_header_without_a_value_is_left_alone():
+    """값이 없으면 지울 것도 없다 — 표 레이블이 'Authorization:' 인 경우."""
+    assert redact_debug_text("Authorization:") == "Authorization:"
+
+
+def test_header_value_stops_at_the_tag_boundary():
+    """값은 줄 끝 또는 태그 경계까지다 — 직렬화된 HTML 은 한 줄로 나온다."""
+    out = redact_debug_html("<pre>Authorization: Bearer AUTH_SECRET</pre><p>lawreqIdx=5449</p>")
+    assert "AUTH_SECRET" not in out
+    assert "</pre>" in out and "lawreqIdx=5449" in out
+
+
+def test_unknown_header_line_does_not_hide_a_nested_secret():
+    """알려지지 않은 헤더 줄이 매치 구간을 소비해도 뒤 패스가 결과를 다시 훑는다."""
+    out = redact_debug_html("<pre>Foo: bar sessionId=NESTED_SECRET</pre>")
+    assert "NESTED_SECRET" not in out
+
+
+# --- Codex P2 #3: Drop data URLs from ordinary URL attributes ---
+#
+# data: URL 은 payload 자체가 값이라 정화할 '구조' 가 없고, base64 안의 credential 은
+# 어떤 텍스트 규칙에도 걸리지 않는다. 디코딩·MIME 파싱을 하지 않고 통째로 버린다.
+# 정책은 redact_debug_url 중앙에 두되, _redact_attr_url 의 dispatch 도 함께 고쳤다 —
+# 쿼리·프래그먼트·userinfo 가 없는 data URL 은 예전에는 URL 정화기를 아예 타지 않았다.
+_DATA_B64 = "YWNjZXNzX3Rva2VuPVZFUllfU0VDUkVU"      # access_token=VERY_SECRET
+
+
+def test_iframe_data_url_is_redacted_whole():
+    """1. Codex repro."""
+    out = redact_debug_html(f'<iframe src="data:text/plain;base64,{_DATA_B64}"></iframe>')
+    assert _DATA_B64 not in out
+    assert 'src="REDACTED"' in out
+
+
+def test_img_data_url_is_redacted_whole():
+    """2. base64 가 아니어도 마찬가지다 — payload 를 해석하지 않는다."""
+    out = redact_debug_html('<img src="data:image/svg+xml,<svg>SVG_SECRET</svg>">')
+    assert "SVG_SECRET" not in out
+
+
+def test_data_url_detection_is_case_and_whitespace_tolerant():
+    """3. fail-closed — 대소문자·앞뒤 공백으로 빠져나갈 수 없다."""
+    out = redact_debug_html(f'<img src=" DATA:text/plain;base64,{_DATA_B64}">')
+    assert _DATA_B64 not in out
+    assert redact_debug_url(f" Data:text/plain;base64,{_DATA_B64}") == "REDACTED"
+
+
+def test_object_data_url_uses_the_same_central_policy():
+    """4. object[data] 도 같은 중앙 정책을 받는다."""
+    out = redact_debug_html(f'<object data="data:text/plain;base64,{_DATA_B64}"></object>')
+    assert _DATA_B64 not in out
+    assert 'data="REDACTED"' in out
+
+
+def test_url_metadata_data_url_is_redacted():
+    """5. og:image 계열 metadata 는 redact_debug_url 을 직접 태우므로 그대로 덮인다."""
+    out = redact_debug_html(f'<meta property="og:image" content="data:image/png;base64,{_DATA_B64}">')
+    assert _DATA_B64 not in out
+
+
+def test_meta_refresh_data_url_target_is_redacted():
+    """6. meta refresh 대상도 같은 중앙 정책을 받는다."""
+    out = redact_debug_html(
+        f'<meta http-equiv="refresh" content="0;url=data:text/html;base64,{_DATA_B64}">'
+    )
+    assert _DATA_B64 not in out
+    assert "0;url=REDACTED" in out
+
+
+def test_ordinary_url_attribute_contract_is_unchanged():
+    """7. 회귀 — 일반 URL 의 공개 식별자 계약 그대로."""
+    out = redact_debug_html('<img src="/img.png?lawreqIdx=5449">')
+    assert 'src="/img.png?lawreqIdx=5449"' in out
+    assert _redact_attr_url("#") == "#" and _redact_attr_url("/plain") == "/plain"
+
+
+def test_data_url_is_redacted_by_the_central_url_sanitizer():
+    """중앙 정책이라 새로 생기는 URL 문맥도 자동으로 덮인다."""
+    assert redact_debug_url(f"data:text/plain;base64,{_DATA_B64}") == "REDACTED"
+
+
+def test_srcset_and_ping_data_urls_stay_fail_closed():
+    """회귀 — srcset 의 data: 전체 제거 정책은 그대로."""
+    out = redact_debug_html(f'<img srcset="data:image/png;base64,{_DATA_B64} 1x, /b.jpg 2x">')
+    assert _DATA_B64 not in out
+    assert 'srcset="REDACTED"' in out
+
+
+# --- bounded adjacent check: iframe@srcdoc ---
+#
+# data: URL 과 같은 'opaque embedded content' 부류라 한 번만 확인했다. 수정 전 실제로
+# 유출됐다(SRCDOC_SECRET 잔존). 값이 임의의 HTML 문서 통째라 그 안의 <script> 를 위
+# 패스들이 보지 못한다. 재귀 HTML 정화기를 만들지 않고 style/on* 과 같은 정책으로
+# 속성을 지운다 — 임베드된 문서의 내용은 이 저장소의 파서 진단 대상이 아니다.
+def test_iframe_srcdoc_is_removed():
+    out = redact_debug_html(
+        '<iframe id="f" class="embed" '
+        "srcdoc=\"&lt;script&gt;fetch('/cb?code=SRCDOC_SECRET')&lt;/script&gt;\">x</iframe>"
+    )
+    assert "SRCDOC_SECRET" not in out
+    assert "srcdoc" not in out
+    assert 'id="f"' in out and 'class="embed"' in out and "<iframe" in out
