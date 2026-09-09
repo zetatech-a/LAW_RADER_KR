@@ -15,6 +15,8 @@ fetcher 로 결정적으로 검증한다.
 """
 import os
 import sys
+
+import pytest
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1376,3 +1378,404 @@ def test_pagination_and_enrich_flags_unchanged():
     assert sc.PAGE_PARAM is None
     assert sc.paginates is True
     assert sc.SUPPORTS_ENRICH is True     # 이제 상세 수집 파이프라인을 탄다
+
+
+# =============================================================================
+# 2026-09-07 운영 회귀 — lawreqIdx 5449 / 5450
+#
+# 이 두 건은 상세 수집까지 갔다가 identity 대조에서 전부 거부되었다. 상세 제목으로
+# 페이지 유형 heading('법령해석')이 잡혀 목록 제목과 어긋났기 때문이다(본문 0/2,
+# Gemini 대상 0건, 메일에 제목·링크만). 아래 fixture 는 실제 공개 상세페이지 DOM 에서
+# parser 관련 부분만 축약한 것이며(tests/fixtures/better_fsc/ 의 주석 참고), 이 회귀를
+# 구조로 잠근다.
+# =============================================================================
+_FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "better_fsc")
+
+LIVE_CASES = {
+    "5449": {
+        "title": "여신전문금융회사가 신기술사업자에 투자하는 경우 금리인하요구권 안내의무 적용 여부",
+        "attachment": "법령해석 회신문(260149)F.hwpx",
+        "answer_head": "□ 신기술사업자에 대한 투자는 「여신전문금융업법」 제50조의13(금리인하 요구)",
+    },
+    "5450": {
+        "title": "신기술사업금융업자의 글로벌펀드(외국법에 따른 외국펀드) 결성·운용 가능여부",
+        "attachment": "법령해석 회신문(260150)F.hwpx",
+        "answer_head": "□ 신기술사업금융업자가 외국법에 따른 외국펀드",
+    },
+}
+
+
+def _live_html(idx):
+    with open(os.path.join(_FIXTURES, f"lawreq_{idx}_detail.html"), encoding="utf-8") as f:
+        return f.read()
+
+
+def _live_post(idx):
+    """목록 record 그대로의 Post(제목 접두어·회신일 포함)."""
+    url = LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do") + f"&lawreqIdx={idx}"
+    return Post(
+        source_key="better_reply",
+        source_name="금융규제포털 · 법령해석·비조치의견서 회신사례",
+        post_id=f"dataIdx:{idx}",
+        title=f"[법령해석] {LIVE_CASES[idx]['title']}",
+        url=url,
+        date="2026-09-07",
+    )
+
+
+def _soup(idx):
+    from bs4 import BeautifulSoup
+
+    return BeautifulSoup(_live_html(idx), "lxml")
+
+
+# --- A/B. 실제 사건 제목 추출 ---
+def test_live_5449_detail_title_is_the_case_title():
+    assert BetterReplyScraper._detail_title(_soup("5449")) == LIVE_CASES["5449"]["title"]
+
+
+def test_live_5450_detail_title_is_the_case_title():
+    assert BetterReplyScraper._detail_title(_soup("5450")) == LIVE_CASES["5450"]["title"]
+
+
+# --- C. 페이지 유형 heading 은 제목이 아니다 ---
+def test_live_page_type_heading_is_never_the_detail_title():
+    """상세에 <h3>법령해석</h3> 이 있어도 그것을 제목으로 돌려주면 안 된다."""
+    for idx in LIVE_CASES:
+        soup = _soup(idx)
+        assert soup.find("h3").get_text(strip=True) == "법령해석"      # fixture 전제 확인
+        assert BetterReplyScraper._detail_title(soup) != "법령해석"
+        # heading 폴백 자체도 유형 heading 을 후보로 삼지 않는다.
+        assert BetterReplyScraper._heading_title(soup) == ""
+
+
+# --- D/E. identity 통과 ---
+def test_live_5449_identity_passes_and_keeps_detail_url():
+    fetcher = _Fetcher(html=_live_html("5449"))
+    sc = _scraper(fetcher)
+    post = _live_post("5449")
+    detail_url = post.url
+    sc.enrich(post)
+    assert post.url == detail_url          # 목록 URL 로 되돌아가지 않았다
+    assert post.body != ""
+
+
+def test_live_5450_identity_passes_and_keeps_detail_url():
+    fetcher = _Fetcher(html=_live_html("5450"))
+    sc = _scraper(fetcher)
+    post = _live_post("5450")
+    detail_url = post.url
+    sc.enrich(post)
+    assert post.url == detail_url
+    assert post.body != ""
+
+
+def test_live_identity_uses_the_reply_date_row():
+    """회신일(2026-09-07)이 다르면 여전히 거부한다 — 제목만으로 통과하지 않는다."""
+    html = _live_html("5449").replace("2026-09-07\n", "2019-03-04\n")
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _live_post("5449")
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert post.url == LIST_URL
+
+
+# --- F. 본문 3/3 ---
+def test_live_bodies_have_all_three_sections():
+    for idx, case in LIVE_CASES.items():
+        sc = _scraper(_Fetcher(html=_live_html(idx)))
+        post = _live_post(idx)
+        sc.enrich(post)
+        for label in ("[질의요지]", "[회답]", "[이유]"):
+            assert label in post.body, (idx, label)
+        assert post.body.index("[질의요지]") < post.body.index("[회답]") < post.body.index("[이유]")
+        assert case["answer_head"] in post.body
+        assert sc.enrich_succeeded(post) is True
+        # 본문에 조작·푸터 텍스트가 섞이지 않는다.
+        for garbage in ("URL 복사", "COPYRIGHT", "대표전화", case["attachment"]):
+            assert garbage not in post.body, (idx, garbage)
+
+
+# --- G. 첨부 ---
+def test_live_attachments_are_collected_with_the_original_filename():
+    for idx, case in LIVE_CASES.items():
+        fetcher = _Fetcher(html=_live_html(idx))
+        sc = _scraper(fetcher)
+        post = _live_post(idx)
+        sc.enrich(post)
+        assert [a.filename for a in post.attachments] == [case["attachment"]], idx
+        att = post.attachments[0]
+        assert att.url.startswith("https://better.fsc.go.kr/fsc_new/file/displayFile.do")
+        assert att.data == b"HWP"
+        assert len(fetcher.downloaded) == 1
+
+
+# --- H. Gemini 요약 대상 ---
+def test_live_enriched_posts_are_general_summary_targets():
+    """실제 Summarizer 일반 경로에서 요약 대상이 되고, 3줄 요약이 붙는다."""
+    for idx in LIVE_CASES:
+        sc = _scraper(_Fetcher(html=_live_html(idx)))
+        post = _live_post(idx)
+        sc.enrich(post)
+        assert len(_prepare_body(_llm_cfg(), post)) >= _llm_cfg().min_body_chars
+
+        # 실제 일반 요약 경로(summarize_all)를 태운다 — Gemini 호출만 가짜 응답으로.
+        summarizer = Summarizer(_llm_cfg())
+        prompts: list[str] = []
+
+        def _generate(prompt, deadline=None, **kw):
+            prompts.append(prompt)
+            return _envelope('{"summary": ["요지 1", "요지 2", "요지 3"]}')
+
+        summarizer._generate = _generate
+        assert summarizer.summarize_all({post.source_name: [post]}) == 1, idx
+        assert len(prompts) == 1, idx           # 이 글로 실제 호출이 일어났다
+        assert "질의요지" in prompts[0] and "회답" in prompts[0], idx
+        assert post.summary == ["요지 1", "요지 2", "요지 3"], idx
+
+
+# --- I. 메일 렌더 ---
+def test_live_post_renders_summary_and_attachment_in_the_mail():
+    sc = _scraper(_Fetcher(html=_live_html("5449")))
+    post = _live_post("5449")
+    sc.enrich(post)
+    post.summary = ["첫째 줄", "둘째 줄", "셋째 줄"]
+
+    html = build_html({post.source_name: [post]})
+    text = build_text({post.source_name: [post]})
+    for line in post.summary:
+        assert line in html and line in text
+    assert LIVE_CASES["5449"]["attachment"] in html
+    assert LIVE_CASES["5449"]["attachment"] in text
+    assert "lawreqIdx=5449" in text            # 검증된 상세 링크가 그대로 나간다
+
+
+# --- 회귀 방어: 유형 heading 이 다시 제목으로 잡히면 안 된다 ---
+def test_live_fixture_would_have_failed_before_the_fix():
+    """이 fixture 로 예전 동작(유형 heading 채택)이 재현되지 않는지 못 박는다.
+
+    예전 구현에서는 본문 라벨 앞의 유일한 heading 후보가 <h3>법령해석</h3> 이라
+    _detail_title 이 '법령해석' 을 돌려주고 목록 제목과 어긋나 전부 거부됐다.
+    """
+    for idx, case in LIVE_CASES.items():
+        soup = _soup(idx)
+        headings = [h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2", "h3", "h4"])]
+        assert "법령해석" in headings                      # 유형 heading 이 여전히 있다
+        assert case["title"] not in headings               # 사건 제목은 heading 이 아니다
+        assert BetterReplyScraper._detail_title(soup) == case["title"]
+
+
+# =============================================================================
+# Codex 리뷰 2 — 제목 칸 충돌에서 heading 폴백을 타면 안 된다
+#
+# 제목 칸이 '없음'과 '있는데 값이 갈림'은 다른 상태다. 후자에서 heading 으로 내려가면
+# 페이지 어딘가의 heading 이 목록 제목과 우연히 같을 때 identity 가 통과해, 다른
+# 사건의 회답·첨부가 그 제목 밑에 실린다.
+# =============================================================================
+def _subject_page(subjects, heading="A 사건", date="2026-08-20"):
+    cells = "".join(f'<tr><td class="subject" colspan="2">{s}</td></tr>' for s in subjects)
+    return f"""
+<div id="content">
+  <h2>{heading}</h2>
+  <table class="tbl-view two"><tbody>{cells}</tbody></table>
+  <table class="tbl-write"><tbody>
+    <tr><th>회신일</th><td>{date}</td></tr>
+    <tr><th>질의요지</th><td>질의 본문입니다.</td></tr>
+    <tr><th>회답</th><td>회답 본문입니다.</td></tr>
+    <tr><th>이유</th><td>이유 본문입니다.</td></tr>
+    <tr><th>첨부파일</th><td>
+      <a href="/fsc_new/file/displayFile.do?filePath=%2Fx&amp;orgFileName=a.hwp&amp;sysFileName=1.hwp">첨부.hwp</a>
+    </td></tr>
+  </tbody></table>
+</div>
+"""
+
+
+def _title_of(html):
+    from bs4 import BeautifulSoup
+
+    return BetterReplyScraper._detail_title(BeautifulSoup(html, "lxml"))
+
+
+def test_subject_cell_contract_is_three_state():
+    """None=칸 없음(폴백 가능) / 값=확정 / ""=충돌(폴백 금지)."""
+    from bs4 import BeautifulSoup
+
+    def _subject(html):
+        return BetterReplyScraper._subject_cell_title(BeautifulSoup(html, "lxml"))
+
+    assert _subject(_subject_page([])) is None
+    assert _subject(_subject_page(["A 사건", "A 사건"])) == "A 사건"
+    assert _subject(_subject_page(["B 사건", "C 사건"])) == ""
+
+
+def test_1_no_subject_cell_falls_back_to_heading():
+    """1. 제목 칸이 없으면 기존 heading 폴백 호환이 유지된다."""
+    assert _title_of(_subject_page([], heading="A 사건")) == "A 사건"
+
+
+def test_2_identical_subject_cells_give_the_canonical_title():
+    """2. 같은 값이 두 번이면 그 값이 정식 제목이다."""
+    assert _title_of(_subject_page(["A 사건", "A 사건"], heading="다른 heading")) == "A 사건"
+
+
+def test_3_conflicting_subjects_never_fall_back_to_heading():
+    """3. Codex repro — 제목 칸이 갈리는데 heading 이 목록 제목과 같은 경우."""
+    html = _subject_page(["B 사건", "C 사건"], heading="A 사건")
+    assert _title_of(html) == ""                       # heading 'A 사건' 을 쓰지 않는다
+
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail(), title="[법령해석] A 사건", date="2026-08-20")
+    detail_url = post.url
+    from bs4 import BeautifulSoup
+
+    # 회신일은 목록과 같다 — 거부 사유가 날짜가 아니라 제목임을 못 박는다.
+    assert BetterReplyScraper._reply_date(BeautifulSoup(html, "lxml")) == "20260820"
+
+    sc.enrich(post)
+    assert post.body == ""
+    assert post.attachments == []
+    assert fetcher.downloaded == []                    # 다운로드 호출 0회
+    assert post.url == LIST_URL                        # 후보 상세 링크도 되돌린다
+    assert post.url != detail_url
+    assert sc.enrich_succeeded(post) is False
+
+
+def test_4_conflict_is_rejected_even_when_one_subject_matches_the_list():
+    """4. 후보 중 하나가 목록 제목과 같다는 이유로 고르면 안 된다."""
+    html = _subject_page(["A 사건", "B 사건"], heading="A 사건")
+    assert _title_of(html) == ""
+
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail(), title="[법령해석] A 사건", date="2026-08-20")
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert post.url == LIST_URL
+
+
+def test_conflict_identity_is_reported_as_unverifiable(caplog):
+    """충돌은 '제목이 다름'이 아니라 '정식 제목 확인 불가'로 남는다."""
+    sc = _scraper(_Fetcher(html=_subject_page(["B 사건", "C 사건"], heading="A 사건")))
+    post = _post(_detail(), title="[법령해석] A 사건", date="2026-08-20")
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert "정식 제목을 확인할 수 없어" in caplog.text
+
+
+def test_5_live_fixtures_still_pass_with_identical_subject_cells():
+    """5. 5449/5450 은 제목 칸 두 개가 같으므로 기존 동작 그대로다."""
+    for idx, case in LIVE_CASES.items():
+        fetcher = _Fetcher(html=_live_html(idx))
+        sc = _scraper(fetcher)
+        post = _live_post(idx)
+        detail_url = post.url
+        sc.enrich(post)
+        assert _title_of(_live_html(idx)) == case["title"], idx
+        assert post.url == detail_url, idx
+        for label in ("[질의요지]", "[회답]", "[이유]"):
+            assert label in post.body, (idx, label)
+        assert [a.filename for a in post.attachments] == [case["attachment"]], idx
+        assert sc.enrich_succeeded(post) is True, idx
+
+
+# =============================================================================
+# Codex 리뷰 — 내비게이션 링크를 담은 제목 칸은 canonical 후보가 아니다
+#
+# _inside_boundary 는 셀의 **조상**만 본다. 이전글/다음글 목록은 링크를 셀 **안에**
+# 두므로(<td class="subject"><a href="/previous">A 사건</a></td>) 조상에는 걸리는 것이
+# 없고, 옆 글 제목이 canonical 후보로 섞인다. 그 제목이 마침 목록 제목과 같으면
+# identity 가 통과해 다른 사건의 회답·첨부가 실린다.
+# =============================================================================
+_NAV_SUBJECT = '<td class="subject"><a href="/previous">A 사건</a></td>'
+
+
+def _subject_page_cells(cells, heading="제목 없음", date="2026-08-20"):
+    return f"""
+<div id="content">
+  <h2>{heading}</h2>
+  <table class="tbl-view two"><tbody>{cells}</tbody></table>
+  <table class="tbl-write"><tbody>
+    <tr><th>회신일</th><td>{date}</td></tr>
+    <tr><th>질의요지</th><td>질의 본문입니다.</td></tr>
+    <tr><th>회답</th><td>회답 본문입니다.</td></tr>
+    <tr><th>이유</th><td>이유 본문입니다.</td></tr>
+    <tr><th>첨부파일</th><td>
+      <a href="/fsc_new/file/displayFile.do?filePath=%2Fx&amp;orgFileName=a.hwp&amp;sysFileName=1.hwp">첨부.hwp</a>
+    </td></tr>
+  </tbody></table>
+</div>
+"""
+
+
+def _subject_of(html):
+    from bs4 import BeautifulSoup
+
+    return BetterReplyScraper._subject_cell_title(BeautifulSoup(html, "lxml"))
+
+
+def test_A_navigation_subject_does_not_conflict_with_the_canonical_title():
+    """A. 이전글 제목이 섞여도 canonical 두 칸이 같으면 그 값이 제목이다."""
+    cells = '<td class="subject">B 사건</td><td class="subject">B 사건</td>' + _NAV_SUBJECT
+    assert _subject_of(_subject_page_cells(cells)) == "B 사건"
+
+
+def test_B_navigation_only_subject_counts_as_absence():
+    """B. 링크 전용 제목 칸만 있으면 canonical 근거가 '없는' 것이다(3-state 의 None)."""
+    assert _subject_of(_subject_page_cells(_NAV_SUBJECT)) is None
+    # 근거가 없으므로 heading 폴백이 살아 있다(기존 호환 경로).
+    assert _title_of(_subject_page_cells(_NAV_SUBJECT, heading="H 사건")) == "H 사건"
+
+
+def test_C_previous_post_title_matching_the_list_never_passes_identity():
+    """C. 공격 재현 — 이전글 제목이 목록 제목과 같고 회신일도 같은 경우."""
+    cells = '<td class="subject">B 사건</td><td class="subject">B 사건</td>' + _NAV_SUBJECT
+    html = _subject_page_cells(cells)
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail(), title="[법령해석] A 사건", date="2026-08-20")
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert post.url == LIST_URL
+    assert sc.enrich_succeeded(post) is False
+
+
+def test_D_canonical_conflict_with_navigation_still_forbids_the_heading_fallback():
+    """D. canonical 이 갈리면 내비게이션 제목이 있어도 폴백 없이 거부한다."""
+    cells = ('<td class="subject">B 사건</td><td class="subject">C 사건</td>' + _NAV_SUBJECT)
+    html = _subject_page_cells(cells, heading="A 사건")
+    assert _subject_of(html) == ""
+    assert _title_of(html) == ""
+
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail(), title="[법령해석] A 사건", date="2026-08-20")
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == [] and post.url == LIST_URL
+
+
+def test_inline_link_inside_a_subject_cell_is_not_navigation():
+    """회귀 방어 — 앵커 밖에 실질 텍스트가 있으면 본문 문단과 같은 취급이다."""
+    cell = '<td class="subject">사건 제목 <a href="/law">관련 법령</a></td>'
+    assert _subject_of(_subject_page_cells(cell)) == "사건 제목 관련 법령"
+
+
+def test_E_live_fixtures_are_unaffected_by_the_boundary_check():
+    """E. 5449/5450 의 제목 칸은 링크가 없는 평범한 셀이라 그대로 통과한다."""
+    for idx, case in LIVE_CASES.items():
+        fetcher = _Fetcher(html=_live_html(idx))
+        sc = _scraper(fetcher)
+        post = _live_post(idx)
+        detail_url = post.url
+        sc.enrich(post)
+        assert _subject_of(_live_html(idx)) == case["title"], idx
+        assert post.url == detail_url, idx
+        for label in ("[질의요지]", "[회답]", "[이유]"):
+            assert label in post.body, (idx, label)
+        assert [a.filename for a in post.attachments] == [case["attachment"]], idx
+        assert sc.enrich_succeeded(post) is True, idx
