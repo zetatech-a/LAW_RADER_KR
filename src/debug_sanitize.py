@@ -33,6 +33,20 @@ _SECRET_FIELD_HINTS = (
     "csrf", "xsrf", "token", "session", "jsessionid", "wmonid",
     "auth", "secret", "passwd", "password", "nonce", "sid",
 )
+# 부분 문자열 힌트에 걸리지 않지만 이름 자체가 credential 인 필드. 힌트로 넓히면
+# ('key' 를 힌트에 넣으면 menuNo… 는 아니어도 sessionKey·monkey 류까지) 오탐이
+# 늘어나므로 **정확 일치**로만 둔다. URL 쿼리는 아래 zero-trust 정책이 따로 막으므로
+# 이 집합은 화면 텍스트·JSON·meta/input 이름 판정에서 쓰인다.
+#   'code' 는 여기에 넣지 않는다 — {"CODE":"INFO-000"} 같은 공개 상태 코드가 흔하다.
+#   OAuth 의 ?code=… 는 URL zero-trust 가 이름을 몰라도 지운다.
+_SECRET_EXACT_NAMES = frozenset({
+    "key", "api_key", "apikey", "api-key",
+    "service_key", "servicekey", "service-key",
+    "access_key", "accesskey", "access-key",
+    "signature", "sig",
+    "x-amz-signature", "x-amz-credential", "x-amz-security-token",
+    "credential", "credentials",
+})
 # 세션 쿠키 값에는 '?' 도 '&' 도 들어가지 않는다. 문자 클래스에서 둘 다 빼지 않으면
 # 이미 구조가 있는 문자열에서 패턴이 URL 경계를 넘어 삼켜, 정화 뒤에 남아야 할 키
 # 이름과 공개 식별자(billId)까지 지운다 — 덤프의 진단 가치가 바로 그 billId 다.
@@ -100,6 +114,22 @@ _SECRET_ASSIGNMENT = re.compile(
     re.VERBOSE,
 )
 
+# 오류 응답이 JSON 을 화면에 그대로 찍는 일이 있다(<pre>{"access_token":"…"}</pre>).
+# 그 자리는 'key=value' 가 아니라 JSON member 라 위 assignment 문법이 닿지 않는다.
+# 기존 문법을 ':' 까지 넓히지 않는다 — 그러면 'token: 이 단어는…' 같은 평범한 산문과
+# CSS 선언(color:red)까지 assignment 로 오인한다. 대신 JSON member 만 보는 좁은 문법을
+# 따로 둔다: **키는 반드시 따옴표로 감싸여 있어야 하고**, 콜론이 있어야 한다.
+#   값은 JSON string 토큰으로 읽는다 — "(?:\\.|[^"\\])*" 로 이스케이프된 따옴표를
+#   한 단위로 보지 않으면 {"access_token":"Bearer \\"inner\\" secret"} 에서 잘려
+#   뒷부분이 남는다. 숫자·true/false/null 스칼라도 받는다(수치형 세션 ID 가 있다).
+#   텍스트 전체에 json.loads 를 시도하지 않는다 — 여기 있는 것은 HTML 에 박힌 조각이다.
+_JSON_STRING = r'"(?:\\.|[^"\\])*"'
+_SECRET_JSON_MEMBER = re.compile(
+    r'"(?P<key>(?:\\.|[^"\\]){1,64})"'
+    r'(?P<sep>\s*:\s*)'
+    r'(?P<value>' + _JSON_STRING + r'|-?\d[\d.eE+\-]*|true|false|null)'
+)
+
 # 값이 URL 인 HTML 속성. 문자열이 아니라 URL 로 취급해 정화한다.
 _URL_VALUED_ATTRS = (
     "action", "formaction", "href", "src", "poster", "cite",
@@ -150,8 +180,26 @@ _SAFE_META_DESCRIPTOR_NAMES = frozenset({"_csrf_header", "_csrf_parameter"})
 # 회신사례 키들은 현재 어떤 힌트에도 걸리지 않지만, 힌트가 늘어날 때 상세 식별자가
 # 조용히 지워지지 않도록 명시해 둔다.
 _PUBLIC_URL_KEYS = {
+    # 의안(likms) 식별자·내비게이션
     "billid", "bill_id", "billno", "agefrom", "ageto", "age", "tabnm",
+    # 회신사례(better.fsc) 상세 식별자
     "lawreqidx", "opinionidx", "dataidx",
+    # 회신사례 목록 URL 의 내비게이션 파라미터(config.yaml 의 list_url 과
+    # better_fsc._NAV_PARAMS 에서 확인). 어느 메뉴에서 연 상세인지가 진단 정보다.
+    "stno", "muno", "mugpno",
+    # 게시판 메뉴·글 식별자(config.yaml 의 fss list_url, src/scrapers/fsc.py)
+    "menuno", "noticeid",
+    # 의안 상세의 분류·탭 코드(tests/fixtures/assembly/*/detail.html 실측)
+    "detailedtab", "procgbncd", "bdgcd", "badtlgbncd", "mainprocyn", "cntsdivcd",
+    # 첨부 참조. 어느 파일을 받으려다 실패했는지가 첨부 진단의 전부다
+    # (better_fsc/lawreq_54xx fixture, assembly detail fixture 실측).
+    # sysFileName 의 32자 16진수 값은 값 패턴이 따로 지운다.
+    "orgfilename", "sysfilename", "filepath", "fileoutname", "filename", "fileext",
+    # 정적 자원 캐시 버스터. 모든 페이지 덤프에 깔려 있어 지우면 잡음만 는다.
+    "ver",
+    # 의안 Open API 의 공개 페이지네이션(src/scrapers/assembly.py 의 요청 params).
+    # 같은 요청의 'KEY' 는 인증키라 **절대 여기에 넣지 않는다.**
+    "type", "pindex", "psize",
 }
 
 
@@ -159,6 +207,8 @@ def _is_secret_field(name: str) -> bool:
     low = (name or "").strip().lower()
     if low in _PUBLIC_URL_KEYS:
         return False
+    if low in _SECRET_EXACT_NAMES:
+        return True
     return any(h in low for h in _SECRET_FIELD_HINTS)
 
 
@@ -184,27 +234,54 @@ def _redact_assignment(m: "re.Match[str]") -> str:
     return f"{key}{sep}{quote}{_REDACTED}{quote}"
 
 
+def _redact_json_member(m: "re.Match[str]") -> str:
+    """JSON object member 한 건. 이름이 비밀이면 값 토큰 전체를 지운다.
+
+    값이 문자열이면 따옴표는 남기고 안쪽만 REDACTED 로 바꾼다(JSON 으로 계속
+    읽히는 편이 진단에 낫다). 스칼라면 REDACTED 로 대체한다.
+    """
+    key = m.group("key")
+    if not _is_secret_field(key):
+        return m.group(0)
+    value = m.group("value")
+    safe = f'"{_REDACTED}"' if value.startswith('"') else _REDACTED
+    return f'"{key}"{m.group("sep")}{safe}'
+
+
 def redact_debug_text(text: str) -> str:
-    """값 패턴과 비밀 이름의 'key=value' 를 지운다. 이름·공개 값은 남긴다.
+    """값 패턴, JSON member, 비밀 이름의 'key=value' 를 지운다. 이름·공개 값은 남긴다.
 
     값 패턴(JSESSIONID=…, 긴 16진수)만으로는 부족하다 — 화면에 그대로 찍힌
     'access_token=…' 은 속성도 스크립트도 아니라 다른 규칙이 닿지 않는다.
     이름 판정은 _is_secret_field 를 그대로 쓰므로 lawreqIdx 같은 공개 키는 값까지
     남는다.
+
+    **JSON member 를 assignment 보다 먼저 돌린다.** 직렬화된 HTML 에서
+    data-json='{"access_token":"…"}' 처럼 JSON 이 속성값 안에 들어 있으면, 바깥
+    data-json='…' 이 먼저 매치돼 따옴표 안 전체를 소비해 버려서 안쪽 JSON 을 다시
+    보지 않는다(바깥 키가 비밀이 아니라 그대로 반환된다). 순서는
+    값 패턴 → JSON member → key=value 다.
     """
     out = text or ""
     for pat in _SECRET_VALUE_PATTERNS:
         out = pat.sub(_REDACTED, out)
+    out = _SECRET_JSON_MEMBER.sub(_redact_json_member, out)
     return _SECRET_ASSIGNMENT.sub(_redact_assignment, out)
 
 
 def redact_debug_url(url: str) -> str:
-    """URL 의 쿼리·경로 파라미터에서 비밀 이름의 '값'만 지운다. 이름은 남긴다.
+    """URL 의 쿼리·경로 파라미터 값을 zero-trust 로 지운다. 이름은 남긴다.
 
-    값 패턴만으로는 부족하다 — 하이픈 섞인 UUID·Base64 토큰은 어느 패턴에도 걸리지
-    않고, 패턴은 쿼리 파라미터 '이름'을 모른다. 경로 파라미터(;jsessionid=…)까지 보는
-    이유는 쿠키가 막힌 클라이언트에 서블릿 컨테이너가 그 자리에 세션 ID 를 붙이기
-    때문이다(likms 가 그 형태다).
+    **공개로 명시된 이름(_PUBLIC_URL_KEYS)만 값을 남기고, 나머지는 전부 지운다.**
+    예전에는 반대로 '비밀이라고 알려진 이름'만 지웠는데, 그러면 목록에 없는
+    credential 이 그대로 나간다 — ?api_key=… ?code=… ?X-Amz-Signature=… 가 모두
+    공개 취급됐고, 이 저장소가 의안 Open API 를 인증하는 ?KEY=<인증키> 도 마찬가지였다.
+    이름을 하나씩 발견해 추가하는 정책은 발견될 때까지 유출된다. 진단에 필요한 것은
+    파라미터 '이름'과 URL 구조이지 모르는 파라미터의 값이 아니므로, 모르는 값은
+    지우는 쪽으로 기운다(KEY=REDACTED 처럼 이름은 남는다).
+
+    경로 파라미터(;jsessionid=…)까지 보는 이유는 쿠키가 막힌 클라이언트에 서블릿
+    컨테이너가 그 자리에 세션 ID 를 붙이기 때문이다(likms 가 그 형태다).
 
     **URL 에 userinfo(user:pass@host)가 있으면 통째로 버린다.** 진단에 필요한 것은
     host/port 구조이지 자격 증명이 아니고, username 자체도 credential·PII 일 수 있어
@@ -231,9 +308,11 @@ def redact_debug_url(url: str) -> str:
             if not eq:
                 out.append(redact_debug_text(chunk))
                 continue
-            out.append(
-                f"{name}={_REDACTED if _is_secret_field(name) else redact_debug_text(value)}"
-            )
+            # zero-trust: 공개로 **명시된** 이름만 값을 남긴다.
+            if name.strip().lower() in _PUBLIC_URL_KEYS:
+                out.append(f"{name}={redact_debug_text(value)}")
+            else:
+                out.append(f"{name}={_REDACTED}")
         return sep.join(out)
 
     # 값 패턴은 조각마다 적용한다. 조립이 끝난 URL 에 다시 돌리면 경계를 넘어 삼킨다.
@@ -405,6 +484,8 @@ def redact_debug_html(html: str) -> str:
     content 가 URL 로 정해진 키는 _meta_content_is_url 로 골라 redact_debug_url 로
     보낸다. 그 밖의 meta@content(description·og:title·keywords …)는 URL 이 아니므로
     건드리지 않는다.
+    액티브 콘텐츠(인라인 script, <style>, style 속성, on* 이벤트 핸들러)는 값을
+    고르지 않고 통째로 비운다 — 진단에 필요 없는데 credential 을 실어 나른다.
     파싱이 실패해도 원문을 그대로 흘리지 않고 값 패턴 정화는 반드시 적용한다.
 
     제목·본문 같은 공개 텍스트와 태그·클래스 구조는 건드리지 않는다. 정화가 진단을
@@ -450,6 +531,29 @@ def redact_debug_html(html: str) -> str:
     for el in soup.find_all("script"):
         if not (el.get("src") or "").strip():
             el.string = ""
+
+    # CSS 도 같은 이유로 통째로 비운다. style 속성 안의 url(/x?access_token=…) 은
+    # URL 속성이 아니라서 URL 규칙이 닿지 않고, 마지막 텍스트 패스는 직렬화된
+    # style="…" 을 '비밀 이름이 아닌 assignment' 하나로 소비해 안쪽을 보지 않는다.
+    #
+    # CSS url 파서를 만들지 않는다. url(…) / url("…") / url('…') / @import /
+    # image-set(…) / 이스케이프 / data: 로 문법이 갈라져 정확히 쪼개기 어렵고, 진단에
+    # 필요한 것은 태그·class/id·텍스트·URL 구조이지 시각 표현이 아니다. 스타일 정보를
+    # 잃는 편이 credential 을 놓치는 것보다 낫다.
+    #
+    # <style> 은 스크립트와 같은 방식으로 **내용만** 비운다(decompose 하지 않는다) —
+    # 요소가 있었다는 사실 자체는 DOM 구조 진단에 남겨 둔다.
+    for el in soup.find_all("style"):
+        el.string = ""
+
+    # style 속성과 인라인 이벤트 핸들러(on*). 둘 다 액티브 콘텐츠라 진단에 쓰이지
+    # 않으면서 URL·문자열을 실어 나른다. 여기서 JavaScript 정화기를 만들지 않는다 —
+    # 통째로 지우는 것으로 끝낸다.
+    for el in soup.find_all(True):
+        if el.has_attr("style"):
+            del el["style"]
+        for attr in [a for a in el.attrs if a.lower().startswith("on")]:
+            del el[attr]
 
     # 값이 URL 인 속성(form@action, a@href, script@src …)도 URL 규칙을 태운다.
     # 필드 값과 같은 이유다 — 속성 이름은 비밀이 아니라 마스킹 대상이 아니고,

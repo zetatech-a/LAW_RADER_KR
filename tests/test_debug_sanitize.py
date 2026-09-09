@@ -55,6 +55,15 @@ HOSTILE_HTML = """
   </script>
   <script src="/static/reply.js?authToken=zzzz"></script>
   <div data-auth="Bearer QUOTED_SECRET"></div>
+  <pre>{"access_token":"JSON_SECRET","lawreqIdx":"5449"}</pre>
+  <pre>{"CODE":"INFO-000","resultMsg":"정상"}</pre>
+  <a href="/x?api_key=API_SECRET">api</a>
+  <a href="/oauth?code=OAUTH_SECRET">oauth</a>
+  <a href="/x?X-Amz-Signature=AWS_SECRET">signed</a>
+  <a href="/api?KEY=ASSEMBLY_SECRET&amp;Type=json&amp;pIndex=1">의안 Open API</a>
+  <div class="styled" style="background:url(/x?access_token=CSS_SECRET)">스타일 있는 제목</div>
+  <style>.avatar { background-image: url(/y?access_token=STYLE_SECRET); }</style>
+  <div id="handler" onclick="fetch('/z?access_token=HANDLER_SECRET')">핸들러 있는 본문</div>
   <object data="/cb?access_token=OBJECT_SECRET&amp;lawreqIdx=5449"></object>
   <img srcset="/small.jpg?token=SRCSET_A 1x, /large.jpg?token=SRCSET_B 2x">
   <td class="subject">여신전문금융회사가 신기술사업자에 투자하는 경우 …</td>
@@ -101,6 +110,20 @@ _SECRETS = (
     # srcset 은 단일 URL 이 아니라 후보 목록이라 URL 규칙이 닿지 않았다.
     "SRCSET_A",
     "SRCSET_B",
+    # 화면에 찍힌 JSON. 'key=value' 가 아니라 JSON member 라 assignment 문법이 닿지 않고,
+    # meta/input/URL 패스도 이 텍스트 노드를 구조적으로 읽지 않는다.
+    "JSON_SECRET",
+    # 이름이 비밀 힌트에 하나도 걸리지 않는 credential 파라미터. '알려진 비밀만 지운다'
+    # 정책에서는 전부 공개 취급됐다 — 저장소 자신의 의안 Open API 인증키 KEY 포함.
+    "API_SECRET",
+    "OAUTH_SECRET",
+    "AWS_SECRET",
+    "ASSEMBLY_SECRET",
+    # 인라인 CSS·이벤트 핸들러. URL 속성이 아니라 URL 규칙이 닿지 않고, 마지막 텍스트
+    # 패스는 바깥 style="…" / onclick="…" 을 통째로 소비한다.
+    "CSS_SECRET",
+    "STYLE_SECRET",
+    "HANDLER_SECRET",
 )
 
 
@@ -189,6 +212,21 @@ def test_hostile_html_keeps_public_diagnostics_after_every_rule():
     assert "/large.jpg?token=REDACTED 2x" in out
     # 비밀 이름 속성은 값만 사라지고 이름과 따옴표 표기는 남는다.
     assert 'data-auth="REDACTED"' in out
+    # zero-trust URL 이어도 파라미터 '이름'과 경로는 남는다 — 진단에 필요한 부분이다.
+    assert "api_key=REDACTED" in out
+    assert "code=REDACTED" in out
+    assert "X-Amz-Signature=REDACTED" in out
+    assert "KEY=REDACTED" in out
+    # 의안 Open API 의 공개 페이지네이션은 값까지 남는다.
+    assert "Type=json" in out and "pIndex=1" in out
+    # JSON 은 공개 키의 값과 일반 응답 필드를 그대로 남긴다.
+    assert '"access_token":"REDACTED"' in out
+    assert '"lawreqIdx":"5449"' in out
+    assert '"CODE":"INFO-000"' in out
+    # 액티브 콘텐츠만 사라지고 DOM 구조·텍스트는 남는다.
+    assert 'class="styled"' in out and "스타일 있는 제목" in out
+    assert 'id="handler"' in out and "핸들러 있는 본문" in out
+    assert "style=" not in out and "onclick=" not in out
 
 
 def test_hostile_html_keeps_structure_and_public_content():
@@ -540,13 +578,17 @@ def test_ordinary_metadata_survives_the_url_metadata_rule():
 #   알려진 CSRF descriptor            값 보존(정확 일치만)
 #   화면 텍스트의 secret=value        값 REDACTED
 #   따옴표 친 secret="a b"            따옴표 안 전체 REDACTED
+#   따옴표 친 JSON member            비밀 키면 값 토큰 전체 REDACTED
 #   단일 URL 속성(href/src/action …)   URL 규칙으로 정화
 #   object@data                       URL 규칙으로 정화(요소 한정)
 #   img/source@srcset, link@imagesrcset  후보마다 URL 정화 / 해석 불가면 fail-closed
 #   meta http-equiv=refresh 의 대상    URL 규칙으로 정화 / 해석 불가면 fail-closed
 #   og:url 계열 URL metadata          URL 규칙으로 정화(allow-set 정확 일치)
 #   URL fragment / userinfo           통째로 제거
+#   URL 쿼리·경로 파라미터            zero-trust — 공개 명시 키만 값 보존
 #   인라인 script                     내용 제거
+#   인라인 CSS(style 속성/<style>)     제거
+#   on* 이벤트 핸들러                  제거
 #   요청 예외 메시지                   애초에 출력하지 않는다(capture 스크립트)
 #   공개 식별자(lawreqIdx …)           값까지 보존
 # ============================================================================
@@ -566,6 +608,10 @@ def test_security_contract_matrix():
         'name="sessionId"',                 # 필드 이름
         "1x",                               # srcset 디스크립터
         "/small.jpg",                       # srcset 경로
+        "api_key=REDACTED",                 # zero-trust — 이름은 남는다
+        "Type=json",                        # 공개 페이지네이션 값
+        '"CODE":"INFO-000"',                # 일반 응답 JSON
+        'class="styled"',                   # CSS 를 지워도 구조는 남는다
         "example.com/detail",               # host/path
         'content="금융규제 법령해석 안내"',    # 일반 meta@content
         "여신전문금융회사가 신기술사업자에 투자하는 경우",   # 공개 제목
@@ -830,3 +876,255 @@ def test_public_ping_target_survives():
     """정화할 것이 없으면 목록은 그대로 남는다."""
     out = redact_debug_html('<a ping="/track?lawreqIdx=5449" href="/x">t</a>')
     assert 'ping="/track?lawreqIdx=5449"' in out
+
+
+# --- Codex P2 #1: Redact JSON-formatted secret fields ---
+#
+# 오류 응답이 JSON 을 화면에 그대로 찍으면(<pre>{"access_token":"…"}</pre>) 그 자리는
+# 'key=value' 가 아니라 JSON member 라 assignment 문법이 닿지 않고, meta/input/URL
+# 패스도 텍스트 노드를 구조적으로 읽지 않는다. 기존 문법을 ':' 까지 넓히는 대신
+# **키가 따옴표로 감싸인** JSON member 만 보는 좁은 문법을 따로 뒀다.
+def test_json_member_secret_is_redacted():
+    """Codex repro — <pre> 안의 JSON."""
+    out = redact_debug_html('<pre>{"access_token":"VERY_SECRET"}</pre>')
+    assert "VERY_SECRET" not in out
+    assert '"access_token":"REDACTED"' in out
+
+
+def test_json_member_tolerates_spacing_and_spaces_in_value():
+    """A. 콜론 주변 공백과 값 안의 공백."""
+    out = redact_debug_text('{"access_token" : "Bearer VERY SECRET"}')
+    assert "VERY SECRET" not in out and "Bearer" not in out
+    assert out == '{"access_token" : "REDACTED"}'
+
+
+def test_json_public_member_survives_next_to_a_secret_one():
+    """B. 공개 식별자는 비밀 member 옆에서도 값까지 남는다."""
+    out = redact_debug_text('{"sessionId":"AAA","lawreqIdx":"5449"}')
+    assert "AAA" not in out
+    assert '"lawreqIdx":"5449"' in out
+
+
+def test_json_escaped_quotes_are_one_string_token():
+    r"""C. \" 를 한 단위로 보지 않으면 문자열이 중간에서 잘려 뒷부분이 남는다."""
+    out = redact_debug_text(r'{"access_token":"Bearer \"inner\" secret"}')
+    assert "inner" not in out and "secret" not in out
+    assert out == '{"access_token":"REDACTED"}'
+
+
+def test_json_inside_an_html_attribute_is_redacted():
+    """D. JSON member 를 assignment 보다 먼저 돌리는 이유.
+
+    직렬화된 data-json='{"…"}' 은 바깥 assignment 가 따옴표 안 전체를 먼저
+    소비해 버려서, 순서가 반대면 안쪽 JSON 을 다시 보지 않는다.
+    """
+    out = redact_debug_html("""<div data-json='{"access_token":"ATTR_SECRET"}'></div>""")
+    assert "ATTR_SECRET" not in out
+
+
+def test_json_grammar_leaves_unquoted_prose_alone():
+    """E. 키가 따옴표로 감싸이지 않은 'token: 산문' 은 대상이 아니다."""
+    for prose in (
+        "token: 이 단어는 설명 문장입니다",
+        "회신일: 2026-09-07",
+        "session: 아래 회의에서 논의되었습니다",
+    ):
+        assert redact_debug_text(prose) == prose
+
+
+def test_public_json_object_is_untouched():
+    """F. 공개 식별자만 있는 JSON 은 그대로."""
+    text = '{"lawreqIdx":"5449","opinionIdx":"2284"}'
+    assert redact_debug_text(text) == text
+
+
+def test_json_scalar_secret_value_is_redacted():
+    """수치형 세션 ID 도 있다 — 문자열 값만 보면 놓친다."""
+    assert redact_debug_text('{"sessionId":12345}') == '{"sessionId":REDACTED}'
+
+
+def test_json_member_rule_keeps_ordinary_response_fields():
+    """일반 응답 JSON 은 진단 자료다 — 지우면 안 된다."""
+    text = '{"CODE":"INFO-000","resultMsg":"정상","list":[{"billId":"PRC_A1"}]}'
+    assert redact_debug_text(text) == text
+
+
+# --- Codex P2 #2: Recognize API keys and signed-URL credentials ---
+#
+# '비밀이라고 알려진 이름만 지운다' 는 정책은 목록에 없는 credential 을 그대로
+# 내보낸다 — 이 저장소가 의안 Open API 를 인증하는 ?KEY=<인증키> 가 그랬다. URL
+# 쿼리·경로 파라미터는 **공개로 명시된 이름만 값을 남기는** zero-trust 로 뒤집었다.
+# 이름을 하나씩 발견해 추가하는 정책은 발견될 때까지 유출된다.
+def test_api_key_query_value_is_redacted():
+    """1. 이름에 어떤 비밀 힌트도 없는 credential."""
+    out = redact_debug_url("/x?api_key=VERY_SECRET")
+    assert "VERY_SECRET" not in out
+    assert out == "/x?api_key=REDACTED"        # 이름은 진단에 남는다
+
+
+def test_assembly_api_key_query_value_is_redacted():
+    """2. 저장소 자신의 인증키. src/scrapers/assembly.py 가 KEY 로 인증한다."""
+    assert redact_debug_url("/api?KEY=ASSEMBLY_SECRET") == "/api?KEY=REDACTED"
+
+
+def test_oauth_code_query_value_is_redacted():
+    """3. OAuth 인가 코드. 'code' 는 URL 밖에서는 공개 상태 코드라 이름으로 못 고른다."""
+    out = redact_debug_url("/oauth/callback?code=OAUTH_CODE")
+    assert "OAUTH_CODE" not in out
+    assert out == "/oauth/callback?code=REDACTED"
+
+
+def test_signed_url_credentials_are_redacted():
+    """4. 서명 URL 계열."""
+    out = redact_debug_url(
+        "/x?X-Amz-Signature=SIGNED_SECRET&X-Amz-Credential=CRED_SECRET"
+        "&X-Amz-Security-Token=TOKEN_SECRET&Expires=1700000000"
+    )
+    for secret in ("SIGNED_SECRET", "CRED_SECRET", "TOKEN_SECRET"):
+        assert secret not in out, secret
+    assert "X-Amz-Signature=REDACTED" in out
+
+
+def test_public_detail_id_still_survives_zero_trust():
+    """5. 공개 식별자는 값까지 남는다 — 덤프가 어느 글의 것인지 알려 주는 단서다."""
+    assert redact_debug_url("/x?lawreqIdx=5449") == "/x?lawreqIdx=5449"
+
+
+def test_public_navigation_parameters_survive():
+    """6. 회신사례 내비게이션(config.yaml 의 list_url · _NAV_PARAMS)은 공개다."""
+    out = redact_debug_url("/d.do?opinionIdx=2284&muNo=117&stNo=11&muGpNo=75")
+    assert out == "/d.do?opinionIdx=2284&muNo=117&stNo=11&muGpNo=75"
+
+
+def test_assembly_open_api_pagination_survives_but_key_does_not():
+    """같은 요청 안에서 공개 페이지네이션과 인증키가 갈린다(assembly.py 의 params)."""
+    out = redact_debug_url("/openapi/svc?KEY=ASSEMBLY_SECRET&Type=json&pIndex=1&pSize=30&AGE=22")
+    assert "ASSEMBLY_SECRET" not in out
+    assert "KEY=REDACTED" in out
+    assert "Type=json" in out and "pIndex=1" in out and "pSize=30" in out and "AGE=22" in out
+
+
+def test_attachment_reference_parameters_survive():
+    """첨부 진단의 전부는 '어느 파일을 받으려다 실패했는가' 다."""
+    out = redact_debug_url("/fsc_new/file/displayFile.do?orgFileName=notice.pdf&filePath=/data/2026")
+    assert "orgFileName=notice.pdf" in out
+    assert "filePath=/data/2026" in out
+
+
+def test_public_value_still_goes_through_the_value_sanitizer():
+    """공개 키라도 값 패턴 정화는 적용된다 — 32자 16진수 핸들 등."""
+    out = redact_debug_url("/f.do?sysFileName=aaaabbbbccccddddeeeeffff00001111")
+    assert "aaaabbbbccccddddeeeeffff00001111" not in out
+    assert "sysFileName=REDACTED" in out
+
+
+def test_unknown_query_parameter_value_is_redacted_by_default():
+    """이름을 미리 알지 못해도 안전하다 — 이것이 zero-trust 의 요점이다."""
+    out = redact_debug_url("/x?futureCredentialName=SOMETHING")
+    assert "SOMETHING" not in out
+    assert "futureCredentialName=REDACTED" in out
+
+
+def test_api_key_in_visible_text_is_redacted():
+    """7. URL 밖(화면 텍스트)은 zero-trust 를 쓸 수 없으므로 정확 이름으로 잡는다."""
+    assert redact_debug_text("api_key=TEXT_SECRET") == "api_key=REDACTED"
+    assert redact_debug_text("signature=SIG_SECRET") == "signature=REDACTED"
+    assert redact_debug_text("serviceKey=SVC_SECRET") == "serviceKey=REDACTED"
+
+
+def test_api_key_in_json_is_redacted():
+    """8. JSON member 도 같은 이름 정책을 쓴다."""
+    out = redact_debug_text('{"api_key":"JSON_SECRET"}')
+    assert "JSON_SECRET" not in out
+
+
+def test_code_is_not_a_global_secret_name():
+    """9. 'code' 는 공개 상태 코드로 훨씬 흔하다 — 전역 비밀 이름에 넣지 않았다.
+
+    URL 의 ?code=… 은 zero-trust 가 이름을 몰라도 지우므로 둘 다 만족한다.
+    """
+    assert redact_debug_text('{"CODE":"INFO-000"}') == '{"CODE":"INFO-000"}'
+    assert redact_debug_text("code=404") == "code=404"
+    assert "OAUTH" not in redact_debug_url("/cb?code=OAUTH_CODE")
+
+
+def test_exact_secret_names_do_not_match_by_substring():
+    """정확 일치다 — 'key' 를 부분 문자열로 쓰면 공개 필드까지 휩쓴다."""
+    assert redact_debug_text("monkey=공개값") == "monkey=공개값"
+    assert redact_debug_text("keyword=공개값") == "keyword=공개값"
+    assert redact_debug_text("key=SECRET") == "key=REDACTED"
+
+
+# --- Codex P2 #3: Redact credentials embedded in inline CSS ---
+#
+# style 속성은 URL 속성이 아니라 URL 규칙이 닿지 않고, 마지막 텍스트 패스는 직렬화된
+# style="…" 을 '비밀 이름이 아닌 assignment' 하나로 소비해 안쪽 URL 을 보지 않는다.
+# CSS url 문법은 url(…)/url("…")/@import/image-set/이스케이프/data: 로 갈라져 정확히
+# 쪼개기 어렵고, 덤프의 진단 가치는 태그·class/id·텍스트·URL 구조이지 시각 표현이
+# 아니다. 그래서 CSS 파서를 만들지 않고 통째로 비운다.
+def test_inline_style_attribute_is_removed():
+    """1. Codex repro — 요소는 남고 style 속성만 사라진다."""
+    out = redact_debug_html('<div style="background-image:url(/avatar?access_token=VERY_SECRET)">t</div>')
+    assert "VERY_SECRET" not in out
+    assert "style=" not in out
+    assert "<div>t</div>" in out
+
+
+def test_style_removal_keeps_id_class_and_text():
+    """2. 진단에 필요한 것은 구조와 텍스트다 — 그건 그대로 남는다."""
+    out = redact_debug_html(
+        '<div id="target" class="subject" '
+        "style=\"background:url('https://alice:PASSWORD@example.com/x')\">제목</div>"
+    )
+    assert "alice" not in out and "PASSWORD" not in out
+    assert 'id="target"' in out and 'class="subject"' in out and "제목" in out
+
+
+def test_style_element_content_is_emptied():
+    """3. style 속성만 지우고 <style> 을 두면 같은 root cause 가 반복된다.
+
+    스크립트와 같은 방식으로 내용만 비운다 — 요소가 있었다는 사실은 남긴다.
+    """
+    out = redact_debug_html("<style>.x { background:url(/x?token=STYLE_SECRET); }</style>")
+    assert "STYLE_SECRET" not in out
+    assert "<style></style>" in out
+
+
+def test_style_element_quoted_and_import_urls_are_gone_too():
+    """CSS url 문법의 변종을 하나씩 쫓지 않는다 — 내용을 통째로 비우기 때문이다."""
+    out = redact_debug_html(
+        '<style>@import url("/css/a?access_token=IMPORT_SECRET");'
+        ".b{background:image-set(url('/i?token=SET_SECRET') 1x)}</style>"
+    )
+    assert "IMPORT_SECRET" not in out and "SET_SECRET" not in out
+
+
+def test_harmless_style_is_removed_but_content_survives():
+    """4. 스타일 정보를 잃는 편이 credential 을 놓치는 것보다 낫다."""
+    out = redact_debug_html('<p style="color:red">본문</p>')
+    assert "color:red" not in out
+    assert "<p>본문</p>" in out
+
+
+def test_inline_event_handlers_are_removed():
+    """추가 hardening — on* 도 같은 '액티브 콘텐츠' 정책으로 지운다.
+
+    JavaScript 정화기를 만들지 않는다. 통째로 지우는 것으로 끝낸다.
+    """
+    out = redact_debug_html(
+        '<div id="k" class="subject" onclick="fetch(\'/x?access_token=CLICK_SECRET\')" '
+        'onload="init(\'/y?api_key=LOAD_SECRET\')">본문</div>'
+    )
+    assert "CLICK_SECRET" not in out and "LOAD_SECRET" not in out
+    assert "onclick=" not in out and "onload=" not in out
+    assert 'id="k"' in out and 'class="subject"' in out and "본문" in out
+
+
+def test_style_removal_does_not_disturb_other_attributes():
+    """style/on* 만 지운다 — 나머지 속성은 기존 규칙 그대로다."""
+    out = redact_debug_html(
+        '<a href="/d.do?lawreqIdx=5449" style="color:red" title="공개 제목">링크</a>'
+    )
+    assert 'href="/d.do?lawreqIdx=5449"' in out
+    assert 'title="공개 제목"' in out
+    assert "style=" not in out
