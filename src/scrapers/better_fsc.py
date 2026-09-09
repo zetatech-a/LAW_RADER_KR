@@ -28,7 +28,8 @@
 확인한다(_identity_ok — 구분↔endpoint, 정식 제목 일치, 회신일 일치). 제목은 페이지
 전체 텍스트에서 찾지 않고 '제목이 놓인 자리'(_detail_title)에서만 읽어 정확히 같은지
 본다 — 잘못된 상세 B 의 이전글/다음글·푸터에 A 의 제목이 있어도 통과하면 안 되기
-때문이다. 그 '자리'는 라이브 DOM 에서 확인한 제목 칸(class="subject" 셀)이다. 확인되지 않으면 본문·첨부를 붙이지 않는 것은 물론(다운로드도 하지 않는다)
+때문이다. 그 '자리'는 라이브 DOM 에서 확인한 제목 칸(class="subject" 셀)이다.
+확인되지 않으면 본문·첨부를 붙이지 않는 것은 물론(다운로드도 하지 않는다)
 **사용자 링크도 통합조회 목록으로 되돌린다** — 검증되지 않은 후보 링크를 그대로 두면
 제목만 보고 누른 사용자가 다른 사건의 상세로 가기 때문이다. 잘못된 회답을 다른 제목
 밑에 보내는 것이 본문이 비는 것보다 훨씬 나쁘므로 fail-open 하지 않는다. 반대로 identity 확인에 성공한 뒤의 본문
@@ -57,7 +58,6 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from ..debug_sanitize import redact_debug_html
 from ..fetcher import AttachmentTooLarge
 from ..models import Attachment, Post
 from .base import BaseScraper, clean_text
@@ -371,16 +371,12 @@ class BetterReplyScraper(BaseScraper):
             log.warning(
                 "[%s] 상세가 포털 ERROR PAGE — 목록 링크로 되돌립니다: %s", self.key, detail_url
             )
-            self._dump_identity_debug("error", detail_url, html)
             self._fallback_to_list(post)
             return
 
         # 본문·첨부를 붙이기 **전에** 이 응답이 목록의 그 글이 맞는지 확인한다.
         # 확인되지 않으면 아무것도 붙이지 않고(첨부 다운로드도 하지 않고) 링크도 되돌린다.
         if not self._identity_ok(soup, post):
-            # 로그에는 추출된 제목만 남아 실제 마크업을 볼 수 없다. 다음 진단이 추측에서
-            # 시작하지 않도록 응답 HTML 스냅샷을 남긴다(성공 시에는 남기지 않는다).
-            self._dump_identity_debug("identity_mismatch", detail_url, html)
             self._fallback_to_list(post)
             return
 
@@ -412,43 +408,6 @@ class BetterReplyScraper(BaseScraper):
                 log.info("[%s] 첨부 용량 초과 — 링크만 유지 %s: %s", self.key, att.filename, e)
             except Exception as e:  # noqa: BLE001
                 log.warning("[%s] 첨부 다운로드 실패 %s: %s", self.key, att.url, e)
-
-    def _dump_identity_debug(self, reason: str, detail_url: str, html: str) -> None:
-        """동일 게시물 확인에 실패했을 때만 상세 응답 HTML 을 debug/ 에 남긴다.
-
-        운영 로그에는 '상세 제목 ↔ 목록 제목' 문자열만 남아 실제 DOM 을 볼 수 없다.
-        그러면 다음 수정이 마크업을 추측하는 데서 시작한다. 정상 수집에서는 남기지
-        않는다.
-
-        **정화본만 저장한다.** 요청 헤더·쿠키를 담지 않는 것만으로는 부족하다 —
-        응답 HTML 자체가 meta[name=_csrf]·hidden input·URL 쿼리·인라인 스크립트에
-        살아 있는 토큰을 싣고 오고, debug/ 는 verify 워크플로가 아티팩트로 올린다.
-        파싱에 쓰는 것은 원본이고(호출자가 이미 파싱했다), 여기서 만든 안전한 사본만
-        파일로 나간다. 파일명에 상세 식별자(lawreqIdx/opinionIdx)를 넣어 어느 글의
-        스냅샷인지 남긴다.
-        """
-        try:
-            self._dump_debug(
-                f"{reason}_{self._detail_idx(detail_url)}",
-                redact_debug_html(html),
-                suffix="html",
-            )
-        except Exception as e:  # noqa: BLE001 - 진단 실패가 수집을 막으면 안 된다
-            log.warning("[%s] 디버그 스냅샷 저장 실패 %s: %s", self.key, detail_url, e)
-
-    @staticmethod
-    def _detail_idx(url: str) -> str:
-        """상세 URL 의 식별자(lawreqIdx/opinionIdx) 값. 없으면 'unknown'.
-
-        파일명이 되므로 경로 조각이 섞이지 않도록 숫자만 인정한다.
-        """
-        query = parse_qs(urlparse(url or "").query)
-        for _, param in _DETAIL_ENDPOINTS.values():
-            values = query.get(param) or []
-            value = (values[-1] if values else "").strip()
-            if value.isdigit():
-                return value
-        return "unknown"
 
     def _fallback_to_list(self, post: Post) -> None:
         """검증되지 않은 상세 후보 링크를 사용자에게 노출하지 않는다.
