@@ -28,6 +28,9 @@ HOSTILE_HTML = """
   <meta property="og:url" content="https://example.test/callback?access_token=og-secret&amp;lawreqIdx=5449">
   <meta property="og:title" content="금융규제 법령해석">
   <meta name="description" content="금융규제 법령해석 안내">
+  <meta name="_csrf_parameter" content="_csrf">
+  <meta name="authorization_header" content="Bearer META_HEADER_SECRET">
+  <meta name="access_token_parameter" content="META_PARAM_SECRET">
 </head>
 <body>
   <form id="form" action="/reply/x.do?lawreqIdx=5449&amp;csrfToken=aaaabbbbccccddddeeeeffff00001111">
@@ -51,6 +54,9 @@ HOSTILE_HTML = """
     window.token = "super-secret";
   </script>
   <script src="/static/reply.js?authToken=zzzz"></script>
+  <div data-auth="Bearer QUOTED_SECRET"></div>
+  <object data="/cb?access_token=OBJECT_SECRET&amp;lawreqIdx=5449"></object>
+  <img srcset="/small.jpg?token=SRCSET_A 1x, /large.jpg?token=SRCSET_B 2x">
   <td class="subject">여신전문금융회사가 신기술사업자에 투자하는 경우 …</td>
   <p>□ 질의요지 본문입니다.</p>
 </body>
@@ -82,6 +88,19 @@ _SECRETS = (
     # content 가 URL 로 정해진 metadata(og:url …). 직렬화된 속성 안의 중첩 비밀은
     # 마지막 텍스트 패스가 바깥 content="…" 를 통째로 소비해 버려 잡지 못한다.
     "og-secret",
+    # 이름이 비밀이면서 'header'/'param' 부분 문자열 예외에도 걸리던 meta. 넓은 예외가
+    # 앞선 비밀 이름 판정을 덮어써서 content 가 통째로 남았다.
+    "META_HEADER_SECRET",
+    "META_PARAM_SECRET",
+    # 따옴표 안에 공백이 있는 값. 선택적 따옴표 그룹이 빈 대안을 골라 값 문자
+    # 클래스가 여는 따옴표에서 멈추면 이름만 지우고 값이 남는다.
+    "QUOTED_SECRET",
+    # 요소별로만 URL 인 속성(object@data). 전역 URL 속성 목록에 없어 URL 규칙을
+    # 타지 않았고, 마지막 텍스트 패스는 바깥 data="…" 를 통째로 소비해 버린다.
+    "OBJECT_SECRET",
+    # srcset 은 단일 URL 이 아니라 후보 목록이라 URL 규칙이 닿지 않았다.
+    "SRCSET_A",
+    "SRCSET_B",
 )
 
 
@@ -162,6 +181,14 @@ def test_hostile_html_keeps_public_diagnostics_after_every_rule():
     assert 'content="금융규제 법령해석 안내"' in out        # 일반 meta@content 는 무변경
     assert 'content="금융규제 법령해석"' in out             # og:title 도 URL 이 아니다
     assert "https://example.test/callback?access_token=REDACTED" in out
+    # 공개 CSRF descriptor 는 값까지 남는다(정확 일치 면제).
+    assert 'content="_csrf"' in out
+    # object/srcset 은 값만 지우고 경로·디스크립터 구조는 남긴다.
+    assert 'data="/cb?access_token=REDACTED&amp;lawreqIdx=5449"' in out
+    assert "/small.jpg?token=REDACTED 1x" in out
+    assert "/large.jpg?token=REDACTED 2x" in out
+    # 비밀 이름 속성은 값만 사라지고 이름과 따옴표 표기는 남는다.
+    assert 'data-auth="REDACTED"' in out
 
 
 def test_hostile_html_keeps_structure_and_public_content():
@@ -497,3 +524,309 @@ def test_ordinary_metadata_survives_the_url_metadata_rule():
     assert 'content="금융, 법령해석, 비조치의견서"' in safe
     # 'access_token=' assignment 가 아니라 그냥 낱말이므로 그대로 남는다.
     assert "access_token이라는 용어에 관한 법령해석" in safe
+
+
+# ============================================================================
+# 정화기 보안 계약 매트릭스
+#
+# Codex 리뷰가 revision 을 거듭하며 'HTML 의 어느 자리에 비밀이 실릴 수 있는가' 를
+# 하나씩 찾아내고 있다. 새 프레임워크를 만들 것 없이, 지금까지 닫은 문맥과 각각의
+# 기대 동작을 한자리에 적어 다음 회귀를 줄인다. 아래 각 행은 이 파일 어딘가의
+# 실제 테스트로 잠겨 있고, test_security_contract_matrix 가 한 번에 다시 확인한다.
+#
+#   문맥                              기대 동작
+#   --------------------------------------------------------------
+#   meta/input 비밀 이름의 값          REDACTED
+#   알려진 CSRF descriptor            값 보존(정확 일치만)
+#   화면 텍스트의 secret=value        값 REDACTED
+#   따옴표 친 secret="a b"            따옴표 안 전체 REDACTED
+#   단일 URL 속성(href/src/action …)   URL 규칙으로 정화
+#   object@data                       URL 규칙으로 정화(요소 한정)
+#   img/source@srcset, link@imagesrcset  후보마다 URL 정화 / 해석 불가면 fail-closed
+#   meta http-equiv=refresh 의 대상    URL 규칙으로 정화 / 해석 불가면 fail-closed
+#   og:url 계열 URL metadata          URL 규칙으로 정화(allow-set 정확 일치)
+#   URL fragment / userinfo           통째로 제거
+#   인라인 script                     내용 제거
+#   요청 예외 메시지                   애초에 출력하지 않는다(capture 스크립트)
+#   공개 식별자(lawreqIdx …)           값까지 보존
+# ============================================================================
+def test_security_contract_matrix():
+    """위 매트릭스를 한 번에 확인한다 — 행 하나가 무너지면 여기서 걸린다."""
+    out = redact_debug_html(HOSTILE_HTML)
+
+    # redact 되어야 하는 것
+    for secret in _SECRETS:
+        assert secret not in out, secret
+
+    # 보존되어야 하는 것
+    for public in (
+        "X-CSRF-TOKEN",                     # 알려진 CSRF descriptor
+        'content="_csrf"',                  # 알려진 CSRF descriptor
+        "lawreqIdx=5449",                   # 공개 식별자
+        'name="sessionId"',                 # 필드 이름
+        "1x",                               # srcset 디스크립터
+        "/small.jpg",                       # srcset 경로
+        "example.com/detail",               # host/path
+        'content="금융규제 법령해석 안내"',    # 일반 meta@content
+        "여신전문금융회사가 신기술사업자에 투자하는 경우",   # 공개 제목
+        "토큰 발급 절차에 관한 질의입니다",                  # 한국어 자연어
+    ):
+        assert public in out, public
+
+
+# --- Codex P2 #1: Restrict the meta exemption to known CSRF descriptors ---
+#
+# 예전에는 meta 이름에 'header' 나 'param' 이 들어가기만 하면 앞선 비밀 이름 판정을
+# 통째로 덮어썼다. authorization_header 는 'auth' 로 비밀이면서 'header' 로 면제,
+# access_token_parameter 는 'token' 으로 비밀이면서 'param' 으로 면제라 값이 남았다.
+# 면제는 실제로 공개 descriptor 임이 확인된 이름의 정확 일치로만 둔다.
+def test_csrf_header_descriptor_value_survives():
+    """1. _csrf_header 의 content 는 토큰이 아니라 보낼 헤더 '이름'이다."""
+    out = redact_debug_html('<meta name="_csrf_header" content="X-CSRF-TOKEN">')
+    assert "X-CSRF-TOKEN" in out
+
+
+def test_csrf_parameter_descriptor_value_survives():
+    """2. _csrf_parameter 의 content 는 필드 '이름'이다."""
+    assert 'content="_csrf"' in redact_debug_html('<meta name="_csrf_parameter" content="_csrf">')
+
+
+def test_authorization_header_meta_is_redacted():
+    """3. Codex repro — 'auth' 로 비밀인데 'header' 로 면제되던 자리."""
+    out = redact_debug_html('<meta name="authorization_header" content="Bearer VERY_SECRET">')
+    assert "VERY_SECRET" not in out and "Bearer" not in out
+    assert 'content="REDACTED"' in out
+    assert 'name="authorization_header"' in out      # 이름은 진단에 필요하다
+
+
+def test_access_token_parameter_meta_is_redacted():
+    """4. Codex repro — 'token' 으로 비밀인데 'param' 으로 면제되던 자리."""
+    out = redact_debug_html('<meta name="access_token_parameter" content="VERY_SECRET">')
+    assert "VERY_SECRET" not in out
+    assert 'content="REDACTED"' in out
+
+
+def test_session_header_meta_is_redacted():
+    """5. 'session' + 'header' 조합도 마찬가지다."""
+    assert "SESSION_SECRET" not in redact_debug_html(
+        '<meta name="session_header" content="SESSION_SECRET">'
+    )
+
+
+def test_plain_csrf_meta_is_still_redacted():
+    """6. 회귀 — 면제 목록에 없는 _csrf 는 기존대로 지운다."""
+    assert "CSRF_SECRET" not in redact_debug_html('<meta name="_csrf" content="CSRF_SECRET">')
+
+
+def test_safe_meta_descriptor_names_match_exactly():
+    """7. 면제는 정확 일치다. 접두·접미가 붙은 이름은 봐주지 않는다."""
+    for name, secret in (
+        ("_csrf_header_extra", "EXTRA_SECRET"),
+        ("foo_csrf_parameter", "FOO_SECRET"),
+        ("x_csrf_header", "PREFIXED_SECRET"),
+    ):
+        out = redact_debug_html(f'<meta name="{name}" content="{secret}">')
+        assert secret not in out, name
+
+
+def test_secret_input_value_is_still_redacted_and_public_input_survives():
+    """input 은 면제 대상이 아니다. 이름 판정은 _is_secret_field 로 통일돼 있다."""
+    out = redact_debug_html(
+        '<input type="hidden" name="_csrf_header" value="INPUT_SECRET">'
+        '<input type="hidden" name="lawreqIdx" value="5449">'
+    )
+    assert "INPUT_SECRET" not in out          # descriptor 면제는 meta 에만 적용된다
+    assert 'value="5449"' in out              # 공개 식별자는 값까지 남는다
+
+
+# --- Codex P2 #2: Redact the complete contents of quoted secret assignments ---
+#
+# 따옴표를 optional 그룹 하나로 두면 정규식이 '따옴표 없음' 분기를 골라, 값 문자
+# 클래스가 여는 따옴표에서 즉시 멈춘다. 그러면 이름만 REDACTED 로 바뀌고 값은 뒤에
+# 그대로 남는다 — 지운 것처럼 보이는데 안 지워진, 가장 나쁜 형태다. 그래서 닫힌
+# 따옴표 / 닫히지 않은 따옴표 / 따옴표 없음을 서로 다른 대안으로 파싱한다.
+def test_quoted_secret_assignment_loses_the_whole_value():
+    """1. Codex repro. 따옴표 표기는 남기고 안쪽 전체를 지운다."""
+    out = redact_debug_text('authToken="Bearer VERY_SECRET"')
+    assert "VERY_SECRET" not in out and "Bearer" not in out
+    assert out == 'authToken="REDACTED"'
+
+
+def test_single_quoted_secret_value_with_spaces_is_removed():
+    """2. 홑따옴표도 같고, 원래 따옴표 종류를 유지한다."""
+    assert redact_debug_text("sessionId='abc def ghi'") == "sessionId='REDACTED'"
+
+
+def test_spacing_around_the_separator_is_preserved():
+    """3. 표기(공백)는 진단 정보다 — 구조는 남기고 값만 지운다."""
+    out = redact_debug_text('csrfToken = "abc def"')
+    assert "abc def" not in out
+    assert out == 'csrfToken = "REDACTED"'
+
+
+def test_quoted_value_does_not_swallow_the_next_assignment():
+    """4. 닫는 따옴표까지만 소비한다 — 그 뒤 공개 식별자는 살아남는다."""
+    out = redact_debug_text("token=\"AAA BBB\"&lawreqIdx=5449&sessionId='CCC DDD'")
+    assert "AAA BBB" not in out and "CCC DDD" not in out
+    assert "lawreqIdx=5449" in out
+    assert out == "token=\"REDACTED\"&lawreqIdx=5449&sessionId='REDACTED'"
+
+
+def test_html_attribute_quoted_secret_is_removed():
+    """5. 직렬화된 속성도 마지막 텍스트 패스가 같은 문법으로 읽는다."""
+    out = redact_debug_html('<div data-auth="Bearer VERY_SECRET"></div>')
+    assert "VERY_SECRET" not in out and "Bearer" not in out
+    assert 'data-auth="REDACTED"' in out
+
+
+def test_html_attribute_single_quoted_secret_is_removed():
+    """6. 임의 속성을 _URL_VALUED_ATTRS 에 넣지 않는다 — URL 문맥이 아니다."""
+    out = redact_debug_html("<div data-session-id='SESSION VALUE'></div>")
+    assert "SESSION VALUE" not in out
+    assert 'data-session-id="REDACTED"' in out
+
+
+def test_non_secret_quoted_assignment_is_left_alone():
+    """7. 이름이 비밀이 아니면 따옴표 안 내용을 건드리지 않는다."""
+    text = 'title="Bearer is a public word"'
+    assert redact_debug_text(text) == text
+
+
+def test_unquoted_assignment_behaviour_is_unchanged():
+    """8. 회귀 — 따옴표 없는 기존 동작 그대로."""
+    assert redact_debug_text("access_token=abc") == "access_token=REDACTED"
+    assert redact_debug_text("lawreqIdx=5449") == "lawreqIdx=5449"
+    assert redact_debug_text("sessionId = pre-secret") == "sessionId = REDACTED"
+
+
+def test_unterminated_quoted_secret_is_redacted_fail_safe():
+    """닫는 따옴표가 없으면 값을 지우되, 닫아 주지는 않는다(망가진 것도 진단 정보).
+
+    예전 문법에서는 여기서도 이름만 지우고 값이 남았다. 경계는 태그·줄 단위로
+    좁게 둔다 — 직렬화된 HTML 은 한 줄로 나오는 일이 흔해서 경계가 없으면 따옴표
+    하나가 문서 뒷부분을 통째로 삼킨다.
+    """
+    assert redact_debug_text('token="unterminated secret') == 'token="REDACTED'
+    out = redact_debug_html('<pre>token="unterminated secret</pre><p>lawreqIdx=5449</p>')
+    assert "unterminated secret" not in out
+    assert "</pre>" in out and "lawreqIdx=5449" in out      # 구조와 공개 값은 남는다
+
+
+def test_unterminated_quote_under_a_public_key_still_scans_inside():
+    """닫히지 않은 따옴표 분기가 삼킨 부분도 다시 검사한다.
+
+    이름이 비밀이 아니라고 매치 전체를 그대로 돌려주면, 그 안에 든 다른
+    '비밀 이름=값' 이 검사 없이 통과한다.
+    """
+    out = redact_debug_html('<pre>title="oops sessionId=NESTED_SECRET</pre>')
+    assert "NESTED_SECRET" not in out
+    assert "</pre>" in out
+
+
+def test_quoted_assignment_rule_leaves_korean_prose_alone():
+    """회귀 — 키는 ASCII 식별자만 받는다. 한국어 문장은 손대지 않는다."""
+    for prose in (
+        "토큰 발급 절차에 관한 질의입니다",
+        "회신일: 2026-09-07, 처리구분 완료",
+        '판시사항은 "동일기능 동일규제" 원칙이다',
+    ):
+        assert redact_debug_text(prose) == prose
+
+
+# --- Codex P2 #3: Sanitize the omitted standard URL attributes ---
+#
+# 전역 _URL_VALUED_ATTRS 에 없는 표준 URL 자리가 남아 있었다. 마지막 텍스트 패스는
+# 직렬화된 data="…" / srcset="…" 를 '비밀 이름이 아닌 assignment' 하나로 통째로
+# 소비해 버리므로 안쪽 access_token=… 을 다시 보지 않는다(og:url 때와 같은 구조).
+# object@data 는 단일 URL, srcset 은 'URL [디스크립터]' 후보 목록이라 문법이 다르다.
+def test_object_data_url_is_sanitized():
+    """1. Codex repro — object@data 는 단일 URL 이다."""
+    out = redact_debug_html('<object data="/cb?access_token=TOPSECRET"></object>')
+    assert "TOPSECRET" not in out
+    assert 'data="/cb?access_token=REDACTED"' in out
+
+
+def test_object_data_reuses_the_whole_url_contract():
+    """2. userinfo·쿼리·프래그먼트를 URL 정화기가 그대로 처리한다."""
+    out = redact_debug_html(
+        '<object data="https://alice:PASSWORD@example.com/cb?lawreqIdx=5449#SECRET_FRAGMENT"></object>'
+    )
+    for secret in ("alice", "PASSWORD", "SECRET_FRAGMENT"):
+        assert secret not in out, secret
+    assert "example.com/cb" in out
+    assert "lawreqIdx=5449" in out
+
+
+def test_img_srcset_single_candidate_is_sanitized():
+    """3. Codex repro — 디스크립터 없는 단일 후보."""
+    out = redact_debug_html('<img srcset="/img?access_token=TOPSECRET">')
+    assert "TOPSECRET" not in out
+    assert 'srcset="/img?access_token=REDACTED"' in out
+
+
+def test_img_srcset_multiple_candidates_keep_descriptors():
+    """4. 후보마다 URL 만 정화하고 1x/2x 는 남긴다 — 공개 값이라 진단에 쓸모 있다."""
+    out = redact_debug_html('<img srcset="/small.jpg?token=A 1x, /large.jpg?sessionId=B 2x">')
+    assert "=A " not in out and "=B " not in out
+    assert 'srcset="/small.jpg?token=REDACTED 1x, /large.jpg?sessionId=REDACTED 2x"' in out
+
+
+def test_source_and_link_srcset_use_the_same_rule():
+    """5. source@srcset 과 link@imagesrcset 도 같은 문법이다."""
+    out = redact_debug_html(
+        '<source srcset="/s.jpg?token=SOURCE_SECRET 1x">'
+        '<link rel="preload" as="image" imagesrcset="/p.jpg?token=LINK_SECRET 2x">'
+    )
+    assert "SOURCE_SECRET" not in out and "LINK_SECRET" not in out
+    assert "/s.jpg?token=REDACTED 1x" in out
+    assert "/p.jpg?token=REDACTED 2x" in out
+
+
+def test_public_srcset_keeps_its_meaning():
+    """6. 정화할 것이 없는 srcset 은 의미가 그대로 남는다."""
+    out = redact_debug_html('<img srcset="/a.jpg 1x, /b.jpg 2x">')
+    assert 'srcset="/a.jpg 1x, /b.jpg 2x"' in out
+
+
+def test_srcset_data_uri_is_redacted_whole_fail_closed():
+    """7-a. data URI 는 쉼표가 payload 문법이라 후보 경계를 믿을 수 없다 → 전체 제거."""
+    out = redact_debug_html('<img srcset="data:image/png;base64,AAAA?token=T 1x, /b.jpg 2x">')
+    assert "AAAA" not in out and "token=T" not in out
+    assert 'srcset="REDACTED"' in out
+
+
+def test_srcset_unparsable_candidate_is_redacted_whole_fail_closed():
+    """7-b. 디스크립터 형태를 벗어난 후보는 쪼개기를 믿을 수 없다 → 그 후보 제거."""
+    out = redact_debug_html('<img srcset="/x?token=MAL weird stuff, /ok.jpg 2x">')
+    assert "MAL" not in out and "weird" not in out
+    assert "/ok.jpg 2x" in out                # 정상 후보는 살린다
+
+
+def test_generic_data_attribute_is_not_treated_as_a_url():
+    """8. object 한정 규칙이다 — 임의 요소의 data 속성까지 URL 로 추측하지 않는다."""
+    out = redact_debug_html('<div data="그냥 공개 진단 값"></div>')
+    assert 'data="그냥 공개 진단 값"' in out
+
+
+def test_ping_url_list_is_sanitized_per_token():
+    """a/area@ping 은 공백으로 구분된 URL 목록이다 — 단일 URL 로 넘기면 정화가 헛돈다.
+
+    Codex #3 과 같은 부류('전역 URL 속성 목록에 없는 표준 URL 자리')이고 기존
+    redact_debug_url 재사용만으로 닫히므로 함께 처리한다.
+    """
+    out = redact_debug_html(
+        '<a ping="/p1?access_token=PING_A /p2?sessionId=PING_B" href="/x">t</a>'
+        '<area ping="/p3?token=AREA_SECRET">'
+    )
+    for secret in ("PING_A", "PING_B", "AREA_SECRET"):
+        assert secret not in out, secret
+    assert "/p1?access_token=REDACTED" in out
+    assert "/p2?sessionId=REDACTED" in out
+    assert "/p3?token=REDACTED" in out
+    assert 'href="/x"' in out            # 기존 단일 URL 규칙은 그대로
+
+
+def test_public_ping_target_survives():
+    """정화할 것이 없으면 목록은 그대로 남는다."""
+    out = redact_debug_html('<a ping="/track?lawreqIdx=5449" href="/x">t</a>')
+    assert 'ping="/track?lawreqIdx=5449"' in out

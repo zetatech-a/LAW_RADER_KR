@@ -79,12 +79,24 @@ _URL_ITEMPROP_KEYS = frozenset({"url", "contenturl", "embedurl", "thumbnailurl"}
 _REFRESH_DELAY = re.compile(r"^\s*\d*(?:\.\d+)?\s*$")
 _REFRESH_TARGET = re.compile(r"^(?P<lead>\s*)(?P<kw>url)(?P<mid>\s*=\s*)(?P<target>.*)$", re.I | re.S)
 
+# 따옴표가 '있을 수도 없을 수도' 있는 하나의 문법으로 쓰면 안 된다. 선택적 따옴표
+# 그룹은 빈 대안을 고를 수 있고, 그러면 값 문자 클래스가 여는 따옴표에서 즉시 멈춰
+# authToken="Bearer VERY_SECRET" 이 authToken=REDACTED"Bearer VERY_SECRET" 이 된다 —
+# 이름만 지우고 값은 남는 최악의 결과다. 그래서 세 경우를 각각의 대안으로 나눈다.
+#   1) 닫힌 따옴표  key="공백 포함 값"  → 값 전체가 하나
+#   2) 닫히지 않은 따옴표 key="…        → 태그·줄 경계까지 fail-safe 로 지운다
+#   3) 따옴표 없음  key=값             → 기존 동작 그대로
+# 두 따옴표 대안 모두 '<' '>' 와 줄바꿈을 값에서 제외한다. 직렬화된 HTML 은 한 줄로
+# 나오는 일이 흔해서, 경계를 두지 않으면 따옴표 하나가 뒤따르는 태그를 통째로 삼켜
+# 덤프의 구조가 사라진다.
 _SECRET_ASSIGNMENT = re.compile(
     r"""(?P<key>[A-Za-z][A-Za-z0-9_.\-]{0,63})
         (?P<sep>\s*=\s*)
-        (?P<quote>["']?)
-        (?P<value>[^"'\s&;#<>]*)
-        (?P=quote)""",
+        (?:
+            (?P<quote>["'])(?P<quoted>[^"'<>\r\n]*)(?P=quote)
+          | (?P<dquote>["'])(?P<dangling>[^"'<>\r\n]*)
+          | (?P<unquoted>[^"'\s&;#<>]*)
+        )""",
     re.VERBOSE,
 )
 
@@ -93,6 +105,43 @@ _URL_VALUED_ATTRS = (
     "action", "formaction", "href", "src", "poster", "cite",
     "data-url", "data-src", "data-href", "data-action",
 )
+
+# 값이 URL 이지만 **특정 요소에서만** 그런 속성. 전역 목록에 넣으면 안 된다 —
+# 아무 div/커스텀 요소의 data="…" 까지 URL 이라고 추측하게 된다.
+_ELEMENT_URL_ATTRS = {
+    "object": ("data",),          # <object data="/viewer.do?…">
+}
+
+# 값이 'URL [디스크립터], URL [디스크립터] …' 후보 목록인 속성. 단일 URL 이 아니라
+# 통째로 redact_debug_url 에 넘기면 안 된다(쉼표·공백이 URL 문법이 아니다).
+_ELEMENT_SRCSET_ATTRS = {
+    "img": ("srcset",),
+    "source": ("srcset",),
+    "link": ("imagesrcset",),     # <link rel="preload" as="image" imagesrcset="…">
+}
+
+# 값이 '공백으로 구분된 URL 목록' 인 속성. 단일 URL 로 넘기면 목록 전체가 하나의
+# 경로로 파싱돼 정화가 헛돈다. 문법이 srcset 보다 단순해(디스크립터가 없다) 토큰마다
+# redact_debug_url 을 돌리는 것으로 끝난다.
+_ELEMENT_URL_LIST_ATTRS = {
+    "a": ("ping",),
+    "area": ("ping",),
+}
+
+# srcset 디스크립터로 인정하는 형태: 1x, 2x, 1.5x, 320w. 진단에 쓸모 있는 공개 값이라
+# 남긴다. 이 형태를 벗어나면 후보를 신뢰성 있게 쪼갠 것이 아니므로 fail-closed 한다.
+_SRCSET_DESCRIPTOR = re.compile(r"^\d+(?:\.\d+)?[wx]$", re.I)
+
+# 이름이 비밀 힌트에 걸리지만 content 가 토큰이 아니라 **공개 descriptor** 인 meta.
+# 예: _csrf_header → "X-CSRF-TOKEN"(헤더 이름), _csrf_parameter → "_csrf"(필드 이름).
+# 계약이 바뀌었는지 보려면 그 값이 필요하다.
+#
+# 정확 일치만 인정한다. 예전에는 'header'/'param' 부분 문자열 예외였는데, 그러면
+# authorization_header 나 access_token_parameter 처럼 **이름이 비밀이면서 동시에**
+# 예외에도 걸리는 meta 의 값이 통째로 살아남았다. endswith("_header") 같은 새 추측을
+# 도입하지 않는다 — 실제로 공개 descriptor 임이 확인된 이름만 여기에 명시하고,
+# 새로운 descriptor 가 관찰되면 그때 명시적으로 추가하는 편이 zero-trust 에 맞는다.
+_SAFE_META_DESCRIPTOR_NAMES = frozenset({"_csrf_header", "_csrf_parameter"})
 
 # 공개 식별자라 값을 남겨도 되는 키. 이름 힌트보다 우선한다 — 덤프가 어느 글의
 # 것인지 알 수 없으면 진단 자료로서 쓸모가 없다.
@@ -114,11 +163,25 @@ def _is_secret_field(name: str) -> bool:
 
 
 def _redact_assignment(m: "re.Match[str]") -> str:
-    """'key=value' 한 건. 이름이 비밀이면 값만 지우고, 아니면 원문 그대로 둔다."""
-    if not _is_secret_field(m.group("key")):
-        return m.group(0)
-    quote = m.group("quote")
-    return f"{m.group('key')}{m.group('sep')}{quote}{_REDACTED}{quote}"
+    """'key=value' 한 건. 이름이 비밀이면 값만 지우고, 아니면 원문 그대로 둔다.
+
+    따옴표 표기는 보존한다 — token="…" 는 token="REDACTED", sessionId='…' 는
+    sessionId='REDACTED' 로 남아 덤프에서 원래 문법을 알아볼 수 있다. 닫히지 않은
+    따옴표는 닫아 주지 않는다. 값이 망가져 있었다는 사실 자체가 진단 정보다.
+    """
+    key, sep = m.group("key"), m.group("sep")
+    dangling = m.group("dangling")
+    if not _is_secret_field(key):
+        if dangling is None:
+            return m.group(0)
+        # 닫히지 않은 따옴표 대안은 뒤쪽까지 삼켰다. 이름이 비밀이 아니라고 그대로
+        # 돌려주면 그 안에 든 다른 '비밀 이름=값' 이 검사 없이 통과한다. 삼킨 만큼만
+        # 다시 돌린다(항상 더 짧은 문자열이라 재귀가 끝난다).
+        return f"{key}{sep}{m.group('dquote')}{_SECRET_ASSIGNMENT.sub(_redact_assignment, dangling)}"
+    if dangling is not None:
+        return f"{key}{sep}{m.group('dquote')}{_REDACTED}"
+    quote = m.group("quote") or ""
+    return f"{key}{sep}{quote}{_REDACTED}{quote}"
 
 
 def redact_debug_text(text: str) -> str:
@@ -219,6 +282,54 @@ def _has_userinfo(value: str) -> bool:
         return True          # 파싱조차 안 되는 값은 정화기로 보낸다(fail-safe)
 
 
+def _redact_srcset(value: str) -> str:
+    """srcset/imagesrcset 후보 목록을 후보마다 URL 규칙으로 정화한다.
+
+    srcset 은 단일 URL 이 아니라 'URL [디스크립터]' 를 쉼표로 이은 목록이라
+    redact_debug_url 에 통째로 넘길 수 없다. 그렇다고 WHATWG 파서를 새로 구현하지도
+    않는다 — 이건 진단 덤프용 정화기다. 흔한 형태는 보존하며 정화하고, 문법을
+    신뢰성 있게 쪼개지 못하면 fail-closed 한다.
+
+    정책:
+      - 후보 = 쉼표로 나눈 조각. 첫 토큰이 URL, 나머지가 디스크립터.
+      - 디스크립터는 1x·2x·1.5x·320w 형태만 인정하고 그대로 남긴다(공개 값이라
+        진단에 쓸모 있다). 그 형태를 벗어나면 그 **후보 전체를 지운다** — 쪼개기가
+        맞았다고 확신할 수 없는데 URL 만 골라 정화하면 나머지에 credential 이 남는다.
+      - 값 어디에든 'data:' 가 있으면 **srcset 전체를 지운다.** data URI 는 쉼표
+        자체가 payload 문법이라 단순 쉼표 분리가 후보 경계를 틀리게 잡는다.
+      - 빈 후보(후행 쉼표 등)는 그대로 둔다.
+
+    진단 정보를 잃는 편이 credential 을 남기는 것보다 낫다.
+    """
+    raw = value or ""
+    if "data:" in raw.lower():
+        return _REDACTED
+
+    out = []
+    for candidate in raw.split(","):
+        body = candidate.strip()
+        if not body:
+            out.append(candidate)
+            continue
+        lead = candidate[: len(candidate) - len(candidate.lstrip())]
+        trail = candidate[len(candidate.rstrip()):]
+        url, *descriptors = body.split()
+        if not all(_SRCSET_DESCRIPTOR.match(d) for d in descriptors):
+            out.append(f"{lead}{_REDACTED}{trail}")
+            continue
+        out.append(lead + " ".join([redact_debug_url(url), *descriptors]) + trail)
+    return ",".join(out)
+
+
+def _redact_url_list(value: str) -> str:
+    """공백으로 구분된 URL 목록(a@ping)을 토큰마다 URL 규칙으로 정화한다.
+
+    srcset 과 달리 디스크립터가 없어 모든 토큰이 URL 이다. 구분 공백은 하나로
+    정규화한다 — 이 자리의 진단 가치는 '어디로 보내는가' 이지 여백이 아니다.
+    """
+    return " ".join(redact_debug_url(token) for token in (value or "").split())
+
+
 def _meta_content_is_url(el) -> bool:
     """이 meta 의 content 가 URL 이라고 **구조적으로 확정되는지**.
 
@@ -281,7 +392,14 @@ def redact_debug_html(html: str) -> str:
     """덤프용 정화: 이름이 비밀인 meta/input 값을 지우고 값 패턴도 지운다.
 
     _csrf_header / _csrf_parameter 의 content 는 토큰이 아니라 헤더 '이름'(예:
-    X-CSRF-TOKEN)이라 남긴다 — 계약이 바뀌었는지 보려면 그 값이 필요하다.
+    X-CSRF-TOKEN)이라 남긴다 — 계약이 바뀌었는지 보려면 그 값이 필요하다. 다만
+    그 면제는 _SAFE_META_DESCRIPTOR_NAMES 의 **정확 일치**뿐이다. 이름에
+    'header'/'param' 이 들어가기만 하면 봐주면 authorization_header 같은 meta 의
+    값이 통째로 남는다.
+    URL 이 실리는 자리는 전역 속성(_URL_VALUED_ATTRS) 외에 요소별로도 있다 —
+    object@data 는 단일 URL 로, img/source@srcset 과 link@imagesrcset 은 후보
+    목록이라 _redact_srcset 으로, a/area@ping 은 공백 구분 URL 목록이라
+    _redact_url_list 로 따로 읽는다.
     meta@content 중 URL 을 싣는 자리만 따로 읽는다 — http-equiv="refresh" 는 별도
     문법이라 _redact_meta_refresh_content 로, og:url·twitter:image·itemprop="url" 처럼
     content 가 URL 로 정해진 키는 _meta_content_is_url 로 골라 redact_debug_url 로
@@ -318,11 +436,13 @@ def redact_debug_html(html: str) -> str:
             el["content"] = redact_debug_url(content)
 
     for el in soup.find_all(["input", "meta"]):
-        name = (el.get("name") or el.get("id") or "").lower()
+        name = (el.get("name") or el.get("id") or "").strip().lower()
         attr = "value" if el.name == "input" else "content"
-        if not el.get(attr) or not any(h in name for h in _SECRET_FIELD_HINTS):
+        # 이름 판정은 _is_secret_field 로 통일한다 — _PUBLIC_URL_KEYS 가 그대로
+        # 존중되어 공개 식별자 필드의 값이 조용히 지워지지 않는다.
+        if not el.get(attr) or not _is_secret_field(name):
             continue
-        if el.name == "meta" and ("header" in name or "param" in name):
+        if el.name == "meta" and name in _SAFE_META_DESCRIPTOR_NAMES:
             continue
         el[attr] = _REDACTED
 
@@ -340,5 +460,32 @@ def redact_debug_html(html: str) -> str:
             value = el.get(attr)
             if isinstance(value, str) and value.strip():
                 el[attr] = _redact_attr_url(value)
+
+    # 요소별로만 URL 인 속성(object@data). 전역 목록에 "data" 를 넣으면 임의의
+    # div/커스텀 요소의 data 속성까지 URL 로 오인한다.
+    #
+    # 이 자리가 필요한 이유는 og:url 때와 같다 — 마지막 텍스트 패스는 직렬화된
+    # data="…" 를 '비밀 이름이 아닌 assignment' 하나로 통째로 소비해 버려서 그 안의
+    # access_token=… 을 다시 보지 않는다.
+    for name, attrs in _ELEMENT_URL_ATTRS.items():
+        for el in soup.find_all(name):
+            for attr in attrs:
+                value = el.get(attr)
+                if isinstance(value, str) and value.strip():
+                    el[attr] = _redact_attr_url(value)
+
+    for name, attrs in _ELEMENT_URL_LIST_ATTRS.items():
+        for el in soup.find_all(name):
+            for attr in attrs:
+                value = el.get(attr)
+                if isinstance(value, str) and value.strip():
+                    el[attr] = _redact_url_list(value)
+
+    for name, attrs in _ELEMENT_SRCSET_ATTRS.items():
+        for el in soup.find_all(name):
+            for attr in attrs:
+                value = el.get(attr)
+                if isinstance(value, str) and value.strip():
+                    el[attr] = _redact_srcset(value)
 
     return redact_debug_text(str(soup))
