@@ -28,7 +28,10 @@
 확인한다(_identity_ok — 구분↔endpoint, 정식 제목 일치, 회신일 일치). 제목은 페이지
 전체 텍스트에서 찾지 않고 '제목이 놓인 자리'(_detail_title)에서만 읽어 정확히 같은지
 본다 — 잘못된 상세 B 의 이전글/다음글·푸터에 A 의 제목이 있어도 통과하면 안 되기
-때문이다. 그 '자리'는 라이브 DOM 에서 확인한 제목 칸(class="subject" 셀)이다.
+때문이다. 그 '자리'는 라이브 DOM 에서 확인한 **상단 상세정보 표(table.tbl-view)의**
+제목 칸(class="subject" 셀)이다 — 하단 회신 표(table.tbl-write)의 같은 class 셀은
+게시물 제목이 아니라 '회신 제목'이라 '…에 대한 회신' 처럼 달라도 정상이므로 대조
+대상이 아니다(_subject_cell_title 참고).
 확인되지 않으면 본문·첨부를 붙이지 않는 것은 물론(다운로드도 하지 않는다)
 **사용자 링크도 통합조회 목록으로 되돌린다** — 검증되지 않은 후보 링크를 그대로 두면
 제목만 보고 누른 사용자가 다른 사건의 상세로 가기 때문이다. 잘못된 회답을 다른 제목
@@ -95,8 +98,20 @@ _TITLE_LABELS = ("제목",)
 # 정식 사건 제목이 실제로 놓이는 자리(라이브 확인 — 아래 '실제 상세 DOM' 참고).
 #   <tr><td class="subject" colspan="2">…사건 제목…</td></tr>
 # 라벨(th)이 없는 한 칸짜리 행이라 라벨-값 짝(_label_pairs)에 잡히지 않는다. 상세정보
-# 표(table.tbl-view.two)와 회신 표(table.tbl-write)에 같은 값이 두 번 들어 있다.
+# 표(table.tbl-view.two)와 회신 표(table.tbl-write)에 **같은 class 로** 한 번씩 들어 있다.
 _SUBJECT_CELL_CLASS = "subject"
+
+# 제목 칸이 놓인 표의 종류. 같은 class="subject" 라도 **어느 표 안이냐에 따라 뜻이
+# 다르다** — 이것을 구분하지 않은 것이 비조치의견서 상세가 통째로 버려진 원인이다.
+#   table.tbl-view   상단 상세정보 표 = 신청인이 등록한 **게시물 제목**
+#                    → 목록 record 와 대조해야 할 유일한 identity 제목
+#   table.tbl-write  하단 회신 표     = 금융위가 붙인 **회신 제목**
+#                    → '…요청에 대한 회신' 처럼 게시물 제목과 달라도 정상이다
+# 법령해석 상세에서는 두 값이 우연히 같아서 '모든 제목 칸의 합의값' 정책이 통했지만,
+# 비조치의견서에서는 회신 제목이 달라 충돌로 판정돼 identity 가 항상 실패했다.
+# class 는 'tbl-view two' 처럼 덧붙을 수 있으므로 목록 포함 여부로 본다.
+_VIEW_TABLE_CLASS = "tbl-view"
+_REPLY_TABLE_CLASS = "tbl-write"
 
 # 상세가 스스로 찍는 '유형' heading. 라이브 상세에서 div.sub-con 의 첫 요소가
 # <h3>법령해석</h3> 이고, 본문 라벨 앞의 유일한 heading 후보라 예전 구현이 이것을
@@ -517,8 +532,10 @@ class BetterReplyScraper(BaseScraper):
 
         순서:
           1) '제목' 라벨이 붙은 값(회신일과 같은 구조적 라벨-값 메커니즘).
-          2) **제목 칸**(class="subject" 셀) — 라이브 상세에서 정식 사건 제목이 실제로
-             놓여 있는 자리다. 라벨(th)이 없는 한 칸짜리 행이라 1)에는 잡히지 않는다.
+          2) **제목 칸**(상단 상세정보 표 table.tbl-view 의 class="subject" 셀) — 라이브
+             상세에서 게시물 제목이 실제로 놓여 있는 자리다. 라벨(th)이 없는 한 칸짜리
+             행이라 1)에는 잡히지 않는다. 하단 회신 표(table.tbl-write)의 같은 class 셀은
+             '회신 제목'이라 게시물 제목과 달라도 정상이므로 후보에서 뺀다.
           3) 본문(질의요지) 앞에 오는 heading. 라이브 상세에는 유형 heading('법령해석')
              밖에 없어 이 경로만으로는 사건 제목을 얻지 못하므로 유형 heading 은 후보에서
              빼고, 그래도 후보가 남는 다른 배치(비조치의견서 등)를 위해서만 남겨 둔다.
@@ -539,34 +556,47 @@ class BetterReplyScraper(BaseScraper):
 
     @classmethod
     def _subject_cell_title(cls, soup: BeautifulSoup) -> str | None:
-        """'제목 칸'(class="subject" 셀)에서 읽은 정식 제목. 세 가지 상태를 구분한다.
+        """'제목 칸'(class="subject" 셀)에서 읽은 **게시물 제목**. 세 가지 상태를 구분한다.
 
         반환값 계약:
           None          쓸 수 있는 제목 칸이 없다(칸 자체가 없거나, 값이 비었거나,
-                        내비게이션·링크 자리의 칸뿐이다) → canonical 근거 자체가 없으므로
-                        호출자가 heading 폴백을 타도 된다. 이 배치가 확인되지 않은 다른
-                        구분(비조치의견서 등)과의 호환을 위해 남겨 둔 경로다.
-          非빈 문자열   제목 칸이 하나 이상 있고 정규화한 값이 모두 같다 → 확정 제목.
-          ""            제목 칸이 여럿인데 값이 서로 다르다 → canonical 근거끼리 충돌.
-                        어느 것이 이 글의 제목인지 알 수 없으므로 **폴백 금지**이고
+                        내비게이션·링크 자리의 칸뿐이거나, 회신 표의 회신 제목뿐이다)
+                        → canonical 근거 자체가 없으므로 호출자가 heading 폴백을 타도
+                        된다. 확인되지 않은 다른 배치와의 호환을 위해 남겨 둔 경로다.
+          非빈 문자열   상단 상세정보 표의 제목 칸이 하나 이상 있고 정규화한 값이 모두
+                        같다 → 확정 제목.
+          ""            상단 제목 칸이 여럿인데 값이 서로 다르다 → canonical 근거끼리
+                        충돌. 어느 것이 이 글의 제목인지 알 수 없으므로 **폴백 금지**이고
                         상세 제목은 무효다(호출자는 identity 를 fail-closed 처리한다).
 
         라이브 상세(better.fsc.go.kr LawreqDetail.do, 2026-09-08 확인)의 구조:
             div.sub-con > h3 '법령해석'                        ← 유형 heading(제목 아님)
               div.board-view > table.tbl-view.two
-                tr > td.subject[colspan=2] '…사건 제목…'       ← 정식 제목
+                tr > td.subject[colspan=2] '…사건 제목…'       ← **게시물 제목**(identity)
                 tr > th '처리구분' / td '완료'
                 tr > th '소관부서' / td '중소금융과'
               div.res-wrap > div.tit '회신' > div.board-view > table.tbl-write
-                tr > td.subject[colspan=2] '…사건 제목…'       ← 같은 값이 한 번 더
+                tr > td.subject[colspan=2] '…사건 제목…'       ← **회신 제목**(identity 아님)
                 tr > th '회신일' / td '2026-09-07'
                 tr > th '첨부파일' / td > a[href=/fsc_new/file/displayFile.do?…]
                 tr > th '질의요지' / td > p …
                 tr > th.bc-yellow '회답' / td.bc-yellow > p …
                 tr > th.bc-blue '이유' / td.bc-blue > p …
 
-        두 표의 제목 칸 값이 서로 다르면(=구조가 바뀐 것, 또는 다른 글의 응답) 어느 쪽이
-        이 글의 제목인지 알 수 없으므로 인정하지 않는다.
+        **두 칸은 class 가 같을 뿐 뜻이 다르다.** 법령해석에서는 회신 제목이 게시물
+        제목과 같은 문자열이라 '모든 제목 칸이 같아야 한다'는 예전 규칙이 우연히 통했다.
+        비조치의견서에서는 회신 제목이 '…요청에 대한 회신' 처럼 붙어 게시물 제목과 다른
+        것이 정상인데, 예전 규칙은 그것을 '근거 충돌'로 읽어 상세 제목을 무효로 만들었고
+        신규 비조치의견서가 전부 identity 에서 떨어져 본문·첨부·요약 없이 발송됐다.
+        그래서 회신 표(table.tbl-write)의 제목 칸은 identity 후보에서 아예 제외한다.
+
+        반대 방향도 반드시 막아야 한다 — 회신 제목이 목록 제목과 우연히 같아도 상단
+        게시물 제목이 다르면 다른 글이므로 통과하면 안 된다. 회신 제목을 '후보에서 빼는'
+        것이 아니라 '상단 제목으로만 판정하는' 것이라 그 경우 상단 값으로 불일치 판정이
+        난다(회신 제목은 판정에 관여하지 않는다).
+
+        상단 표가 없는 배치에서는 회신 표를 뺀 나머지 제목 칸으로 기존 동작을 유지한다
+        (legacy 폴백). 회신 표의 제목만 있는 페이지는 '근거 없음'(None)이다.
 
         내비게이션 자리의 제목 칸은 아예 세지 않는다. 조상만 보는 _inside_boundary 로는
         부족하다 — 이전글/다음글 목록은
@@ -579,18 +609,45 @@ class BetterReplyScraper(BaseScraper):
         '사건 제목 <a>관련 법령</a>' 은 본문 문단과 같은 이유로 경계가 아니고, 앵커밖에
         없는 링크 전용 셀만 걸러진다.
         """
-        values: list[str] = []
+        view_values: list[str] = []      # 상단 상세정보 표 = canonical
+        other_values: list[str] = []     # 어느 표에도 안 든 칸 = legacy 폴백용
         for cell in soup.find_all(["td", "th"]):
             if _SUBJECT_CELL_CLASS not in (cell.get("class") or []):
                 continue
             if cls._is_boundary(cell) or cls._inside_boundary(cell):
                 continue          # 내비게이션·링크 자리의 제목 칸은 이 글의 제목이 아니다
+            zone = cls._subject_zone(cell)
+            if zone == "reply":
+                continue          # 회신 제목 — 게시물 제목과 달라도 정상이므로 판정 제외
             text = _norm_ws(cell.get_text(" "))
-            if text:
-                values.append(text)
+            if not text:
+                continue
+            (view_values if zone == "view" else other_values).append(text)
+        # 상단 표에 제목 칸이 하나라도 있으면 그것만으로 판정한다 — 상단이 canonical 이고,
+        # 다른 자리의 값이 섞여 들어와 없던 충돌을 만들면 안 된다.
+        values = view_values or other_values
         if not values:
             return None                       # 제목 칸 없음 — heading 폴백 허용
         return values[0] if len(set(values)) == 1 else ""
+
+    @staticmethod
+    def _subject_zone(cell) -> str:
+        """제목 칸이 놓인 표의 종류 — 'view'(상단 상세정보) / 'reply'(하단 회신) / ''(그 외).
+
+        조상 표를 바깥으로 훑되 회신 표를 만나면 즉시 'reply' 다. 표가 중첩된 배치에서
+        회신 표 안의 칸이 상단 취급되는 쪽(= 회신 제목이 identity 에 끼어드는 쪽)보다
+        회신으로 판정되는 쪽이 안전하기 때문이다.
+        """
+        zone = ""
+        for parent in cell.parents:
+            if getattr(parent, "name", None) != "table":
+                continue
+            classes = parent.get("class") or []
+            if _REPLY_TABLE_CLASS in classes:
+                return "reply"
+            if _VIEW_TABLE_CLASS in classes:
+                zone = "view"
+        return zone
 
     @classmethod
     def _heading_title(cls, soup: BeautifulSoup) -> str:

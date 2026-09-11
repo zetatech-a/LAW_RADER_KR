@@ -25,7 +25,7 @@ from src.config import LLMConfig, SourceConfig
 from src.fetcher import AttachmentTooLarge
 from src.models import Post
 from src.notifier import build_html, build_text
-from src.scrapers.better_fsc import BetterReplyScraper
+from src.scrapers.better_fsc import BetterReplyScraper, _norm_ws
 from src.summarizer import Summarizer, _prepare_body
 
 LIST_URL = (
@@ -1778,4 +1778,335 @@ def test_E_live_fixtures_are_unaffected_by_the_boundary_check():
         for label in ("[질의요지]", "[회답]", "[이유]"):
             assert label in post.body, (idx, label)
         assert [a.filename for a in post.attachments] == [case["attachment"]], idx
+        assert sc.enrich_succeeded(post) is True, idx
+
+
+# =============================================================================
+# 비조치의견서 — 게시물 제목(table.tbl-view)과 회신 제목(table.tbl-write)은 다르다
+#
+# 운영 증상: 같은 시기 법령해석은 정상 enrich 됐는데 신규 비조치의견서만 전부
+#   "상세의 정식 제목을 확인할 수 없어 동일 게시물 대조 불가"
+# 로 떨어져 본문·첨부·Gemini 요약 없이 제목/날짜/원문보기만 발송됐다.
+#
+# 원인: 두 표가 같은 class="subject" 를 쓰는데 뜻이 다르다.
+#   table.tbl-view  td.subject  = 신청인이 등록한 **게시물 제목**   ← identity 대조 대상
+#   table.tbl-write td.subject  = 금융위가 붙인 **회신 제목**       ← 대조 대상 아님
+# 법령해석에서는 회신 제목이 게시물 제목과 같은 문자열이라 '모든 제목 칸의 합의값'
+# 정책이 우연히 통했지만, 비조치의견서는 '…요청에 대한 회신' 처럼 달라서 그 정책이
+# 정상 페이지를 '근거 충돌'로 읽었다.
+#
+# 라이브 확인은 하지 못했다 — 이 환경에서 better.fsc.go.kr 접근이 네트워크 정책에
+# 막혀(CONNECT 403) 실제 OpinionDetail 응답을 받을 수 없었다. 그래서 새 selector 를
+# 지어내지 않고 라이브 확인된 lawreq 상세 DOM 을 그대로 쓰되 회신 표의 제목 칸만
+# 다르게 둔 fixture 로 검증한다(opinion_reply_title_differs.html 머리말 참고).
+# =============================================================================
+OPINION_CASE = {
+    "title": "금융투자업규정상 집합투자재산 평가관련 비조치의견서 요청",
+    "reply_title": "금융투자업규정상 집합투자재산 평가관련 비조치의견서 요청에 대한 회신",
+    "attachment": "비조치의견서 회신문(260233)F.hwpx",
+    "date": "2026-09-11",
+    "idx": "2285",
+}
+
+
+def _opinion_html():
+    path = os.path.join(_FIXTURES, "opinion_reply_title_differs.html")
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _opinion_live_post():
+    """목록 record 그대로의 비조치의견서 Post(제목 접두어·회신일 포함)."""
+    url = (
+        LIST_URL.replace("TotalReplyList.do", "OpinionDetail.do")
+        + f"&opinionIdx={OPINION_CASE['idx']}"
+    )
+    return Post(
+        source_key="better_reply",
+        source_name="금융규제포털 · 법령해석·비조치의견서 회신사례",
+        post_id=f"dataIdx:{OPINION_CASE['idx']}",
+        title=f"[비조치의견서] {OPINION_CASE['title']}",
+        url=url,
+        date=OPINION_CASE["date"],
+    )
+
+
+def _opinion_page(view_subject, write_subject, date="2026-09-11"):
+    """상단/하단 제목을 따로 지정하는 최소 비조치의견서 상세(표 class 는 실제와 동일)."""
+    return f"""
+<div class="sub-con">
+  <h3>비조치의견서</h3>
+  <div class="board-view">
+    <table class="tbl-view two"><tbody>
+      <tr><td class="subject" colspan="2">{view_subject}</td></tr>
+      <tr><th scope="row">처리구분</th><td>완료</td></tr>
+    </tbody></table>
+  </div>
+  <div class="res-wrap"><div class="tit">회신</div>
+    <div class="board-view">
+      <table class="tbl-write"><tbody>
+        <tr><td class="subject" colspan="2">{write_subject}</td></tr>
+        <tr><th scope="row">회신일</th><td>{date}</td></tr>
+        <tr><th scope="row">질의요지</th><td><p>질의 본문입니다.</p></td></tr>
+        <tr><th scope="row">회답</th><td><p>회답 본문입니다.</p></td></tr>
+        <tr><th scope="row">이유</th><td><p>이유 본문입니다.</p></td></tr>
+        <tr><th scope="row">첨부파일</th><td>
+          <a href="/fsc_new/file/displayFile.do?filePath=%2Fx&amp;orgFileName=a.hwp&amp;sysFileName=1.hwp">첨부.hwp</a>
+        </td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</div>
+"""
+
+
+# --- 1. 정상 — 상단 게시물 제목과 하단 회신 제목이 다르다 ---
+def test_opinion_reply_title_may_differ_from_the_post_title():
+    """이번 버그의 핵심. '…에 대한 회신'이 붙어도 identity 는 통과해야 한다."""
+    html = _opinion_page("A 사건", "A 사건에 대한 회신")
+    assert _subject_of(html) == "A 사건"           # 회신 제목은 후보에 섞이지 않는다
+    assert _title_of(html) == "A 사건"
+
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail("OpinionDetail.do"), title="[비조치의견서] A 사건", date="2026-09-11")
+    detail_url = post.url
+
+    sc.enrich(post)
+    assert post.url == detail_url                  # 검증된 상세 링크가 유지된다
+    for label in ("[질의요지]", "[회답]", "[이유]"):
+        assert label in post.body
+    assert sc.enrich_succeeded(post) is True
+
+
+# --- 2. 정상 — 회신 제목이 게시물 제목과 아주 달라도 된다 ---
+def test_opinion_identity_ignores_a_completely_different_reply_title():
+    """상단 제목·회신일이 목록과 맞으면 하단 회신 제목이 무엇이든 PASS 다."""
+    html = _opinion_page("A 사건", "비조치의견서 회신 결과")
+    assert _title_of(html) == "A 사건"
+
+    sc = _scraper(_Fetcher(html=html))
+    post = _post(_detail("OpinionDetail.do"), title="[비조치의견서] A 사건", date="2026-09-11")
+    sc.enrich(post)
+    assert sc.enrich_succeeded(post) is True
+    assert post.url != LIST_URL
+
+
+# --- 3. 반대 방향 — 회신 제목이 목록과 같아도 상단이 다르면 FAIL ---
+def test_opinion_matching_reply_title_never_rescues_a_wrong_detail():
+    """회신 제목이 우연히 목록 제목과 같아도 상단 게시물 제목이 다르면 다른 글이다.
+
+    이번 수정이 '회신 제목도 후보로 받아들이는' 방향으로 새면 여기서 잡힌다.
+    회신일까지 같게 두어 거부 사유가 날짜가 아니라 상단 제목임을 못 박는다.
+    """
+    from bs4 import BeautifulSoup
+
+    html = _opinion_page("B 사건", "A 사건")        # 하단이 목록 제목과 같다
+    assert _subject_of(html) == "B 사건"            # 판정은 상단 값으로만 난다
+    assert BetterReplyScraper._reply_date(BeautifulSoup(html, "lxml")) == "20260911"
+
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail("OpinionDetail.do"), title="[비조치의견서] A 사건", date="2026-09-11")
+    detail_url = post.url
+
+    sc.enrich(post)
+    assert post.body == ""
+    assert post.attachments == []
+    assert fetcher.downloaded == []                # 다운로드 호출 0회
+    assert post.url == LIST_URL                    # 후보 상세 링크도 되돌린다
+    assert post.url != detail_url
+    assert sc.enrich_succeeded(post) is False
+
+
+def test_opinion_wrong_detail_is_reported_as_a_title_mismatch(caplog):
+    """'확인 불가'가 아니라 '제목이 다름'으로 남아야 원인 추적이 된다."""
+    sc = _scraper(_Fetcher(html=_opinion_page("B 사건", "A 사건")))
+    post = _post(_detail("OpinionDetail.do"), title="[비조치의견서] A 사건", date="2026-09-11")
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert "상세 제목이 목록과 다름" in caplog.text
+
+
+# --- 4. 상단 표 안에서 제목이 갈리면 여전히 fail-closed ---
+def test_opinion_conflicting_view_subjects_still_fail_closed():
+    """tbl-view 안에 서로 다른 제목이 둘이면 판정 불가 — heading 폴백 금지."""
+    html = _opinion_page("A 사건", "A 사건에 대한 회신").replace(
+        '<tr><th scope="row">처리구분</th><td>완료</td></tr>',
+        '<tr><td class="subject" colspan="2">B 사건</td></tr>',
+    )
+    assert _subject_of(html) == ""                 # 충돌
+    assert _title_of(html) == ""                   # heading('비조치의견서')로 안 내려간다
+
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail("OpinionDetail.do"), title="[비조치의견서] A 사건", date="2026-09-11")
+    sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == [] and post.url == LIST_URL
+
+
+def test_reply_table_subject_alone_is_not_a_canonical_title():
+    """상단 표가 아예 없고 회신 제목만 있으면 '근거 없음'(None)이다."""
+    html = """
+<div class="sub-con">
+  <div class="board-view"><table class="tbl-write"><tbody>
+    <tr><td class="subject" colspan="2">A 사건에 대한 회신</td></tr>
+    <tr><th>회신일</th><td>2026-09-11</td></tr>
+  </tbody></table></div>
+</div>
+"""
+    assert _subject_of(html) is None
+
+
+# --- 5. 비조치의견서 fixture — 본문 3/3 ---
+def test_opinion_fixture_body_has_all_three_sections():
+    sc = _scraper(_Fetcher(html=_opinion_html()))
+    post = _opinion_live_post()
+    detail_url = post.url
+
+    sc.enrich(post)
+    assert post.url == detail_url
+    for label in ("[질의요지]", "[회답]", "[이유]"):
+        assert label in post.body
+    assert "집합투자재산" in post.body
+    assert "별도의 조치를 취하지 않을 예정입니다" in post.body
+    assert sc.enrich_succeeded(post) is True
+
+
+def test_opinion_fixture_titles_really_differ():
+    """fixture 가 이번 버그 조건(상단≠하단)을 실제로 담고 있는지 못 박는다."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(_opinion_html(), "lxml")
+    subjects = [
+        _norm_ws(c.get_text(" "))
+        for c in soup.find_all("td")
+        if "subject" in (c.get("class") or [])
+    ]
+    assert subjects == [OPINION_CASE["title"], OPINION_CASE["reply_title"]]
+    assert subjects[0] != subjects[1]
+    # 그런데도 게시물 제목은 상단 값 하나로 확정된다.
+    assert BetterReplyScraper._detail_title(soup) == OPINION_CASE["title"]
+
+
+def test_opinion_fixture_would_have_failed_before_the_fix():
+    """예전 정책(모든 td.subject 합의)이었다면 이 정상 페이지가 거부됐음을 재현한다."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(_opinion_html(), "lxml")
+    every_subject = {
+        _norm_ws(c.get_text(" "))
+        for c in soup.find_all(["td", "th"])
+        if "subject" in (c.get("class") or [])
+    }
+    assert len(every_subject) > 1                  # 예전 규칙에서는 '충돌' → 제목 무효
+    assert BetterReplyScraper._detail_title(soup) == OPINION_CASE["title"]
+
+
+# --- 6. 비조치의견서 fixture — 첨부 ---
+def test_opinion_fixture_attachment_uses_the_org_filename_policy():
+    fetcher = _Fetcher(html=_opinion_html())
+    sc = _scraper(fetcher)
+    post = _opinion_live_post()
+    sc.enrich(post)
+
+    assert [a.filename for a in post.attachments] == [OPINION_CASE["attachment"]]
+    att = post.attachments[0]
+    assert att.url.startswith("https://better.fsc.go.kr/fsc_new/file/displayFile.do?")
+    assert att.data == b"HWP"
+    assert len(fetcher.downloaded) == 1
+    assert fetcher.downloaded[0][1] == post.url    # referer 는 검증된 상세 URL
+
+
+def test_opinion_wrong_detail_downloads_nothing():
+    """identity 실패 시 첨부 다운로드가 아예 일어나지 않는다(회신 제목 오매칭 경로)."""
+    fetcher = _Fetcher(html=_opinion_html())
+    sc = _scraper(fetcher)
+    post = _opinion_live_post()
+    post.title = "[비조치의견서] 전혀 다른 사건"
+    sc.enrich(post)
+    assert fetcher.downloaded == []
+    assert post.attachments == [] and post.body == ""
+    assert post.url == LIST_URL
+
+
+def test_opinion_wrong_reply_date_is_still_rejected():
+    """제목이 맞아도 회신일이 목록과 다르면 거부한다(기존 가드 유지)."""
+    fetcher = _Fetcher(html=_opinion_html())
+    sc = _scraper(fetcher)
+    post = _opinion_live_post()
+    post.date = "2019-03-04"
+    sc.enrich(post)
+    assert post.body == "" and fetcher.downloaded == []
+    assert post.url == LIST_URL
+
+
+# --- 7. Gemini — 실제 일반 요약 경로 ---
+def test_opinion_enriched_post_goes_through_the_real_general_summary_path():
+    """비조치의견서도 요약 대상이 되고 3줄 요약이 붙는다(Gemini 호출만 가짜 응답)."""
+    sc = _scraper(_Fetcher(html=_opinion_html()))
+    post = _opinion_live_post()
+    sc.enrich(post)
+    assert len(_prepare_body(_llm_cfg(), post)) >= _llm_cfg().min_body_chars
+
+    summarizer = Summarizer(_llm_cfg())
+    prompts: list[str] = []
+
+    def _generate(prompt, deadline=None, **kw):
+        prompts.append(prompt)
+        return _envelope('{"summary": ["평가 방법 수용", "금융투자업규정 제7-32조", "무조치 의견"]}')
+
+    summarizer._generate = _generate
+    assert summarizer.summarize_all({post.source_name: [post]}) == 1
+    assert len(prompts) == 1
+    assert "질의요지" in prompts[0] and "회답" in prompts[0]
+    assert post.summary == ["평가 방법 수용", "금융투자업규정 제7-32조", "무조치 의견"]
+
+
+def test_opinion_identity_failure_leaves_nothing_to_summarize():
+    """identity 실패 글은 요약 호출 자체가 일어나지 않는다."""
+    sc = _scraper(_Fetcher(html=_opinion_page("B 사건", "A 사건")))
+    post = _post(_detail("OpinionDetail.do"), title="[비조치의견서] A 사건", date="2026-09-11")
+    sc.enrich(post)
+
+    summarizer = Summarizer(_llm_cfg())
+    called: list[int] = []
+    summarizer._generate = lambda *a, **kw: called.append(1) or _envelope("{}")
+    assert summarizer.summarize_all({post.source_name: [post]}) == 0
+    assert called == []
+
+
+# --- 8. 메일 렌더 (production notifier 는 수정하지 않는다) ---
+def test_opinion_post_renders_summary_attachment_and_link_in_the_mail():
+    sc = _scraper(_Fetcher(html=_opinion_html()))
+    post = _opinion_live_post()
+    sc.enrich(post)
+    post.summary = ["첫째 줄", "둘째 줄", "셋째 줄"]
+
+    html = build_html({post.source_name: [post]})
+    text = build_text({post.source_name: [post]})
+    for line in post.summary:
+        assert line in html and line in text
+    assert OPINION_CASE["attachment"] in html
+    assert OPINION_CASE["attachment"] in text
+    assert f"opinionIdx={OPINION_CASE['idx']}" in text   # 검증된 상세 링크가 나간다
+
+
+# --- 9. 법령해석 회귀 — 상단/하단 제목이 같은 기존 배치는 그대로 ---
+def test_lawreq_live_fixtures_are_unaffected_by_the_table_scoping():
+    """5449/5450 은 상단 표의 제목 칸으로 판정되며 결과가 예전과 같다."""
+    for idx, case in LIVE_CASES.items():
+        fetcher = _Fetcher(html=_live_html(idx))
+        sc = _scraper(fetcher)
+        post = _live_post(idx)
+        detail_url = post.url
+
+        assert _subject_of(_live_html(idx)) == case["title"], idx
+        sc.enrich(post)
+        assert post.url == detail_url, idx
+        for label in ("[질의요지]", "[회답]", "[이유]"):
+            assert label in post.body, (idx, label)
+        assert [a.filename for a in post.attachments] == [case["attachment"]], idx
+        assert case["answer_head"] in post.body, idx
         assert sc.enrich_succeeded(post) is True, idx
