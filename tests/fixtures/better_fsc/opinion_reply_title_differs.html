@@ -1,0 +1,182 @@
+<!--
+  better.fsc.go.kr 비조치의견서 상세(OpinionDetail.do) — **synthetic regression fixture**.
+
+  라이브 확인이 아니다. 이 작업 환경에서는 better.fsc.go.kr 접근이 네트워크 정책에
+  막혀(CONNECT 403) 실제 OpinionDetail 응답을 받지 못했다. 그래서 새 selector 를
+  지어내지 않고, **라이브로 확인된 lawreq_5449/5450 상세의 DOM 을 그대로 쓰되**
+  이번 버그의 조건 하나만 바꿨다:
+
+      table.tbl-view  td.subject  = 게시물 제목          '…요청'
+      table.tbl-write td.subject  = 회신 제목            '…요청에 대한 회신'
+
+  법령해석에서는 이 두 값이 같은 문자열이라 '모든 제목 칸이 같아야 한다'는 예전 규칙이
+  우연히 통했다. 비조치의견서에서는 회신 표에 '…에 대한 회신'이 붙어 두 값이 달라지고,
+  예전 규칙은 그것을 '근거 충돌'로 읽어 상세 제목을 무효로 만들었다 — 신규 비조치의견서가
+  identity 에서 떨어져 본문·첨부·요약 없이 제목만 발송된 원인이다.
+
+  태그·class·라벨·첨부 URL 형태는 5449 fixture 에서 가져온 것이고, 바뀐 것은 회신 표의
+  제목 칸 문자열과 사건 내용뿐이다.
+-->
+<html>
+<head><title>금융규제민원</title></head>
+<body>
+<header>
+  <div class="hd-wrap">
+    <a href="/fsc_new/index.do"><h1 id="logo">금융규제·법령해석포털</h1></a>
+  </div>
+</header>
+<div id="wrapper">
+ <div id="container_wr">
+  <div id="left-menu"><h2 id="left-menu_nm"></h2></div>
+  <div class="sub-con">
+   <h3>
+    비조치의견서
+   </h3>
+   <div class="board-view">
+    <table cellpadding="0" cellspacing="0" class="tbl-view two">
+     <caption class="sound-only">
+      비조치의견서 상세보기 목록표 – 처리구분, 소관부서로 구성
+     </caption>
+     <tr>
+      <td class="subject" colspan="2">
+       금융투자업규정상 집합투자재산 평가관련 비조치의견서 요청
+      </td>
+     </tr>
+     <tr>
+      <th scope="row">
+       처리구분
+      </th>
+      <td>
+       완료
+      </td>
+     </tr>
+     <tr>
+      <th scope="row">
+       소관부서
+      </th>
+      <td>
+       자산운용과
+      </td>
+     </tr>
+    </table>
+   </div>
+   <div class="btn-wrap mr10">
+    <a class="btn btn-save" href="javascript:void(0);" onclick="openOpinionList();">
+     목록
+    </a>
+    <a class="btn btn-save" href="javascript:void(0);" onclick="urlCopy('https://better.fsc.go.kr/fsc_new/replyCase/OpinionDetail.do?stNo=11&amp;muNo=117&amp;muGpNo=75&amp;opinionIdx=2285');">
+     URL 복사
+    </a>
+   </div>
+   <div class="res-wrap">
+    <div class="tit">
+     회신
+    </div>
+    <div class="board-view">
+     <table cellpadding="0" cellspacing="0" class="tbl-write">
+      <caption class="sound-only">
+       비조치의견서 회신확인표-처리구분, 공개여부,등록자,회신일, 첨부파일, 질의요지, 회답, 이유로 이루어짐
+      </caption>
+      <tr>
+       <td class="subject" colspan="2" style="font-size: 1.175rem;">
+        금융투자업규정상 집합투자재산 평가관련 비조치의견서 요청에 대한 회신
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        처리구분
+       </th>
+       <td>
+        완료
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        공개여부
+       </th>
+       <td>
+        Y
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        등록자
+       </th>
+       <td>
+        관리자
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        회신일
+       </th>
+       <td>
+        2026-09-11
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        첨부파일
+       </th>
+       <td>
+        <a href="/fsc_new/file/displayFile.do?filePath=/2026/09/11&amp;orgFileName=비조치의견서 회신문(260233)F.hwpx&amp;sysFileName=7f91b2c4d8e5410aa1c30f7b6d2e9143.hwpx" title="비조치의견서 회신문(260233)F.hwpx 새창으로 다운로드">
+         <img alt="첨부파일 있음" src="/fsc_new/img/comm/icon-files.png"/>
+         비조치의견서 회신문(260233)F.hwpx
+        </a>
+        <br/>
+       </td>
+      </tr>
+      <tr>
+       <th scope="row">
+        질의요지
+       </th>
+       <td>
+        <p>
+         □ 집합투자재산에 속한 비상장주식을 평가할 때 「금융투자업규정」 제7-32조에 따른 공정가액 산정 방법을 적용할 수 있는지
+        </p>
+       </td>
+      </tr>
+      <tr>
+       <th class="bc-yellow" scope="row">
+        회답
+       </th>
+       <td class="bc-yellow">
+        <p>
+         □ 질의하신 평가방법을 적용하는 것에 대하여 별도의 조치를 취하지 않을 예정입니다.
+        </p>
+       </td>
+      </tr>
+      <tr>
+       <th class="bc-blue" scope="row">
+        이유
+       </th>
+       <td class="bc-blue">
+        <p>
+         □ 「자본시장과 금융투자업에 관한 법률」 제238조 및 같은 법 시행령 제260조는 집합투자재산의 평가를 시가에 따르되, 신뢰할 만한 시가가 없는 경우 공정가액으로 평가하도록 하고 있습니다.
+        </p>
+        <p>
+         ㅇ 「금융투자업규정」 제7-32조는 그 공정가액 산정 시 집합투자재산평가위원회가 충실의무를 준수하여 일관성 있게 평가하도록 규정하고 있습니다.
+        </p>
+        <p>
+         □ 따라서 질의하신 방법이 위 규정의 절차와 기준을 충족하는 범위에서 이루어진다면 별도의 조치를 취할 사안으로 보기 어렵습니다.
+         <br/>
+        </p>
+       </td>
+      </tr>
+     </table>
+    </div>
+   </div>
+  </div>
+ </div>
+</div>
+<footer class="main">
+  <div class="footer-inner">
+    <dl>
+      <dt>금융위원회</dt>
+      <dd>서울특별시 종로구 세종대로 209 금융위원회 대표전화 <a href="tel:0221002500">02-2100-2500</a></dd>
+    </dl>
+    <p>COPYRIGHT 2009 FINANCIAL SERVICES COMMISSION.ALL RIGHTS RESERVED.</p>
+  </div>
+</footer>
+</body>
+</html>
