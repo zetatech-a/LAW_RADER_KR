@@ -387,6 +387,8 @@
   },
   "fss_sanction": {
     "seen": [
+      "exam:202500684_1",
+      "exam:202500687_1",
       "exam:202200404_4",
       "exam:202400467_1",
       "exam:202400673_3",
@@ -520,6 +522,8 @@
   },
   "better_reply": {
     "seen": [
+      "dataIdx:4446",
+      "dataIdx:4973",
       "dataIdx:5451",
       "dataIdx:2325",
       "dataIdx:5426",
@@ -2164,23 +2168,23 @@
     "pending_detail": {
       "PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1": {
         "first_seen_at": "2026-08-28T00:26:57Z",
-        "attempts": 188,
+        "attempts": 189,
         "title": "군급식기본법 일부개정법률안 (유용원의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1",
         "date": "2026-08-27",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-09-16T06:08:24Z"
+        "last_attempt_at": "2026-09-16T06:39:34Z"
       },
       "ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1": {
         "first_seen_at": "2026-09-04T00:29:50Z",
-        "attempts": 119,
+        "attempts": 120,
         "title": "영유아특별회계법 일부개정법률안 (정부)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1",
         "date": "2026-09-03",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-09-16T06:08:24Z"
+        "last_attempt_at": "2026-09-16T06:39:34Z"
       }
     }
   }
