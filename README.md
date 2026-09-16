@@ -297,7 +297,7 @@ npm run deploy -- --secrets-file .dev.vars
 | 게시일 파싱 | 행 안의 '값 전체가 날짜인 셀' 우선 | 가벼운 확인 |
 | 페이지네이션 `pageIndex` | eGovFrame 표준 게시판 관례(`fss.or.kr` 과 동일) | **확인 필요** |
 | **상세 본문 컨테이너** | 후보 셀렉터 목록(추정) | **확인 필요** |
-| **첨부 다운로드 endpoint** | URL 모양 힌트 + eGovFrame `fn_egov_downFile` 관례(추정) | **확인 필요** |
+| **첨부 다운로드 endpoint** | eGov 파일 식별자(`atchFileId`/`fileSn` 등) 또는 알려진 다운로드 핸들러 — 경로 부분문자열(`/download`)로는 받지 않음(추정) | **확인 필요** |
 
 ### 틀렸을 때 어떻게 되는가 (모두 fail-soft)
 

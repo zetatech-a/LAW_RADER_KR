@@ -17,13 +17,19 @@ tests/fixtures/README.md 참고). 그래서 이 파서는 '클래스 이름 추�
 그 앵커의 조상에서 역으로 찾는다. 표 기반이든 목록 기반이든 같은 코드로 동작하고,
 사이트가 레이아웃만 바꿔도 깨지지 않는다.
 
-반면 **상세 본문 컨테이너와 첨부 endpoint 는 URL 계약으로 확정할 수 없다.** 이 둘은
-아래 `_BODY_SELECTORS` / `_FILE_HINT` 의 후보 목록으로 시도하되,
+반면 **상세 본문 컨테이너는 URL 계약으로 확정할 수 없다.** 아래 `_BODY_SELECTORS`
+후보 목록으로 시도하되,
 
   - 어느 후보도 맞지 않으면 **조용히 넘어가지 않는다** — 경고 + debug 덤프를 남기고
     `enrich_succeeded()` 가 False 를 돌려주므로 운영 집계·verify_sources 에 드러난다.
   - 코드 수정 없이 고칠 수 있도록 `config.yaml` 의 소스별 `body_selectors` 로
     덮어쓸 수 있다(의안의 `detail_url` 오버라이드와 같은 방식).
+
+첨부는 추측하지 않는다. **eGov 파일 식별자(atchFileId/fileSn 등)를 가진 링크이거나
+알려진 다운로드 핸들러**일 때만 이 글의 첨부로 인정한다 — 경로에 '/download' 가
+들어갔다는 이유로 받으면 머리말·꼬리말의 사이트 공통 다운로드가 글마다 첨부로 붙는다.
+JS 핸들러로 URL 을 만들 때는 현재 URL 에서 애플리케이션 컨텍스트('/np')를 유도해
+보존한다(`_egov_download_url`).
 
 `enrich_succeeded()` 를 override 하는 이유: 이 두 소스는 AI 3줄 요약이 목적이고
 요약 입력은 본문이다. 기본 판정('본문·구조화항목·첨부 중 하나라도 있으면 성공')을
@@ -97,8 +103,13 @@ _DATE_EXACT = re.compile(
     r"^(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?\.?$"
 )
 _DATE_COMPACT = re.compile(r"^(20\d{2})(\d{2})(\d{2})$")
-# 행 텍스트 안에서 날짜를 찾는 마지막 폴백.
-_DATE_ANYWHERE = re.compile(r"(20\d{2})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})")
+# 행 텍스트 안에서 날짜를 찾는 마지막 폴백. 구분자 집합을 위 `_DATE_EXACT` 와
+# **똑같이** 맞춘다 — 전용 요소로 감싸이지 않고 행 텍스트에 '2026년 9월 9일' 로만
+# 적힌 날짜를 여기서 놓치면 그 글의 게시일이 빈 채로 나간다. 표기 범위는 늘리지
+# 않는다(연·월·일 한 가지 모양 그대로).
+_DATE_ANYWHERE = re.compile(
+    r"(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?"
+)
 _DATE_CLASS = re.compile(r"^(?:date|day|regdate|regdt|writedate|wrtdate|postdate|createdate)$")
 # 목록 '행'으로 볼 조상 태그. 표/리스트/정의목록 어느 마크업이든 받는다.
 _ROW_TAGS = ("tr", "li", "dl")
@@ -141,17 +152,13 @@ _BODY_DROP_PREFIXES = (
 _MAX_LINK_RATIO = 0.5
 
 # --- 첨부 ---
-# 다운로드 endpoint 의 '모양'으로 찾는다(파일 확장자만으로 아무 링크나 첨부로 보지 않는다).
-_FILE_HINT = (
-    "filedown", "file_down", "filedownload", "downloadfile", "getfile",
-    "/cmm/fms/", "atchfile", "/download", "download.do", "fileidx", "filesn",
-)
-# 문서뷰어('바로보기'/'미리보기') endpoint — 같은 파일의 다른 표현이라 첨부가 아니다.
-# **경로에서만** 찾는다 — 쿼리까지 보면 `?orignFileNm=preview.pdf` 처럼 파일명에
-# 이 말이 들어간 진짜 다운로드 링크를 버린다.
-_VIEWER_HINT = ("fileviewer", "docviewer", "synap", "viewer", "preview")
-# href 에 이 파라미터가 있으면 파일 링크로 본다(endpoint 이름이 달라도 잡힌다).
+# **eGov 파일 식별자**가 있어야 이 글의 첨부로 인정한다. 경로 부분문자열('/download'
+# 등)로 판정하지 않는다 — 그러면 꼬리말의 '프로그램 다운로드'나 머리말의 '이용안내
+# 다운로드' 같은 사이트 공통 링크가 글마다 첨부로 붙고 실제로 내려받기까지 한다.
 _FILE_QUERY_KEYS = ("atchFileId", "atchfileid", "fileSn", "filesn", "fileId", "fileid")
+# 문서뷰어('바로보기'/'미리보기') endpoint — 같은 파일의 다른 표현이라 첨부가 아니다.
+# 뷰어 링크도 같은 식별자를 달고 오므로 식별자 판정만으로는 걸러지지 않는다.
+_VIEWER_HINT = ("fileviewer", "docviewer", "synap", "viewer", "preview")
 # 파일명이 담길 수 있는 쿼리 파라미터.
 _FILENAME_QUERY_KEYS = ("orignFileNm", "fileNm", "fileName", "filename", "orgFileNm")
 # eGovFrame 표준 다운로드 스크립트. href 가 javascript 인 게시판을 위한 것이다.
@@ -163,19 +170,42 @@ _JS_FILE_DOWN = re.compile(
     re.IGNORECASE,
 )
 _EGOV_FILE_DOWN_PATH = "/cmm/fms/FileDown.do"
+# 애플리케이션 컨텍스트를 유도할 기준. 게시판 경로 `<컨텍스트>/cop/bbs/...` 에서
+# 이 조각 앞부분이 곧 컨텍스트다(PIPC 는 '/np').
+_EGOV_COMPONENT_PATH = "/cop/"
 # 파일명 뒤에 붙는 크기 표기와 안내문.
 _SIZE_SUFFIX = re.compile(r"\s*[\(\[]?\s*[\d.,]+\s*(?:KB|MB|GB|B|바이트)\s*[\)\]]?\s*$", re.IGNORECASE)
-# 파일명 앞뒤에 붙는 UI 안내말('보도자료.pdf 다운로드', '새창열림').
-# **문자열 전체 치환이 아니라 양 끝에서만** 떼어낸다 — 전체 치환은 이런 말이 실제
-# 파일명 안에 들어 있을 때 파일명을 훼손한다(표시된 파일명을 그대로 보존해야 한다).
+# 파일명 **뒤**에 붙는 UI 안내말('보도자료.pdf 다운로드', '… 새창열림').
+#
+# 앞쪽은 건드리지 않는다 — 이 말들은 파일명 뒤에 붙는 라벨이고(확장자 뒤에 온다),
+# 앞에서도 떼어내면 '다운로드 서비스 개선안.pdf' 같은 **진짜 파일명**의 첫 단어가
+# 잘린다. 문자열 전체 치환도 하지 않는다(파일명 가운데 들어 있을 수 있다).
 _DOWNLOAD_WORDS = ("다운로드", "내려받기", "바로보기", "미리보기", "새창열림", "새 창 열림")
-_EDGE_DOWNLOAD_WORD = re.compile(
-    r"^(?:" + "|".join(_DOWNLOAD_WORDS) + r")\s+|\s+(?:" + "|".join(_DOWNLOAD_WORDS) + r")$"
-)
+_TRAILING_DOWNLOAD_WORD = re.compile(r"\s+(?:" + "|".join(_DOWNLOAD_WORDS) + r")$")
 # '파일명처럼 보이는가'. 확장자를 특정 목록으로 제한하지 않는다(PDF·HWP·HWPX·ZIP…).
 _HAS_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 # debug 덤프 파일명에 쓸 수 없는 문자.
 _UNSAFE_NAME = re.compile(r"[^0-9A-Za-z._-]+")
+
+
+def _normalize_filename(raw: str) -> str:
+    """표시된 파일명에서 크기 표기와 뒤쪽 UI 안내말을 벗긴다.
+
+    **둘을 번갈아 안정될 때까지** 적용한다. 한 번씩만, 그것도 크기 표기를 먼저
+    지우면 '보고서.pdf (3.1 MB) 다운로드' 에서 크기가 남는다 — 그 시점에는 문자열이
+    '다운로드' 로 끝나 크기 정규식(문자열 끝 고정)이 맞지 않기 때문이다. 결과
+    '보고서.pdf (3.1 MB)' 는 확장자로 끝나지 않아 파일명 후보에서 밀리고, 첨부가
+    URL basename 같은 엉뚱한 이름으로 메일에 실린다.
+
+    표기 종류는 늘리지 않는다 — 기존에 다루던 크기 표기와 안내말 그대로다.
+    """
+    name = clean_text(raw or "")
+    prev = None
+    while name and name != prev:
+        prev = name
+        name = _SIZE_SUFFIX.sub("", name)
+        name = clean_text(_TRAILING_DOWNLOAD_WORD.sub("", name))
+    return name
 
 
 def _class_tokens(el) -> set[str]:
@@ -454,8 +484,22 @@ class PipcBoardScraper(BaseScraper):
 
     # --- 첨부 ---
     def _collect_attachments(self, soup: BeautifulSoup, post: Post) -> None:
+        """상세 페이지에서 **이 글의 첨부만** 모은다.
+
+        후보는 넓게, 판정은 좁게 잡는다.
+
+        후보(넓게): `href` 또는 `onclick` 중 하나라도 가진 앵커. 예전에는
+        `find_all("a", href=True)` 였는데, 그러면 `<a onclick="fn_egov_downFile(…)">`
+        처럼 href 가 아예 없는 첨부가 `_file_url()` 에 닿지도 못한 채 조용히 빠졌다
+        (`_file_url` 은 onclick 을 볼 줄 아는데도 호출되지 않았다).
+
+        판정(좁게): `_file_url()` 이 eGov 파일 식별자를 요구한다. 후보만 넓히고
+        판정을 그대로 두면 머리말·꼬리말·뷰어 다운로드까지 첨부로 딸려 들어온다.
+        """
         existing = {a.url for a in post.attachments}
-        for a in soup.find_all("a", href=True):
+        for a in soup.find_all("a"):
+            if not (a.get("href") or a.get("onclick")):
+                continue
             url = self._file_url(a, post.url)
             if not url or url in existing:
                 continue
@@ -463,39 +507,61 @@ class PipcBoardScraper(BaseScraper):
             post.attachments.append(Attachment(filename=self._filename(a, url), url=url))
 
     def _file_url(self, anchor, base_url: str) -> str:
-        """앵커가 첨부 다운로드면 절대 URL. 아니면 빈 문자열."""
+        """앵커가 **이 글의 첨부**면 절대 URL. 아니면 빈 문자열.
+
+        판정 근거는 두 가지뿐이고, 둘 다 eGov 파일 식별자를 요구한다.
+          (1) 알려진 다운로드 핸들러(`_JS_FILE_DOWN`)의 정적 인자
+          (2) 해석된 URL 쿼리의 파일 식별자(`_FILE_QUERY_KEYS`)
+
+        예전에는 `/download` 같은 **경로 부분문자열**만으로도 첨부로 받았다. 그러면
+        꼬리말의 '프로그램 다운로드', 머리말의 '이용안내 다운로드' 같은 사이트 공통
+        링크가 글마다 첨부로 붙고 실제로 내려받기까지 한다(메일에 엉뚱한 파일이
+        실린다). 실측으로 재현되는 문제라 경로 힌트 판정을 걷어냈다.
+
+        컨테이너 셀렉터로 좁히지 않는 이유: 이 환경에서 PIPC 실제 DOM 을 받지 못해
+        (egress 차단) 첨부 영역 class 를 **관측한 적이 없다**. 추측한 셀렉터를 넣느니
+        파일 식별자라는 확인된 계약을 요구하는 편이 안전하다.
+        """
         href = (anchor.get("href") or "").strip()
-        # 다운로드 핸들러를 **href 와 onclick 양쪽에서** 먼저 본다.
-        #
-        # 예전에는 href 가 '#' 이면 즉시 버린 뒤에야 onclick 을 봤는데, 그 순서에서는
-        # `<a href="#" onclick="fn_egov_downFile(...)">` 형태의 첨부가 통째로 누락되고
-        # onclick 분기 자체가 사실상 죽은 코드였다(href 가 javascript: 인 경우에만
-        # 도달). 국내 정부 게시판에 흔한 형태라 순서를 바로잡는다.
-        #
-        # JavaScript 를 실행하지 않는다 — 알려진 핸들러의 **정적 인자 두 개**만 읽어
-        # eGovFrame 표준 다운로드 URL 을 만든다.
+        # JavaScript 를 실행하지 않는다 — 알려진 핸들러의 정적 인자 두 개만 읽는다.
         handler = _JS_FILE_DOWN.search(href) or _JS_FILE_DOWN.search(
             (anchor.get("onclick") or "").strip()
         )
         if handler:
-            query = urlencode(
-                {"atchFileId": handler.group(1), "fileSn": handler.group(2)}
-            )
-            return urljoin(base_url, f"{_EGOV_FILE_DOWN_PATH}?{query}")
+            return self._egov_download_url(base_url, handler.group(1), handler.group(2))
         if not href or href.startswith("#") or href.lower().startswith("javascript"):
             return ""
         url = urljoin(base_url, href)
-        lowered = url.lower()
         # 문서뷰어('바로보기')는 같은 파일의 다른 표현이다. 첨부로 세면 표시 개수가
         # 부풀고 같은 파일이 두 번 내려간다(기존 FSC 파서도 뷰어 링크를 제외한다).
-        if any(hint in urlparse(lowered).path for hint in _VIEWER_HINT):
+        # **경로에서만** 찾는다 — 쿼리까지 보면 `?orignFileNm=preview.pdf` 처럼
+        # 파일명에 이 말이 들어간 진짜 다운로드 링크를 버린다.
+        if any(hint in urlparse(url.lower()).path for hint in _VIEWER_HINT):
             return ""
-        if any(hint in lowered for hint in _FILE_HINT):
-            return url
         qs = parse_qs(urlparse(url).query)
         if _first_query(qs, *_FILE_QUERY_KEYS):
             return url
         return ""
+
+    @staticmethod
+    def _egov_download_url(base_url: str, atch_file_id: str, file_sn: str) -> str:
+        """JS 핸들러 인자로 다운로드 URL을 만든다 — **애플리케이션 컨텍스트 보존**.
+
+        `/cmm/fms/FileDown.do` 처럼 `/` 로 시작하는 경로를 urljoin 에 넘기면 경로가
+        origin 루트로 초기화되어 `https://pipc.go.kr/cmm/fms/FileDown.do` 가 된다.
+        PIPC 게시판은 `/np` 애플리케이션 아래에 있으므로 실제 endpoint 는
+        `/np/cmm/fms/FileDown.do` 이고, 루트 형태 링크는 전부 깨진다.
+
+        컨텍스트는 호스트를 박아넣지 않고 **현재 URL 에서 유도한다** — eGov 공통
+        컴포넌트 경로(`/cop/`) 앞부분이 곧 애플리케이션 컨텍스트다.
+          /np/cop/bbs/selectBoardArticle.do  → 컨텍스트 '/np'  → /np/cmm/fms/FileDown.do
+          /cop/bbs/selectBoardArticle.do     → 컨텍스트 ''     → /cmm/fms/FileDown.do
+        scheme·host 는 urljoin 이 base_url 에서 그대로 가져온다.
+        """
+        path = urlparse(base_url).path
+        context = path.split(_EGOV_COMPONENT_PATH, 1)[0] if _EGOV_COMPONENT_PATH in path else ""
+        query = urlencode({"atchFileId": atch_file_id, "fileSn": file_sn})
+        return urljoin(base_url, f"{context}{_EGOV_FILE_DOWN_PATH}?{query}")
 
     @staticmethod
     def _filename(anchor, url: str) -> str:
@@ -514,13 +580,9 @@ class PipcBoardScraper(BaseScraper):
         ]
         candidates: list[str] = []
         for raw in raw_candidates:
-            name = _SIZE_SUFFIX.sub("", clean_text(raw or ""))
-            prev = None
-            while name and name != prev:      # '파일명 다운로드 새창열림' 처럼 겹칠 때
-                prev = name
-                name = clean_text(_EDGE_DOWNLOAD_WORD.sub("", name))
-            if name and not name.lower().endswith(".do"):
-                candidates.append(name)
+            candidate = _normalize_filename(raw)
+            if candidate and not candidate.lower().endswith(".do"):
+                candidates.append(candidate)
         for name in candidates:
             if _HAS_EXTENSION.search(name):
                 return name

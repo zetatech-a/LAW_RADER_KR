@@ -358,8 +358,9 @@ def test_press_attachments_from_javascript_downloader_include_hwpx():
     assert names[0].endswith(".hwpx")     # .pdf 만 인식하면 안 된다
     assert names[1].endswith(".pdf")
     assert "(3.1 MB)" not in names[1]     # 크기 표기는 파일명이 아니다
+    # /np 애플리케이션 컨텍스트가 보존돼야 한다(루트 '/cmm/...' 는 깨진 링크다).
     assert post.attachments[0].url == (
-        "https://pipc.go.kr/cmm/fms/FileDown.do"
+        "https://pipc.go.kr/np/cmm/fms/FileDown.do"
         "?atchFileId=FILE_000000000012500&fileSn=0"
     )
 
@@ -558,7 +559,7 @@ def test_attachment_anchor_with_hash_href_and_onclick_handler():
     scraper.enrich(post)
     assert [a.filename for a in post.attachments] == ["규제영향분석서.pdf"]
     assert post.attachments[0].url == (
-        "https://pipc.go.kr/cmm/fms/FileDown.do?atchFileId=FILE_00000000012503&fileSn=0"
+        "https://pipc.go.kr/np/cmm/fms/FileDown.do?atchFileId=FILE_00000000012503&fileSn=0"
     )
 
 
@@ -728,3 +729,210 @@ def test_viewer_exclusion_looks_at_the_path_not_the_filename_query():
                 url="https://pipc.go.kr/np/cop/bbs/selectBoardArticle.do?nttId=1")
     scraper.enrich(post)
     assert [a.filename for a in post.attachments] == ["preview.pdf"]
+
+
+# ================================================================================
+# Codex 리뷰 대응 회귀 (PR #32)
+# ================================================================================
+
+def _detail(html, key="pipc_notice", list_url=NOTICE_LIST, nttid="12503"):
+    """상세 HTML 하나로 enrich 를 돌리고 (scraper, post) 를 돌려준다."""
+    scraper = _scraper(key=key, list_url=list_url, fetcher=_DetailFetcher(html))
+    post = Post(
+        source_key=key, source_name=key, post_id=f"nttId:{nttid}", title="t",
+        url=f"https://pipc.go.kr/np/cop/bbs/selectBoardArticle.do"
+            f"?bbsId=BS061&mCode=C010010000&nttId={nttid}",
+    )
+    scraper._dump_debug = lambda *a, **k: None
+    scraper.enrich(post)
+    return scraper, post
+
+
+_BODY = '<div class="view-cont"><p>기사 본문입니다. 요약 입력으로 쓰기에 충분히 깁니다.</p></div>'
+
+
+# --- Finding 1: href 없이 onclick 만 가진 앵커 ---------------------------------
+
+def test_f1_anchor_with_only_onclick_is_discovered():
+    """`<a onclick="fn_egov_downFile(...)">` (href 없음)도 첨부로 잡힌다.
+
+    예전 후보 선정은 `find_all("a", href=True)` 라서 `_file_url()` 이 onclick 을 볼 줄
+    알면서도 **호출되지 않았다**(내부 계약 불일치).
+    """
+    _, post = _detail(
+        _BODY + '<a onclick="fn_egov_downFile(\'FILE_ONLY_ONCLICK\',\'2\')">규제영향분석서.pdf</a>'
+    )
+    assert [a.filename for a in post.attachments] == ["규제영향분석서.pdf"]
+    assert post.attachments[0].url == (
+        "https://pipc.go.kr/np/cmm/fms/FileDown.do?atchFileId=FILE_ONLY_ONCLICK&fileSn=2"
+    )
+
+
+def test_f1_anchor_without_href_and_onclick_is_ignored():
+    _, post = _detail(_BODY + "<a>앵커 메커니즘 없음</a>")
+    assert post.attachments == []
+
+
+def test_f1_unrelated_onclick_anchor_is_ignored():
+    """다운로드와 무관한 onclick(레이어 열기 등)은 첨부가 아니다."""
+    _, post = _detail(
+        _BODY
+        + '<a href="#" onclick="openLayer(\'help\'); return false;">도움말</a>'
+        + '<a onclick="goPage(2)">다음 페이지</a>'
+    )
+    assert post.attachments == []
+
+
+# --- Finding 2: /np 애플리케이션 컨텍스트 보존 ---------------------------------
+
+def test_f2_js_download_url_preserves_np_application_context():
+    """`/cmm/...` 로 시작하는 경로를 urljoin 하면 컨텍스트가 날아가 링크가 깨진다."""
+    _, post = _detail(_BODY + '<a href="#" onclick="fn_egov_downFile(\'FILE_123\',\'4\')">붙임.pdf</a>')
+    assert post.attachments[0].url == (
+        "https://pipc.go.kr/np/cmm/fms/FileDown.do?atchFileId=FILE_123&fileSn=4"
+    )
+    # 루트 형태는 명시적으로 거부한다(회귀 방지).
+    assert not post.attachments[0].url.startswith("https://pipc.go.kr/cmm/")
+    assert "/np/np/" not in post.attachments[0].url        # 컨텍스트 중복 없음
+
+
+def test_f2_context_is_derived_not_hardcoded():
+    """컨텍스트는 현재 URL 에서 유도한다 — 호스트도 '/np' 도 박아넣지 않는다."""
+    from src.scrapers.pipc import PipcBoardScraper as P
+
+    cases = {
+        # 상세 URL                                                  기대 다운로드 URL
+        "https://pipc.go.kr/np/cop/bbs/selectBoardArticle.do?nttId=1":
+            "https://pipc.go.kr/np/cmm/fms/FileDown.do?atchFileId=F&fileSn=0",
+        # 컨텍스트가 없는 배치(루트 애플리케이션)
+        "https://pipc.go.kr/cop/bbs/selectBoardArticle.do?nttId=1":
+            "https://pipc.go.kr/cmm/fms/FileDown.do?atchFileId=F&fileSn=0",
+        # 다른 호스트여도 그 호스트를 그대로 쓴다
+        "https://www.pipc.go.kr/np/cop/bbs/selectBoardArticle.do?nttId=1":
+            "https://www.pipc.go.kr/np/cmm/fms/FileDown.do?atchFileId=F&fileSn=0",
+    }
+    for base, expected in cases.items():
+        assert P._egov_download_url(base, "F", "0") == expected
+
+
+# --- Finding 3: 행 텍스트에만 있는 한국어 표기 날짜 -----------------------------
+
+def test_f3_korean_date_in_bare_row_text_is_parsed():
+    """전용 요소 없이 행 텍스트로만 적힌 '2026년 9월 9일' 도 정규화된다."""
+    html = ('<li><a href="/np/cop/bbs/selectBoardArticle.do?bbsId=BS061&amp;mCode=C010010000'
+            '&amp;nttId=1">제목</a> 2026년 9월 9일</li>')
+    assert _parse(NOTICE_LIST, html)[0].date == "2026-09-09"
+
+
+def test_f3_iso_date_behaviour_is_unchanged():
+    """현행 라이브 표기(YYYY-MM-DD)와 기존 동작은 그대로다."""
+    for raw, expected in (
+        ("2026-09-16", "2026-09-16"),
+        ("2026.09.16", "2026-09-16"),
+        ("2026/9/16", "2026-09-16"),
+    ):
+        html = (f'<li><a href="/np/cop/bbs/selectBoardArticle.do?bbsId=BS061&amp;'
+                f'mCode=C010010000&amp;nttId=1">제목</a> {raw}</li>')
+        assert _parse(NOTICE_LIST, html)[0].date == expected
+
+
+# --- Finding 4: 크기 표기 / UI 안내말 정규화 순서 -------------------------------
+
+def test_f4_size_suffix_is_removed_even_when_a_ui_word_follows_it():
+    from src.scrapers.pipc import _normalize_filename
+
+    assert _normalize_filename("보고서.pdf (3.1 MB) 다운로드") == "보고서.pdf"
+    assert _normalize_filename("보고서.hwpx [850 KB] 새창열림") == "보고서.hwpx"
+    assert _normalize_filename("보고서.pdf 다운로드 새창열림") == "보고서.pdf"
+    assert _normalize_filename("보고서.pdf") == "보고서.pdf"
+
+
+def test_f4_legitimate_filename_words_are_not_mangled():
+    """'다운로드'·'미리보기' 가 진짜 파일명의 일부일 때 잘라내지 않는다."""
+    from src.scrapers.pipc import _normalize_filename
+
+    for name in (
+        "다운로드 서비스 개선안.pdf",          # 앞
+        "자료 미리보기 안내서.pdf",            # 가운데
+        "2026 내려받기 통계.hwpx",
+    ):
+        assert _normalize_filename(name) == name
+
+
+def test_f4_attachment_filename_keeps_extension_through_enrich():
+    """정규화 순서 버그의 실제 영향(확장자 잃은 파일명)이 재발하지 않는다."""
+    _, post = _detail(
+        _BODY
+        + '<a href="/np/cmm/fms/FileDown.do?atchFileId=A&amp;fileSn=0">'
+          '보고서.pdf (3.1 MB) 다운로드</a>'
+    )
+    assert [a.filename for a in post.attachments] == ["보고서.pdf"]
+
+
+# --- Finding 5: 페이지 전체의 다운로드 링크를 첨부로 보지 않는다 -----------------
+
+def test_f5_site_wide_download_links_are_not_article_attachments():
+    """머리말·꼬리말·네비게이션의 공통 다운로드가 글 첨부로 붙지 않는다.
+
+    이것이 실측으로 재현되던 문제다 — 꼬리말의 '프로그램 다운로드'가 모든 글의
+    첨부가 되어 메일에 실리고 실제로 내려받기까지 했다.
+    """
+    html = (
+        _BODY
+        + '<header><a href="/np/common/download?file=guide">이용안내 다운로드</a></header>'
+        + '<nav><a href="/np/cop/bbs/download.do?menu=1">서식 다운로드</a></nav>'
+        + '<footer><a href="/software/download">프로그램 다운로드</a>'
+          '<a href="/np/getFile?name=viewer.exe">문서뷰어 내려받기</a></footer>'
+    )
+    _, post = _detail(html)
+    assert post.attachments == []
+
+
+def test_f5_real_egov_attachment_is_still_included():
+    _, post = _detail(
+        _BODY + '<a href="/np/cmm/fms/FileDown.do?atchFileId=FILE_REAL&amp;fileSn=0">붙임.pdf</a>'
+    )
+    assert [a.filename for a in post.attachments] == ["붙임.pdf"]
+    assert post.attachments[0].url.endswith("atchFileId=FILE_REAL&fileSn=0")
+
+
+def test_f5_four_article_attachments_and_site_noise_together():
+    """사이트 공통 링크가 섞여 있어도 글 첨부 4건만 정확히 잡는다."""
+    files = [f"붙임{i}.pdf" for i in range(1, 5)]
+    html = (
+        _BODY
+        + '<header><a href="/np/common/download?file=guide">이용안내 다운로드</a></header>'
+        + "".join(
+            f'<a href="/np/cmm/fms/FileDown.do?atchFileId=FILE_A&amp;fileSn={i}">{n}</a>'
+            for i, n in enumerate(files)
+        )
+        + '<footer><a href="/software/download">프로그램 다운로드</a></footer>'
+    )
+    _, post = _detail(html)
+    assert [a.filename for a in post.attachments] == files
+    assert len({a.url for a in post.attachments}) == 4
+
+
+def test_f5_same_file_exposed_by_two_ui_links_is_one_attachment():
+    """같은 파일을 가리키는 두 UI 링크는 URL 중복 제거로 1건이 된다."""
+    html = (
+        _BODY
+        + '<a href="/np/cmm/fms/FileDown.do?atchFileId=A&amp;fileSn=0">붙임.pdf</a>'
+        + '<a href="/np/cmm/fms/FileDown.do?atchFileId=A&amp;fileSn=0" class="btn">다운로드</a>'
+        + '<a href="#" onclick="fn_egov_downFile(\'A\',\'0\')">같은 파일</a>'
+    )
+    _, post = _detail(html)
+    assert len(post.attachments) == 1
+    assert post.attachments[0].filename == "붙임.pdf"
+
+
+def test_f5_viewer_link_is_not_an_attachment_even_with_file_identifiers():
+    """뷰어는 같은 파일의 다른 표현이다 — 식별자를 달고 와도 첨부가 아니다."""
+    html = (
+        _BODY
+        + '<a href="/np/cmm/fms/FileDown.do?atchFileId=A&amp;fileSn=0">붙임.pdf</a>'
+        + '<a href="/np/cmm/fms/FileViewer.do?atchFileId=A&amp;fileSn=0">바로보기</a>'
+    )
+    _, post = _detail(html)
+    assert len(post.attachments) == 1
+    assert post.attachments[0].filename == "붙임.pdf"
