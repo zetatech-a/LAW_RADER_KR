@@ -7,12 +7,14 @@ from .base import BaseScraper
 from .better_fsc import BetterReplyScraper
 from .fsc import FscBoardScraper
 from .fss import FssBoardScraper
+from .pipc import PipcBoardScraper
 
 _REGISTRY: dict[str, type[BaseScraper]] = {
     "fsc_board": FscBoardScraper,
     "fss_board": FssBoardScraper,
     "better_reply": BetterReplyScraper,
     "assembly_bill": AssemblyBillScraper,
+    "pipc_board": PipcBoardScraper,
 }
 
 

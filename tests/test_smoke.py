@@ -14,10 +14,12 @@ def test_config_loads():
     cfg = load_config("config.yaml")
     assert cfg.sources, "소스 목록이 비어 있으면 안 됨"
     keys = {s.key for s in cfg.sources}
-    # 9개 대상이 모두 정의돼 있는지
-    assert len(keys) == 9
+    # 11개 대상이 모두 정의돼 있는지
+    assert len(keys) == 11
     assert "fss_press" in keys
     assert "assembly_bill" in keys
+    assert "pipc_notice" in keys
+    assert "pipc_press" in keys
 
 
 def test_state_baseline_and_new(tmp_path):
