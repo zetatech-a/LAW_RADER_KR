@@ -285,6 +285,8 @@ npm run deploy -- --secrets-file .dev.vars
 
 `pipc_notice`(공지사항, `bbsId=BS061`)·`pipc_press`(보도자료, `bbsId=BS074`)는 **실제 사이트 응답을 한 번도 받아 보지 못한 채** 추가되었습니다. 두 소스를 구현한 개발 환경의 egress 정책이 `pipc.go.kr` 로의 CONNECT 를 403 으로 거부해, `curl`·`scripts/verify_sources.py`·`python -m src.main --dry-run` 이 모두 `Tunnel connection failed: 403 Forbidden` 으로 끝났습니다. `likms.assembly.go.kr` 때와 같은 상황입니다(`tests/fixtures/README.md` 참고).
 
+2026-09-16 사전점검에서 `curl`·저장소 `Fetcher` 로 **다시 시도했으나 결과는 동일**했습니다(`gateway answered 403 to CONNECT`). 따라서 이 저장소에서 PIPC 의 실제 DOM 을 확인한 적은 아직 없습니다.
+
 그래서 이 파서는 **추정에 기대는 부분을 최소화**하도록 설계되어 있습니다. 무엇이 사실에 근거하고 무엇이 추정인지 구분해 둡니다.
 
 | 영역 | 근거 | 배포 후 확인 필요 |
@@ -300,7 +302,7 @@ npm run deploy -- --secrets-file .dev.vars
 ### 틀렸을 때 어떻게 되는가 (모두 fail-soft)
 
 - **`pageIndex` 가 무시되면** 2페이지가 1페이지와 같아지고, `BaseScraper.collect` 가 '진전 없음 = 경계 도달'로 보고 멈춥니다. 중복 글은 생기지 않고 1페이지 수집으로만 동작합니다(15분 주기에서는 사실상 충분).
-- **본문 셀렉터가 맞지 않으면** `post.body` 가 비고, `[pipc_*] 상세 본문 selector 를 찾지 못함 — post_id=… url=…` 경고와 `debug/pipc_*_detail_*.txt` 덤프가 남습니다. `enrich_succeeded()` 가 `False` 를 돌려주므로 `상세 수집 집계`와 `verify_sources` 에 **실패로 드러납니다**(첨부만 잡힌 상태를 성공으로 세지 않습니다). 메일은 제목·링크로 계속 나갑니다.
+- **본문 셀렉터가 맞지 않으면** `post.body` 가 비고, `[pipc_*] 상세 본문 selector 를 찾지 못함 — post_id=… url=…` 경고와 `debug/pipc_*_detail_*.txt` 덤프가 남습니다. `enrich_succeeded()` 가 `False` 를 돌려주므로 운영 로그의 `상세 수집 집계`에 실패로 잡히고, `verify_sources.py` 는 그 소스를 **🟠 부분 실패(PARTIAL)** 로 보고하며 종료코드 1 을 냅니다 (→ `verify.yml` job 이 빨간불). 첨부만 잡힌 상태를 성공으로 세지 않습니다. 메일은 제목·링크로 계속 나갑니다.
 - **첨부 endpoint 가 맞지 않으면** 첨부가 비거나 다운로드가 실패하고, 기존 `AttachmentTooLarge`/다운로드 실패 처리대로 링크만 남습니다. 글 자체는 사라지지 않습니다.
 - **목록 파싱이 0건이면** 최초 실행의 기준선을 잡지 않습니다(잘못된 빈 기준선 방지). 다음 실행에 다시 시도합니다.
 
@@ -320,9 +322,24 @@ python -m src.main --dry-run --debug --no-llm --only pipc_notice,pipc_press
     body_selectors: [".bbs-view-cont", ".view-cont"]   # 실제 확인한 셀렉터 순서대로
 ```
 
+### 라이브 검증 판정 규칙 (2026-09-16 수정)
+
+`scripts/verify_sources.py` 의 generic 경로에는 **`enrich_succeeded()` 가 `False` 여도 `status` 를 `OK` 로 덮어쓰는 버그**가 있었습니다. `enrich_ok=False` 를 계산해 두고도 아래쪽에서 `status = OK` 로 넘어가, 상세 파서가 깨진 소스가 ✅ 로 보고되고 종료코드도 0 이었습니다(요약 줄에도 드러나지 않았습니다). 상세 계약을 엄격히 선언한 소스일수록 그 선언이 라이브 검증에서 아무 효과가 없었던 셈입니다.
+
+이제 판정은 다음과 같습니다(PIPC 특례가 아니라 **모든 소스에 적용되는 generic 계약**입니다).
+
+| 상황 | status | 종료코드 |
+|---|---|---|
+| 목록 성공 + `enrich_succeeded()` True | ✅ OK | 0 |
+| 목록 성공 + `enrich_succeeded()` False | 🟠 PARTIAL | 1 |
+| 목록 성공 + `enrich()` 가 예외 | 🟠 PARTIAL | 1 |
+| 목록 실패 | ❌ FAIL | 1 |
+
+PARTIAL 의 `detail` 에는 소스 key·표본 URL·본문 길이·첨부 개수·원인(계약 미충족인지 예외인지)이 함께 찍힙니다. 기존 동작은 그대로입니다 — 상세가 PDF 직접 다운로드인 소스(`fss_mgmt_notice`)나 구조화 항목만 채우는 소스(`fss_sanction`)는 기본 판정을 쓰므로 종전과 같이 ✅ 입니다.
+
 ### 검증된 것
 
-`tests/test_pipc.py`(22건)·`tests/test_pipc_summary.py`(11건)는 위 계약을 **선언한 대로** 지키는지 확인합니다. 상세 fixture 는 `tests/fixtures/synthetic/pipc_*_detail.html` 의 **손으로 만든 구조 fixture**이며 캡처한 실제 응답이 아닙니다 — 통과한다고 라이브 계약이 검증된 것은 아닙니다.
+`tests/test_pipc.py`·`tests/test_pipc_summary.py`·`tests/test_verify_sources.py` 는 위 계약을 **선언한 대로** 지키는지 확인합니다(특히 `enrich_succeeded=False` 가 ✅ 를 만들 수 없음). 상세 fixture 는 `tests/fixtures/synthetic/pipc_*_detail.html` 의 **손으로 만든 구조 fixture**이며 캡처한 실제 응답이 아닙니다 — 통과한다고 라이브 계약이 검증된 것은 아닙니다.
 
 AI 3줄 요약 연동은 라이브와 무관하게 검증됩니다. 두 소스는 PIPC 전용 LLM 코드 없이 기존 `summarizer.Summarizer` 경로를 그대로 타며(`assembly_bill` 만 배치 경로로 갈리고 PIPC 는 일반 경로), 요약은 기존과 같은 `Post.summary` 에 담겨 기존 `notifier` 렌더로 나갑니다. `--no-llm` 동작도 기존 소스와 동일합니다.
 

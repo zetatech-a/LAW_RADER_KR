@@ -534,3 +534,197 @@ def test_invalid_body_selector_in_config_is_skipped_not_fatal(caplog):
         scraper.enrich(post)
     assert post.body == "본문입니다."
     assert "body_selectors" in caplog.text
+
+
+# ------------------------------------------- 하드닝 회귀 (2026-09-16 사전점검)
+
+def test_attachment_anchor_with_hash_href_and_onclick_handler():
+    """`href="#" + onclick=fn_egov_downFile(...)` 형태의 첨부가 누락되지 않는다.
+
+    예전 순서에서는 href 가 '#' 이면 즉시 버려서 onclick 분기에 **도달하지 못했다**
+    (그 분기는 href 가 javascript: 인 경우에만 실행되는 사실상 죽은 코드였다).
+    국내 정부 게시판에 흔한 형태라 순서를 바로잡은 것에 대한 회귀다.
+    """
+    html = (
+        '<div class="view-cont"><p>본문입니다. 첨부는 onclick 으로 내려받습니다.</p></div>'
+        '<div class="file-list">'
+        '  <a href="#" onclick="fn_egov_downFile(\'FILE_00000000012503\',\'0\'); return false;">'
+        '    규제영향분석서.pdf</a>'
+        '</div>'
+    )
+    scraper = _scraper(fetcher=_DetailFetcher(html))
+    post = Post(source_key="pipc_notice", source_name="n", post_id="nttId:12503", title="t",
+                url="https://pipc.go.kr/np/cop/bbs/selectBoardArticle.do?nttId=12503")
+    scraper.enrich(post)
+    assert [a.filename for a in post.attachments] == ["규제영향분석서.pdf"]
+    assert post.attachments[0].url == (
+        "https://pipc.go.kr/cmm/fms/FileDown.do?atchFileId=FILE_00000000012503&fileSn=0"
+    )
+
+
+def test_document_viewer_links_are_not_counted_as_attachments():
+    """'바로보기'(문서뷰어)는 같은 파일의 다른 표현이라 첨부 개수를 부풀리면 안 된다."""
+    html = (
+        '<div class="view-cont"><p>본문입니다. 뷰어 링크가 함께 있습니다.</p></div>'
+        '<div class="file-list">'
+        '  <a href="/cmm/fms/FileDown.do?atchFileId=A&amp;fileSn=0">보도자료.pdf</a>'
+        '  <a href="/cmm/fms/FileViewer.do?atchFileId=A&amp;fileSn=0">바로보기</a>'
+        '  <a href="/synap/skin/doc.html?fn=A&amp;fileSn=0">미리보기</a>'
+        '</div>'
+    )
+    scraper = _scraper(fetcher=_DetailFetcher(html))
+    post = Post(source_key="pipc_notice", source_name="n", post_id="nttId:1", title="t",
+                url="https://pipc.go.kr/np/cop/bbs/selectBoardArticle.do?nttId=1")
+    scraper.enrich(post)
+    assert [a.filename for a in post.attachments] == ["보도자료.pdf"]
+
+
+def test_titles_keep_legitimate_leading_words_that_look_like_badges():
+    """'New'·'N'·'첨부파일'·'공지' 로 **시작하는 진짜 제목**의 첫 단어를 지우지 않는다.
+
+    라이브 목록에서 새 글 표식 N 은 제목 **뒤**에 붙는다. 앞쪽까지 넓게 지우면
+    멀쩡한 제목이 잘린다.
+    """
+    cases = {
+        12801: "New Deal 정책 관련 개인정보 처리 안내",
+        12802: "N번째 개인정보 보호주간 행사 안내",
+        12803: "첨부파일 양식 개정 안내",
+        12804: "공지 운영 기준 개정 안내",
+        12805: "신규 서비스 개인정보 처리방침 안내",
+        12806: "제출 서식 첨부파일",
+    }
+    html = "<ul>" + "".join(
+        f'<li><a href="/np/cop/bbs/selectBoardArticle.do?bbsId=BS061&amp;mCode=C010010000'
+        f'&amp;nttId={n}">{t}</a></li>'
+        for n, t in cases.items()
+    ) + "</ul>"
+    parsed = {int(p.post_id.split(":")[1]): p.title for p in _parse(NOTICE_LIST, html)}
+    assert parsed == cases
+
+
+def test_trailing_new_badge_text_is_stripped_even_without_its_own_element():
+    """배지가 별도 요소가 아니어도 제목 뒤의 'N'/'NEW' 는 떨어진다."""
+    html = "<ul>" + "".join(
+        f'<li><a href="/np/cop/bbs/selectBoardArticle.do?bbsId=BS061&amp;mCode=C010010000'
+        f'&amp;nttId={n}">{t}</a></li>'
+        for n, t in {12811: "개인정보 보호법 시행령 입법예고 N",
+                     12812: "ISMS-P 심사 개선 방안 NEW"}.items()
+    ) + "</ul>"
+    assert [p.title for p in _parse(NOTICE_LIST, html)] == [
+        "개인정보 보호법 시행령 입법예고",
+        "ISMS-P 심사 개선 방안",
+    ]
+
+
+def test_ui_words_inside_a_filename_are_preserved():
+    """'바로보기'·'다운로드' 를 파일명 **안에서** 지우지 않는다(양 끝에서만 뗀다)."""
+    html = (
+        '<div class="view-cont"><p>본문입니다.</p></div>'
+        '<a href="/cmm/fms/FileDown.do?atchFileId=A&amp;fileSn=0" '
+        '   title="자료 미리보기 안내서.pdf 다운로드">자료 미리보기 안내서.pdf 다운로드</a>'
+    )
+    scraper = _scraper(fetcher=_DetailFetcher(html))
+    post = Post(source_key="pipc_notice", source_name="n", post_id="nttId:1", title="t",
+                url="https://pipc.go.kr/np/cop/bbs/selectBoardArticle.do?nttId=1")
+    scraper.enrich(post)
+    assert [a.filename for a in post.attachments] == ["자료 미리보기 안내서.pdf"]
+
+
+def test_page2_query_is_exactly_board_context_plus_pageindex():
+    """2페이지 요청이 bbsId·mCode 를 잃지 않는다(결정적 검사).
+
+    `selectBoardList.do?pageIndex=2` 처럼 게시판 맥락이 빠지면 엉뚱한 목록을 받는다.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    for list_url, bbs, mcode in (
+        (NOTICE_LIST, "BS061", "C010010000"),
+        (PRESS_LIST, "BS074", "C020010000"),
+    ):
+        parsed = urlparse(_scraper(list_url=list_url)._list_page_url(2))
+        assert parsed.netloc == "pipc.go.kr"
+        assert parsed.path == "/np/cop/bbs/selectBoardList.do"
+        assert parse_qs(parsed.query) == {
+            "bbsId": [bbs], "mCode": [mcode], "pageIndex": ["2"],
+        }
+
+
+# --- 라이브 수용 표본의 '기대 형태' (2026-09-16 사용자 관측치 기준) --------------
+#
+# **아래 HTML 은 합성이다.** 개발 환경에서 pipc.go.kr 접속이 차단되어 실제 DOM 을
+# 받지 못했다. 그래서 이 테스트가 증명하는 것은 "라이브가 이런 형태라면 파서가 관측된
+# 파일명·개수를 그대로 낸다"까지이며, **라이브 검증이 아니다.**
+# 관측치: nttId=12503 → PDF 4개 / nttId=12500 → PDF 1 + HWPX 1.
+
+_NOTICE_12503_FILES = [
+    "개인정보 보호법 시행령 일부개정령안 입법예고 공고문.pdf",
+    "개인정보 보호법 시행령 일부개정령안.pdf",
+    "개인정보 보호법 시행령 일부개정령안 조문별 제개정이유서.pdf",
+    "규제영향분석서.pdf",
+]
+_PRESS_12500_FILES = [
+    "[260916 10시보도] ISMS-P 심사 개선을 위한 보호법 시행령 개정안 입법예고(자율보호정책과).pdf",
+    "[260916 10시보도] ISMS-P 심사 개선을 위한 보호법 시행령 개정안 입법예고(자율보호정책과).hwpx",
+]
+
+
+def _acceptance_detail(files, body):
+    items = "".join(
+        f'<li><a href="/cmm/fms/FileDown.do?atchFileId=FILE_ACCEPT&amp;fileSn={i}" '
+        f'title="{name} 다운로드"><span class="name">{name}</span>'
+        f'<span class="blind">다운로드</span></a>'
+        f'<a href="/cmm/fms/FileViewer.do?atchFileId=FILE_ACCEPT&amp;fileSn={i}" '
+        f'class="btn">바로보기</a></li>'
+        for i, name in enumerate(files)
+    )
+    return (
+        f'<div class="bbs-view-cont"><p>{body}</p></div>'
+        f'<div class="file-list"><span class="tit">첨부파일</span><ul>{items}</ul></div>'
+    )
+
+
+def test_acceptance_shape_notice_12503_yields_four_pdfs():
+    html = _acceptance_detail(
+        _NOTICE_12503_FILES,
+        "개인정보보호위원회 공고 제2026-00호 「개인정보 보호법 시행령」 일부개정령(안) 입법예고",
+    )
+    scraper = _scraper(fetcher=_DetailFetcher(html))
+    post = Post(source_key="pipc_notice", source_name="n", post_id="nttId:12503", title="t",
+                url="https://pipc.go.kr/np/cop/bbs/selectBoardArticle.do?nttId=12503")
+    scraper.enrich(post)
+    assert [a.filename for a in post.attachments] == _NOTICE_12503_FILES
+    assert len(post.attachments) == 4
+    assert all(a.filename.lower().endswith(".pdf") for a in post.attachments)
+    assert len({a.url for a in post.attachments}) == 4    # 뷰어 링크가 섞이지 않음
+    assert scraper.enrich_succeeded(post) is True
+
+
+def test_acceptance_shape_press_12500_yields_pdf_and_hwpx():
+    html = _acceptance_detail(
+        _PRESS_12500_FILES,
+        "개인정보보호위원회는 개인정보 보호 인증(ISMS-P) 심사 개선을 위한 시행령 개정안을 입법예고한다고 밝혔다.",
+    )
+    scraper = _scraper(key="pipc_press", list_url=PRESS_LIST, fetcher=_DetailFetcher(html))
+    post = Post(source_key="pipc_press", source_name="p", post_id="nttId:12500", title="t",
+                url="https://pipc.go.kr/np/cop/bbs/selectBoardArticle.do?nttId=12500")
+    scraper.enrich(post)
+    names = [a.filename for a in post.attachments]
+    assert names == _PRESS_12500_FILES                    # 표시 파일명 그대로 보존
+    assert len(names) == 2
+    assert {n.rsplit(".", 1)[1].lower() for n in names} == {"pdf", "hwpx"}
+    assert "ISMS-P" in post.body
+    assert scraper.enrich_succeeded(post) is True
+
+
+def test_viewer_exclusion_looks_at_the_path_not_the_filename_query():
+    """파일명에 '미리보기'/'preview' 가 들어간 **진짜** 다운로드 링크를 버리지 않는다."""
+    html = (
+        '<div class="view-cont"><p>본문입니다.</p></div>'
+        '<a href="/cmm/fms/FileDown.do?atchFileId=A&amp;fileSn=0&amp;orignFileNm=preview.pdf">'
+        'preview.pdf</a>'
+    )
+    scraper = _scraper(fetcher=_DetailFetcher(html))
+    post = Post(source_key="pipc_notice", source_name="n", post_id="nttId:1", title="t",
+                url="https://pipc.go.kr/np/cop/bbs/selectBoardArticle.do?nttId=1")
+    scraper.enrich(post)
+    assert [a.filename for a in post.attachments] == ["preview.pdf"]

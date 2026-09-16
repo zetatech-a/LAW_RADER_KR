@@ -75,11 +75,21 @@ _UI_TOKENS = frozenset(
         "파일첨부", "다운로드", "내려받기", "상세보기", "새창열림", "새 창 열림",
     }
 )
-# 제목 텍스트의 맨 앞/뒤에 남은 표식 정리. 뜻이 겹칠 여지가 없는 것만 넣는다
-# ('공지'·'첨부' 는 제목의 첫 단어일 수 있으므로 여기 없다).
-_EDGE_TOKENS = ("NEW", "New", "new", "N", "새글", "신규", "첨부파일")
-_LEADING_TOKEN = re.compile(r"^(?:" + "|".join(_EDGE_TOKENS) + r")(?=\s)\s*")
-_TRAILING_TOKEN = re.compile(r"\s*(?<=\s)(?:" + "|".join(_EDGE_TOKENS) + r")$")
+# 제목 텍스트의 맨 앞/뒤에 남은 표식 정리(배지가 별도 요소가 아닐 때의 백스톱).
+#
+# 앞뒤 목록이 다른 이유: 라이브 목록에서 새 글 표식 'N' 은 **제목 뒤**에 붙는다.
+# 그래서 뒤쪽은 새 글 배지를 넓게 보고, 앞쪽은 '진짜 제목의 첫 단어일 수 있는' 말을
+# 모두 뺀다 — 'New Deal 정책', 'N번째 …', '신규 서비스 …', '첨부파일 양식 안내',
+# '공지 운영 기준' 같은 제목이 앞 글자를 잃으면 안 된다. 앞에 오는 배지는 대부분
+# 별도 요소라 `_noise_ancestor` 가 구조적으로 걸러내므로 좁혀도 잃는 것이 없다.
+#
+# '첨부파일' 은 뒤쪽에서도 뺀다 — 첨부 아이콘 라벨은 `<span class="blind">` 같은
+# 별도 요소라 이미 구조적으로 걸러지는데, 백스톱으로 남겨 두면 '제출 서식 첨부파일'
+# 같은 진짜 제목의 끝 단어를 지운다.
+_LEADING_TOKENS = ("새글",)
+_TRAILING_TOKENS = ("NEW", "New", "new", "N", "새글", "신규")
+_LEADING_TOKEN = re.compile(r"^(?:" + "|".join(_LEADING_TOKENS) + r")(?=\s)\s*")
+_TRAILING_TOKEN = re.compile(r"\s*(?<=\s)(?:" + "|".join(_TRAILING_TOKENS) + r")$")
 
 # --- 게시일 ---
 # 셀/요소 전체가 날짜 하나일 때만 인정한다(제목·조회수에 섞인 숫자를 날짜로 읽지 않도록).
@@ -136,6 +146,10 @@ _FILE_HINT = (
     "filedown", "file_down", "filedownload", "downloadfile", "getfile",
     "/cmm/fms/", "atchfile", "/download", "download.do", "fileidx", "filesn",
 )
+# 문서뷰어('바로보기'/'미리보기') endpoint — 같은 파일의 다른 표현이라 첨부가 아니다.
+# **경로에서만** 찾는다 — 쿼리까지 보면 `?orignFileNm=preview.pdf` 처럼 파일명에
+# 이 말이 들어간 진짜 다운로드 링크를 버린다.
+_VIEWER_HINT = ("fileviewer", "docviewer", "synap", "viewer", "preview")
 # href 에 이 파라미터가 있으면 파일 링크로 본다(endpoint 이름이 달라도 잡힌다).
 _FILE_QUERY_KEYS = ("atchFileId", "atchfileid", "fileSn", "filesn", "fileId", "fileid")
 # 파일명이 담길 수 있는 쿼리 파라미터.
@@ -151,7 +165,13 @@ _JS_FILE_DOWN = re.compile(
 _EGOV_FILE_DOWN_PATH = "/cmm/fms/FileDown.do"
 # 파일명 뒤에 붙는 크기 표기와 안내문.
 _SIZE_SUFFIX = re.compile(r"\s*[\(\[]?\s*[\d.,]+\s*(?:KB|MB|GB|B|바이트)\s*[\)\]]?\s*$", re.IGNORECASE)
+# 파일명 앞뒤에 붙는 UI 안내말('보도자료.pdf 다운로드', '새창열림').
+# **문자열 전체 치환이 아니라 양 끝에서만** 떼어낸다 — 전체 치환은 이런 말이 실제
+# 파일명 안에 들어 있을 때 파일명을 훼손한다(표시된 파일명을 그대로 보존해야 한다).
 _DOWNLOAD_WORDS = ("다운로드", "내려받기", "바로보기", "미리보기", "새창열림", "새 창 열림")
+_EDGE_DOWNLOAD_WORD = re.compile(
+    r"^(?:" + "|".join(_DOWNLOAD_WORDS) + r")\s+|\s+(?:" + "|".join(_DOWNLOAD_WORDS) + r")$"
+)
 # '파일명처럼 보이는가'. 확장자를 특정 목록으로 제한하지 않는다(PDF·HWP·HWPX·ZIP…).
 _HAS_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 # debug 덤프 파일명에 쓸 수 없는 문자.
@@ -445,18 +465,31 @@ class PipcBoardScraper(BaseScraper):
     def _file_url(self, anchor, base_url: str) -> str:
         """앵커가 첨부 다운로드면 절대 URL. 아니면 빈 문자열."""
         href = (anchor.get("href") or "").strip()
-        if not href or href.startswith("#"):
-            return ""
-        if href.lower().startswith("javascript"):
-            m = _JS_FILE_DOWN.search(href) or _JS_FILE_DOWN.search(
-                anchor.get("onclick") or ""
+        # 다운로드 핸들러를 **href 와 onclick 양쪽에서** 먼저 본다.
+        #
+        # 예전에는 href 가 '#' 이면 즉시 버린 뒤에야 onclick 을 봤는데, 그 순서에서는
+        # `<a href="#" onclick="fn_egov_downFile(...)">` 형태의 첨부가 통째로 누락되고
+        # onclick 분기 자체가 사실상 죽은 코드였다(href 가 javascript: 인 경우에만
+        # 도달). 국내 정부 게시판에 흔한 형태라 순서를 바로잡는다.
+        #
+        # JavaScript 를 실행하지 않는다 — 알려진 핸들러의 **정적 인자 두 개**만 읽어
+        # eGovFrame 표준 다운로드 URL 을 만든다.
+        handler = _JS_FILE_DOWN.search(href) or _JS_FILE_DOWN.search(
+            (anchor.get("onclick") or "").strip()
+        )
+        if handler:
+            query = urlencode(
+                {"atchFileId": handler.group(1), "fileSn": handler.group(2)}
             )
-            if not m:
-                return ""
-            query = urlencode({"atchFileId": m.group(1), "fileSn": m.group(2)})
             return urljoin(base_url, f"{_EGOV_FILE_DOWN_PATH}?{query}")
+        if not href or href.startswith("#") or href.lower().startswith("javascript"):
+            return ""
         url = urljoin(base_url, href)
         lowered = url.lower()
+        # 문서뷰어('바로보기')는 같은 파일의 다른 표현이다. 첨부로 세면 표시 개수가
+        # 부풀고 같은 파일이 두 번 내려간다(기존 FSC 파서도 뷰어 링크를 제외한다).
+        if any(hint in urlparse(lowered).path for hint in _VIEWER_HINT):
+            return ""
         if any(hint in lowered for hint in _FILE_HINT):
             return url
         qs = parse_qs(urlparse(url).query)
@@ -482,9 +515,10 @@ class PipcBoardScraper(BaseScraper):
         candidates: list[str] = []
         for raw in raw_candidates:
             name = _SIZE_SUFFIX.sub("", clean_text(raw or ""))
-            for word in _DOWNLOAD_WORDS:
-                name = name.replace(word, " ")
-            name = clean_text(name)
+            prev = None
+            while name and name != prev:      # '파일명 다운로드 새창열림' 처럼 겹칠 때
+                prev = name
+                name = clean_text(_EDGE_DOWNLOAD_WORD.sub("", name))
             if name and not name.lower().endswith(".do"):
                 candidates.append(name)
         for name in candidates:

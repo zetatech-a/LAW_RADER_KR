@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.verify_sources import FAIL, OK, PARTIAL, verify_source
+from src.config import SourceConfig
 from src.models import Attachment, Post, ProposalContentStatus as S
 
 
@@ -179,12 +180,19 @@ def test_structured_detail_source_stays_ok_without_body():
     assert r["status"] == OK
 
 
-def test_other_source_with_no_detail_still_ok_but_flagged():
-    # 기존 기준: 표식을 선언하지 않은 소스는 상세가 비어도 status 는 OK 로 두고
-    # enrich_ok 로만 알린다(훅이 없는 스크래퍼는 종전대로 첫 글을 표본으로 쓴다).
+def test_source_with_no_detail_at_all_is_partial_not_green():
+    """상세가 통째로 비면 초록불이 아니다.
+
+    예전에는 enrich_ok=False 를 계산해 놓고도 status 를 OK 로 덮어써서, 상세 파서가
+    깨진 소스가 ✅ 로 보고되고 exit code 도 0 이었다. 그 상태를 초록불로 넘기면
+    메일에 제목·링크만 실린 채 운영이 계속된다.
+    """
     r = _run("fss_mgmt_notice", enrich=lambda p: None)
-    assert r["status"] == OK
+    assert r["status"] == PARTIAL
+    assert r["list_ok"] is True
     assert r["enrich_ok"] is False
+    assert r["detail_ok"] is False
+    assert "fss_mgmt_notice" in r["detail"]
 
 
 # --- 회신사례: 상세 표본 선정과 본문 표식 검증 ---
@@ -376,3 +384,111 @@ def test_reply_with_partial_body_is_partial():
     assert r["status"] == PARTIAL
     assert r["detail_ok"] is False
     assert "[질의요지]" in r["detail"] and "[회답]" in r["detail"]
+
+
+# --- generic 경로: enrich_succeeded() 계약이 status 에 실제로 반영되는가 -----------
+#
+# 회귀 대상 버그: report["enrich_ok"] 를 계산한 뒤 아래쪽 `status = OK` 가 그대로
+# 덮어써서, 스크래퍼가 상세 계약 실패를 선언해도 ✅ 로 보고되고 exit code 가 0 이었다.
+# PIPC(pipc_notice/pipc_press)는 '첨부만 있고 본문이 없음'을 실패로 선언하는데, 그
+# 선언이 라이브 검증에서 아무 효과가 없었다.
+
+
+class _ContractScraper(_Scraper):
+    """enrich_succeeded() 계약을 선언하는 스크래퍼(PIPC 와 같은 형태)."""
+
+    def enrich_succeeded(self, post):
+        return bool((post.body or "").strip())
+
+
+def _contract_run(enrich, key="pipc_notice"):
+    sc = _ContractScraper(key, [_post(key)], enrich)
+    return verify_source(sc, 30, True)[0]
+
+
+def test_generic_enrich_contract_satisfied_is_ok():
+    """Case A — 본문이 있으면 종전대로 ✅."""
+
+    def _body(p):
+        p.body = "실제 기사 본문입니다. " * 20
+
+    r = _contract_run(_body)
+    assert r["status"] == OK
+    assert r["list_ok"] is True
+    assert r["enrich_ok"] is True
+    assert r["detail_ok"] is True
+    assert r["body_len"] > 0
+
+
+def test_generic_enrich_contract_failure_is_partial_not_ok():
+    """Case B — 첨부는 잡혔는데 본문이 비면 PARTIAL(핵심 회귀).
+
+    이것이 PIPC 의 실제 고장 형태다: 첨부 endpoint 는 맞고 본문 selector 만 어긋난 상태.
+    기본 판정(본문·구조화항목·첨부 중 하나)이었다면 '성공'으로 셌을 상황이라,
+    계약 선언이 실제로 status 를 움직이는지 함께 못박는다.
+    """
+
+    def _attachment_only(p):
+        p.attachments.append(
+            Attachment(filename="붙임.pdf", url="https://pipc.go.kr/cmm/fms/FileDown.do?x=1")
+        )
+
+    r = _contract_run(_attachment_only)
+    assert r["status"] == PARTIAL
+    assert r["list_ok"] is True
+    assert r["enrich_ok"] is False
+    assert r["detail_ok"] is False
+    # 진단에 필요한 정보가 모두 들어 있다.
+    detail = r["detail"]
+    assert "pipc_notice" in detail
+    assert "본문 0자" in detail
+    assert "첨부 1개" in detail
+    assert "enrich_succeeded" in detail
+
+
+def test_generic_enrich_exception_is_not_green():
+    """Case C — enrich 가 예외를 던져도 초록불이 아니고, 검증기는 죽지 않는다."""
+
+    def _boom(p):
+        raise RuntimeError("503 Service Unavailable")
+
+    r = _contract_run(_boom)
+    assert r["status"] != OK
+    assert r["status"] == PARTIAL
+    assert r["enrich_ok"] is False
+    assert r["detail_ok"] is False
+    assert "RuntimeError" in r["detail"] and "503" in r["detail"]
+
+
+def test_generic_contract_failure_makes_the_run_exit_non_zero(monkeypatch, tmp_path, capsys):
+    """PARTIAL 은 요약·exit code 까지 전달된다 — 초록불 CI 로 넘어가지 않는다."""
+    import scripts.verify_sources as vs
+
+    src = SourceConfig(
+        key="pipc_press", name="개인정보위 · 보도자료", type="pipc_board",
+        list_url="https://pipc.go.kr/np/cop/bbs/selectBoardList.do?bbsId=BS074&mCode=C020010000",
+    )
+    monkeypatch.setattr(vs, "load_config", lambda path: _Cfg([src]))
+    monkeypatch.setattr(vs, "Fetcher", lambda **kw: None)
+    monkeypatch.setattr(
+        vs, "build_scraper",
+        lambda s, f: _ContractScraper(s.key, [_post(s.key)], lambda p: None),
+    )
+    rc = vs.main(["--only", "pipc_press"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert PARTIAL in out
+    assert "부분 실패" in out
+
+
+class _Cfg:
+    """load_config 대역 — verify_sources 가 쓰는 필드만 채운다."""
+
+    class _Fetch:
+        timeout_sec = 30.0
+        delay_sec = 0.0
+        list_limit = 30
+
+    def __init__(self, sources):
+        self.sources = sources
+        self.fetch = self._Fetch()
