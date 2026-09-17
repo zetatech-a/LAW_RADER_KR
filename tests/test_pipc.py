@@ -1,19 +1,20 @@
 """개인정보보호위원회(pipc.go.kr) 게시판 파서 회귀 테스트.
 
-**중요 — 이 테스트가 통과한다고 라이브 계약이 검증된 것은 아니다.**
-개발/CI 환경에서 `pipc.go.kr` 접속이 egress 정책으로 차단되어 실제 HTML 을 캡처하지
-못했다(`likms.assembly.go.kr` 과 같은 상황 — tests/fixtures/README.md 참고).
+이 에이전트 환경에서는 `pipc.go.kr` 접속이 egress 정책으로 차단되어 있다. 다만
+**GitHub Actions 러너는 실제 응답을 받아냈고**(2026-09-16 verify-results 아티팩트),
+그 원본 HTML 로 두 가지 계약이 확인됐다. 그래서 여기서 검증하는 것은 셋으로 나뉜다.
 
-그래서 여기서 검증하는 것은 두 가지로 나뉜다.
-
-  (A) URL 계약에 근거한 동작 — 과제에서 사실로 주어진
+  (A) URL 계약에 근거한 동작 — 사실로 주어진
       `selectBoardArticle.do?bbsId=…&mCode=…&nttId=…` 와 목록 URL 만으로 결정된다.
       목록 파싱·post_id·정규화 URL·페이지네이션 파라미터가 여기 속한다.
       마크업이 표든 리스트든 같은 결과가 나오는지 두 형태로 함께 확인한다.
 
-  (B) 마크업 추정에 근거한 동작 — 상세 본문 컨테이너와 첨부 endpoint.
+  (B) **라이브 확인된 상세 계약** — 본문 컨테이너 `td.tbl_cnts` 와 첨부 원본 파일명
+      위치(앵커 `alt`). 파일 맨 아래 '라이브 HTML 정합' 절이 이것을 다룬다.
+
+  (C) 아직 추정인 부분 — `_BODY_SELECTORS` 의 나머지 후보와 첨부 endpoint 형태.
       tests/fixtures/synthetic/pipc_*_detail.html 은 **손으로 만든 구조 fixture**이며
-      실제 응답이 아니다. 이 테스트는 "선언한 셀렉터 계약대로 동작하는가"만 보증한다.
+      실제 응답이 아니다. 그 부분은 "선언한 계약대로 동작하는가"만 보증한다.
 """
 import logging
 import os
@@ -936,3 +937,171 @@ def test_f5_viewer_link_is_not_an_attachment_even_with_file_identifiers():
     _, post = _detail(html)
     assert len(post.attachments) == 1
     assert post.attachments[0].filename == "붙임.pdf"
+
+
+# ================================================================================
+# 라이브 HTML 정합 (2026-09-16 GitHub Actions verify-results 아티팩트 기준)
+#
+# 아래 두 계약은 **추정이 아니라 실제 PIPC 응답에서 관측된 것**이다.
+#   본문   : <tr><td colspan="4" class="tbl_cnts"><div><p>…</p></div></td></tr>
+#   첨부명 : <a alt="원본파일명.pdf" class="downBtn" href="#LINK"
+#              onclick="javascript:fn_egov_downFile('FILE_…','0','pdf')"
+#              title="첨부파일 다운로드">다운로드</a>
+# 공지사항·보도자료 양쪽 모두 같은 형태였다.
+# ================================================================================
+
+def test_live_body_container_td_tbl_cnts_is_used():
+    """실제 본문 컨테이너 `td.tbl_cnts` 에서 본문을 뽑는다."""
+    html = """
+    <table>
+      <tr>
+        <td colspan="4" class="tbl_cnts">
+          <div>
+            <p>실제 게시글 본문입니다.</p>
+          </div>
+        </td>
+      </tr>
+    </table>"""
+    scraper, post = _detail(html)
+    assert post.body
+    assert "실제 게시글 본문입니다." in post.body
+    assert scraper.enrich_succeeded(post) is True
+
+
+def test_live_body_container_excludes_metadata_outside_it():
+    """`td.tbl_cnts` 바깥의 제목·담당부서·등록일·조회수·첨부·이전다음글은 본문이 아니다."""
+    html = """
+    <table class="board_view">
+      <tr><th>제목</th><td colspan="3">「개인정보 보호법 시행령」 일부개정령(안) 입법예고</td></tr>
+      <tr><th>담당부서</th><td>자율보호정책과</td><th>등록일</th><td>2026-09-16</td></tr>
+      <tr><th>조회수</th><td colspan="3">1204</td></tr>
+      <tr>
+        <td colspan="4" class="tbl_cnts">
+          <div>
+            <p>개인정보보호위원회는 「개인정보 보호법 시행령」 일부개정령안을 입법예고합니다.</p>
+            <p>('26.1월 기준)</p>
+          </div>
+        </td>
+      </tr>
+      <tr><th>첨부파일</th><td colspan="3">
+        <a alt="공고문.pdf" class="downBtn" href="#LINK"
+           onclick="javascript:fn_egov_downFile('FILE_1','0','pdf')"
+           title="첨부파일 다운로드">다운로드</a></td></tr>
+      <tr><th>이전글</th><td colspan="3">앞 글 제목</td></tr>
+      <tr><th>다음글</th><td colspan="3">뒤 글 제목</td></tr>
+    </table>
+    <div class="satisfaction">만족도 조사</div>
+    <footer>Copyright 개인정보보호위원회</footer>"""
+    _, post = _detail(html)
+    assert "개인정보보호위원회는" in post.body
+    assert "('26.1월 기준)" in post.body
+    for junk in (
+        "일부개정령(안) 입법예고",   # 제목
+        "자율보호정책과", "등록일", "2026-09-16", "조회수", "1204",
+        "공고문.pdf", "첨부파일", "다운로드",
+        "앞 글 제목", "뒤 글 제목", "만족도", "Copyright",
+    ):
+        assert junk not in post.body, f"본문에 {junk!r} 가 섞였다"
+
+
+def test_live_body_container_is_tried_before_the_unverified_candidates():
+    """검증된 `td.tbl_cnts` 가 뒤쪽 미검증 후보보다 먼저 쓰인다."""
+    from src.scrapers.pipc import _BODY_SELECTORS
+
+    assert _BODY_SELECTORS[0] == "td.tbl_cnts"
+    html = """
+    <div class="view-cont"><p>옛 후보 셀렉터에 걸린 내용</p></div>
+    <table><tr><td colspan="4" class="tbl_cnts"><div><p>진짜 본문입니다.</p></div></td></tr></table>"""
+    _, post = _detail(html)
+    assert post.body == "진짜 본문입니다."
+
+
+def test_live_attachment_original_filename_comes_from_alt_pdf():
+    """원본 파일명은 앵커 `alt` 에 있다 — title·텍스트는 공통 안내문이다."""
+    html = _BODY + (
+        '<a alt="[260916 10시보도] 테스트 보도자료(자율보호정책과).pdf"'
+        '   class="downBtn" href="#LINK"'
+        '   onclick="javascript:fn_egov_downFile(\'FILE_123\',\'0\',\'pdf\')"'
+        '   title="첨부파일 다운로드">다운로드</a>'
+    )
+    _, post = _detail(html, key="pipc_press", list_url=PRESS_LIST, nttid="12500")
+    assert len(post.attachments) == 1
+    att = post.attachments[0]
+    assert att.filename == "[260916 10시보도] 테스트 보도자료(자율보호정책과).pdf"
+    assert att.filename not in ("첨부파일", "다운로드")
+    # href="#LINK" 여도 onclick 핸들러로 URL 이 만들어지고 /np 컨텍스트가 보존된다.
+    assert att.url == (
+        "https://pipc.go.kr/np/cmm/fms/FileDown.do?atchFileId=FILE_123&fileSn=0"
+    )
+
+
+def test_live_attachment_original_filename_comes_from_alt_hwpx():
+    """HWPX 확장자도 그대로 보존된다(.pdf 만 다루지 않는다)."""
+    html = _BODY + (
+        '<a alt="[260916 10시보도] 테스트 보도자료(자율보호정책과).hwpx"'
+        '   class="downBtn" href="#LINK"'
+        '   onclick="javascript:fn_egov_downFile(\'FILE_123\',\'1\',\'hwpx\')"'
+        '   title="첨부파일 다운로드">다운로드</a>'
+    )
+    _, post = _detail(html, key="pipc_press", list_url=PRESS_LIST, nttid="12500")
+    assert post.attachments[0].filename == (
+        "[260916 10시보도] 테스트 보도자료(자율보호정책과).hwpx"
+    )
+    assert post.attachments[0].url.endswith("atchFileId=FILE_123&fileSn=1")
+
+
+def test_live_press_shape_yields_body_plus_pdf_and_hwpx():
+    """보도자료 수용표본 형태(nttId=12500): 본문 + PDF 1 + HWPX 1."""
+    base = "[260916 10시보도] ISMS-P 심사 개선을 위한 보호법 시행령 개정안 입법예고(자율보호정책과)"
+    html = f"""
+    <table>
+      <tr><th>제목</th><td colspan="3">ISMS-P 심사 개선 … 입법예고</td></tr>
+      <tr><td colspan="4" class="tbl_cnts"><div>
+        <p>- 인증심사시 서면·현장심사 병행 등 개선 추진</p>
+      </div></td></tr>
+      <tr><th>첨부파일</th><td colspan="3">
+        <a alt="{base}.pdf" class="downBtn" href="#LINK"
+           onclick="javascript:fn_egov_downFile('FILE_000000000561491','0','pdf')"
+           title="첨부파일 다운로드">다운로드</a>
+        <a alt="{base}.hwpx" class="downBtn" href="#LINK"
+           onclick="javascript:fn_egov_downFile('FILE_000000000561491','1','hwpx')"
+           title="첨부파일 다운로드">다운로드</a>
+      </td></tr>
+    </table>"""
+    scraper, post = _detail(html, key="pipc_press", list_url=PRESS_LIST, nttid="12500")
+    assert "서면·현장심사 병행" in post.body
+    assert scraper.enrich_succeeded(post) is True
+    names = [a.filename for a in post.attachments]
+    assert names == [f"{base}.pdf", f"{base}.hwpx"]
+    assert {n.rsplit(".", 1)[1] for n in names} == {"pdf", "hwpx"}
+    assert len({a.url for a in post.attachments}) == 2
+
+
+def test_live_notice_shape_yields_body_plus_four_pdfs():
+    """공지사항 수용표본 형태(nttId=12503): 본문 + PDF 4건, 원본 파일명 보존."""
+    files = [
+        "개인정보 보호법 시행령 일부개정령안 입법예고 공고문.pdf",
+        "개인정보 보호법 시행령 일부개정령안.pdf",
+        "개인정보 보호법 시행령 일부개정령안 조문별 제개정이유서.pdf",
+        "규제영향분석서.pdf",
+    ]
+    links = "".join(
+        f'<a alt="{n}" class="downBtn" href="#LINK"'
+        f'   onclick="javascript:fn_egov_downFile(\'FILE_000000000561490\',\'{i}\',\'pdf\')"'
+        f'   title="첨부파일 다운로드">다운로드</a>'
+        for i, n in enumerate(files)
+    )
+    html = f"""
+    <table>
+      <tr><td colspan="4" class="tbl_cnts"><div>
+        <p>개인정보보호위원회는 「개인정보 보호법 시행령」 일부개정령(안)을 입법예고합니다.</p>
+      </div></td></tr>
+      <tr><th>첨부파일</th><td colspan="3">{links}</td></tr>
+    </table>"""
+    scraper, post = _detail(html)
+    assert "입법예고합니다" in post.body
+    assert scraper.enrich_succeeded(post) is True
+    assert [a.filename for a in post.attachments] == files
+    assert len(post.attachments) == 4
+    assert all(a.filename.endswith(".pdf") for a in post.attachments)
+    assert len({a.url for a in post.attachments}) == 4

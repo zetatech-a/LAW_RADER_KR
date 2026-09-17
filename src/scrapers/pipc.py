@@ -5,9 +5,12 @@
 - 보도자료  selectBoardList.do?bbsId=BS074&mCode=C020010000
 
 개발 환경 제약: `pipc.go.kr` 은 이 저장소의 개발/에이전트 환경에서 **egress 정책에
-의해 차단**되어 라이브 HTML 을 확인하지 못했다(`likms.assembly.go.kr` 과 같은 상황 —
-tests/fixtures/README.md 참고). 그래서 이 파서는 '클래스 이름 추정'에 의존하지 않고,
-**과제에서 사실로 주어진 URL 계약**만을 목록 파싱의 근거로 삼는다.
+의해 차단**되어 있다(`likms.assembly.go.kr` 과 같은 상황 — tests/fixtures/README.md
+참고). 다만 **GitHub Actions 러너는 실제 응답을 받아냈고**, 그 verify-results
+아티팩트의 원본 HTML 로 상세 본문 컨테이너(`td.tbl_cnts`)와 첨부 원본 파일명 위치
+(앵커 `alt`)를 확인했다(2026-09-16). 그 두 가지는 추정이 아니다.
+
+목록 파싱은 여전히 '클래스 이름 추정'에 의존하지 않고 **URL 계약**만을 근거로 삼는다.
 
   목록 : .../np/cop/bbs/selectBoardList.do?bbsId=…&mCode=…
   상세 : .../np/cop/bbs/selectBoardArticle.do?bbsId=…&mCode=…&nttId=…
@@ -17,16 +20,20 @@ tests/fixtures/README.md 참고). 그래서 이 파서는 '클래스 이름 추�
 그 앵커의 조상에서 역으로 찾는다. 표 기반이든 목록 기반이든 같은 코드로 동작하고,
 사이트가 레이아웃만 바꿔도 깨지지 않는다.
 
-반면 **상세 본문 컨테이너는 URL 계약으로 확정할 수 없다.** 아래 `_BODY_SELECTORS`
-후보 목록으로 시도하되,
+상세 본문은 라이브 확인된 `td.tbl_cnts` 를 최우선으로 시도한다. 뒤따르는
+`_BODY_SELECTORS` 항목들은 개편 대비로 남겨 둔 미검증 후보이며,
 
   - 어느 후보도 맞지 않으면 **조용히 넘어가지 않는다** — 경고 + debug 덤프를 남기고
     `enrich_succeeded()` 가 False 를 돌려주므로 운영 집계·verify_sources 에 드러난다.
   - 코드 수정 없이 고칠 수 있도록 `config.yaml` 의 소스별 `body_selectors` 로
     덮어쓸 수 있다(의안의 `detail_url` 오버라이드와 같은 방식).
 
-첨부는 추측하지 않는다. **eGov 파일 식별자(atchFileId/fileSn 등)를 가진 링크이거나
-알려진 다운로드 핸들러**일 때만 이 글의 첨부로 인정한다 — 경로에 '/download' 가
+첨부 파일명은 앵커 `alt` 에서 가져온다(라이브 확인) — `title`('첨부파일 다운로드')과
+보이는 텍스트('다운로드')는 공통 안내문이고 URL 에는 파일 ID 만 있어, `alt` 가 원본
+파일명을 얻을 수 있는 유일한 곳이다.
+
+첨부 **판정**은 추측하지 않는다. **eGov 파일 식별자(atchFileId/fileSn 등)를 가진
+링크이거나 알려진 다운로드 핸들러**일 때만 이 글의 첨부로 인정한다 — 경로에 '/download' 가
 들어갔다는 이유로 받으면 머리말·꼬리말의 사이트 공통 다운로드가 글마다 첨부로 붙는다.
 JS 핸들러로 URL 을 만들 때는 현재 URL 에서 애플리케이션 컨텍스트('/np')를 유도해
 보존한다(`_egov_download_url`).
@@ -117,9 +124,14 @@ _ROW_TAGS = ("tr", "li", "dl")
 _ROW_MAX_DEPTH = 8
 
 # --- 상세 본문 ---
-# **라이브 미검증 후보 목록.** 좁은 것부터 시도하고, 아래 `_is_bodylike` 가 링크 밀도로
-# 메뉴·네비게이션 컨테이너를 걸러낸다. config 의 `body_selectors` 로 덮어쓸 수 있다.
+# 첫 줄 `td.tbl_cnts` 는 **라이브 확인된 실제 컨테이너**다(2026-09-16 GitHub Actions
+# verify-results 아티팩트의 PIPC 원본 HTML). 공지사항·보도자료 양쪽 모두 기사 본문이
+# `<tr><td colspan="4" class="tbl_cnts"><div><p>…</p></div></td></tr>` 안에 있었다.
+# 뒤따르는 항목들은 개편 대비로 남겨 둔 **미검증 후보**이며, 새 추측을 더하지 않는다.
+# 순서대로 시도하고 `_is_bodylike` 가 링크 밀도로 메뉴 컨테이너를 걸러낸다.
+# config 의 `body_selectors` 로 덮어쓸 수 있다.
 _BODY_SELECTORS = (
+    "td.tbl_cnts",
     ".bbs-view-cont", ".bbs_view_cont", ".bbsViewCont",
     ".board-view-cont", ".board_view_cont",
     ".view-cont", ".view_cont", ".viewCont",
@@ -567,12 +579,18 @@ class PipcBoardScraper(BaseScraper):
     def _filename(anchor, url: str) -> str:
         """화면에 보이는 파일명을 그대로. PDF·HWP·HWPX 등 확장자를 가리지 않는다.
 
+        `alt` 가 첫 후보다 — 라이브 확인 결과(2026-09-16 Actions 아티팩트) PIPC 첨부
+        앵커는 원본 파일명을 `alt` 에 담고, `title` 은 '첨부파일 다운로드', 보이는
+        텍스트는 '다운로드' 라는 **공통 안내문**이며, 생성되는 URL 에는 파일 ID 만
+        있고 파일명이 없다. 즉 `alt` 를 보지 않으면 원본 파일명을 얻을 곳이 없다.
+
         후보가 여럿일 때는 **확장자를 가진 것**을 먼저 쓴다. title 속성이 파일명이
         아니라 안내문('보도자료 새창열림')인 게시판에서 앵커 텍스트의 진짜 파일명을
         놓치지 않기 위함이다.
         """
         qs = parse_qs(urlparse(url).query)
         raw_candidates = [
+            anchor.get("alt") or "",
             anchor.get("title") or "",
             PipcBoardScraper._visible_text(anchor),
             unquote(_first_query(qs, *_FILENAME_QUERY_KEYS)),
