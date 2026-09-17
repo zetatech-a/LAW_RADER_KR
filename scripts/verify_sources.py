@@ -130,6 +130,7 @@ def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMP
                 "fetch.list_limit 을 늘려 재확인하세요."
             )
             return report, page1
+        enrich_error = None
         try:
             scraper.enrich(first)
             body_len = len(first.body or "")
@@ -152,6 +153,7 @@ def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMP
                 else (body_len > 0 or n_att > 0 or n_details > 0)
             )
         except Exception as e:  # noqa: BLE001
+            enrich_error = e
             report["body_len"] = 0
             report["enrich"] = f"{WARN} enrich 실패: {e}"
             report["enrich_ok"] = False
@@ -169,10 +171,48 @@ def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMP
             )
             return report, page1
 
+        # 상세 수집이 **스크래퍼가 선언한 계약을 만족하지 못했으면** 초록불이 아니다.
+        #
+        # 예전에는 여기서 enrich_ok 를 계산해 놓고도 아래 `status = OK` 로 덮어써서,
+        # enrich_succeeded() 가 False 인 소스가 ✅ 로 보고되고 exit code 도 0 이었다
+        # (detail_ok 만 False 로 남아 요약 줄에도 드러나지 않았다). 상세 계약을 엄격히
+        # 선언한 소스일수록 그 선언이 라이브 검증에서 아무 효과가 없는 셈이었다.
+        #
+        # 소스별 특례가 아니라 generic 계약으로 고친다 — 첨부만 남고 본문 파서가 깨진
+        # 상태를 초록불로 넘기지 않는 것은 어느 소스에나 옳다. 기본 판정
+        # (본문·구조화항목·첨부 중 하나)을 쓰는 소스는 종전과 똑같이 통과한다
+        # (PDF 직접 다운로드 소스·구조화 항목 소스 등).
+        if not report.get("enrich_ok", True):
+            report["status"] = PARTIAL
+            report["list_ok"] = True
+            report["detail_ok"] = False
+            report["detail"] = _enrich_contract_failure(
+                key, first, len(page1), enrich_error
+            )
+            return report, page1
+
     report["status"] = OK
     report["list_ok"] = True
     report["detail_ok"] = report.get("enrich_ok", True)
     return report, page1
+
+
+def _enrich_contract_failure(key, post, list_count, error) -> str:
+    """상세 계약 미충족을 진단할 수 있는 한 줄 설명(소스 key·URL·본문 길이·첨부 수)."""
+    body_len = len(getattr(post, "body", "") or "")
+    n_att = len(getattr(post, "attachments", ()) or ())
+    n_details = len(getattr(post, "details", ()) or ())
+    cause = (
+        f"enrich 가 {type(error).__name__} 예외로 중단됨({error})"
+        if error is not None
+        else "enrich 는 정상 종료했으나 스크래퍼의 enrich_succeeded() 계약을 만족하지 못함"
+    )
+    return (
+        f"[{key}] 목록 수집 성공({list_count}건) / 상세 수집 실패 — {cause}. "
+        f"표본 {post.url} · 본문 {body_len}자 · 첨부 {n_att}개 · 구조화 항목 {n_details}개. "
+        "본문이 비면 AI 요약 입력이 없어 메일에 제목·링크만 실립니다 — "
+        "debug/ 덤프로 상세 마크업을 확인하세요."
+    )
 
 
 def _enrichable_sample(scraper, page1):

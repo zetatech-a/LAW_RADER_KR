@@ -6,7 +6,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 
 한국 금융 규제·입법 관련 게시판을 주기적으로 확인해, **새로 올라온 글의 URL·내용·첨부파일을 이메일로 자동 발송**하는 모니터링 프로그램입니다.
 
-## 모니터링 대상 (9곳)
+## 모니터링 대상 (11곳)
 
 | key | 사이트 | 게시판 | 수집 방식 |
 |---|---|---|---|
@@ -18,10 +18,14 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 | `fss_sanction` | 금융감독원 | 검사결과 제재 | HTML |
 | `fss_mgmt_notice` | 금융감독원 | 경영유의사항 등 공시 | HTML |
 | `better_reply` | 금융규제·법령해석포털 | 법령해석·비조치의견서 회신사례 | JSON (POST, 목록) + 상세페이지(질의요지·회답·이유·첨부) |
+| `pipc_notice` | 개인정보보호위원회 | 공지사항 | HTML |
+| `pipc_press` | 개인정보보호위원회 | 보도자료 | HTML |
 | `assembly_bill` | 의안정보시스템 | 계류의안 | 열린국회 Open API (목록) + 상세페이지(제안이유 및 주요내용) |
 
 목록 파서는 실제 사이트 HTML/응답으로 검증되어 제목·URL·날짜·본문·첨부를 수집합니다.
 (`fss_mgmt_notice` 는 상세가 PDF 직접 다운로드. `better_reply` 는 상세 주소가 확인된 **법령해석·비조치의견서**만 본문·첨부를 수집하고, 상세 주소가 확인되지 않은 구분(현장건의 과제 등)은 종전대로 목록 링크로 안내합니다)
+
+**`pipc_notice`·`pipc_press` 는 라이브 HTML 로 검증되지 않았습니다.** 두 소스를 추가한 개발 환경에서 `pipc.go.kr` 접속이 egress 정책으로 차단(CONNECT 403)되어 실제 응답을 한 번도 받지 못했습니다. 자세한 범위와 배포 후 확인 절차는 아래 **[개인정보보호위원회(PIPC) 두 소스 — 라이브 미검증 범위](#개인정보보호위원회pipc-두-소스--라이브-미검증-범위)** 를 반드시 먼저 읽으세요.
 
 > **확정된 수집 계약** (2026-08 Playwright 라이브 캡처):
 >
@@ -277,6 +281,69 @@ npm run deploy -- --secrets-file .dev.vars
 | `llm.assembly_batch.thinking_level` | `minimal` | 의안 배치 요청에만 붙일 thinking 수준. 생략하면 기존 generation payload 그대로입니다. 지원이 **확인된** 모델(현재 `gemini-3.6-flash` 계열)에만 실제로 전송되고, alias·미확인 모델에는 보내지 않습니다. Gemini 2.5 계열의 `thinkingBudget` 계약과 일반 요약 경로는 영향받지 않습니다 |
 | `llm.assembly_batch.max_consecutive_transient_failures` | 2 | 의안 배치가 **일시 장애(5xx·타임아웃)로 연속** 이만큼 실패하면 남은 배치는 호출 없이 발췌로 발송. `1` 로 두면 첫 배치의 503 하나로 그날 의안 전부가 발췌가 됩니다. 인증(401/403)·한도(429)·잘못된 요청(400)·모델 부재·내부 오류는 이 카운터와 무관하게 즉시 중단하고, 깨진 JSON·ID 누락·안전필터 차단 같은 **배치 내용** 문제는 세지 않습니다 |
 
+## 개인정보보호위원회(PIPC) 두 소스 — 라이브 미검증 범위
+
+`pipc_notice`(공지사항, `bbsId=BS061`)·`pipc_press`(보도자료, `bbsId=BS074`)는 **실제 사이트 응답을 한 번도 받아 보지 못한 채** 추가되었습니다. 두 소스를 구현한 개발 환경의 egress 정책이 `pipc.go.kr` 로의 CONNECT 를 403 으로 거부해, `curl`·`scripts/verify_sources.py`·`python -m src.main --dry-run` 이 모두 `Tunnel connection failed: 403 Forbidden` 으로 끝났습니다. `likms.assembly.go.kr` 때와 같은 상황입니다(`tests/fixtures/README.md` 참고).
+
+2026-09-16 사전점검에서 `curl`·저장소 `Fetcher` 로 **다시 시도했으나 결과는 동일**했습니다(`gateway answered 403 to CONNECT`). 따라서 이 저장소에서 PIPC 의 실제 DOM 을 확인한 적은 아직 없습니다.
+
+그래서 이 파서는 **추정에 기대는 부분을 최소화**하도록 설계되어 있습니다. 무엇이 사실에 근거하고 무엇이 추정인지 구분해 둡니다.
+
+| 영역 | 근거 | 배포 후 확인 필요 |
+|---|---|---|
+| 목록에서 글을 찾는 방법 | 상세 URL 계약 `selectBoardArticle.do?bbsId=…&mCode=…&nttId=…` — 사실 | 불필요(마크업이 표든 리스트든 동일하게 동작) |
+| `post_id` (`nttId:12503`) · 정규 상세 URL | 같은 URL 계약 | 불필요 |
+| 제목 정리(`N`/`NEW`/`새글` 배지, 첨부 아이콘, 스크린리더 텍스트 제거) | 일반적 게시판 마크업 | 가벼운 확인 |
+| 게시일 파싱 | 행 안의 '값 전체가 날짜인 셀' 우선 | 가벼운 확인 |
+| 페이지네이션 `pageIndex` | eGovFrame 표준 게시판 관례(`fss.or.kr` 과 동일) | **확인 필요** |
+| **상세 본문 컨테이너** | `td.tbl_cnts` — 2026-09-16 GitHub Actions verify-results 아티팩트의 실제 PIPC HTML 에서 확인(공지·보도자료 공통). 뒤의 후보 목록은 개편 대비 미검증 | 확인됨 |
+| **첨부 다운로드 endpoint** | eGov 파일 식별자(`atchFileId`/`fileSn` 등) 또는 알려진 다운로드 핸들러 — 경로 부분문자열(`/download`)로는 받지 않음(추정) | **확인 필요** |
+| **첨부 원본 파일명** | 앵커 `alt` 속성 — 같은 아티팩트에서 확인(`title`·보이는 텍스트는 '첨부파일 다운로드'/'다운로드' 공통 안내문) | 확인됨 |
+
+### 틀렸을 때 어떻게 되는가 (모두 fail-soft)
+
+- **`pageIndex` 가 무시되면** 2페이지가 1페이지와 같아지고, `BaseScraper.collect` 가 '진전 없음 = 경계 도달'로 보고 멈춥니다. 중복 글은 생기지 않고 1페이지 수집으로만 동작합니다(15분 주기에서는 사실상 충분).
+- **본문 셀렉터가 맞지 않으면** `post.body` 가 비고, `[pipc_*] 상세 본문 selector 를 찾지 못함 — post_id=… url=…` 경고와 `debug/pipc_*_detail_*.txt` 덤프가 남습니다. `enrich_succeeded()` 가 `False` 를 돌려주므로 운영 로그의 `상세 수집 집계`에 실패로 잡히고, `verify_sources.py` 는 그 소스를 **🟠 부분 실패(PARTIAL)** 로 보고하며 종료코드 1 을 냅니다 (→ `verify.yml` job 이 빨간불). 첨부만 잡힌 상태를 성공으로 세지 않습니다. 메일은 제목·링크로 계속 나갑니다.
+- **첨부 endpoint 가 맞지 않으면** 첨부가 비거나 다운로드가 실패하고, 기존 `AttachmentTooLarge`/다운로드 실패 처리대로 링크만 남습니다. 글 자체는 사라지지 않습니다.
+- **목록 파싱이 0건이면** 최초 실행의 기준선을 잡지 않습니다(잘못된 빈 기준선 방지). 다음 실행에 다시 시도합니다.
+
+### 배포 후 확인 절차
+
+```bash
+# 국내 IP(또는 접속 가능한 환경)에서
+python scripts/verify_sources.py --only pipc_notice,pipc_press
+python -m src.main --dry-run --debug --no-llm --only pipc_notice,pipc_press
+```
+
+`상태: ✅` 와 `페이지네이션: ✅ 2페이지가 1페이지와 다름`, `상세/첨부: 본문 N자 / 첨부 N개` 를 확인하면 됩니다. `🟠 부분 실패`(목록 성공·본문 0자)가 나오면 `debug/pipc_*_detail_*.txt` 에서 실제 본문 컨테이너 class 를 확인한 뒤, **코드를 고치지 말고** `config.yaml` 의 해당 소스에 한 줄만 추가하세요.
+
+```yaml
+  - key: pipc_press
+    ...
+    body_selectors: [".bbs-view-cont", ".view-cont"]   # 실제 확인한 셀렉터 순서대로
+```
+
+### 라이브 검증 판정 규칙 (2026-09-16 수정)
+
+`scripts/verify_sources.py` 의 generic 경로에는 **`enrich_succeeded()` 가 `False` 여도 `status` 를 `OK` 로 덮어쓰는 버그**가 있었습니다. `enrich_ok=False` 를 계산해 두고도 아래쪽에서 `status = OK` 로 넘어가, 상세 파서가 깨진 소스가 ✅ 로 보고되고 종료코드도 0 이었습니다(요약 줄에도 드러나지 않았습니다). 상세 계약을 엄격히 선언한 소스일수록 그 선언이 라이브 검증에서 아무 효과가 없었던 셈입니다.
+
+이제 판정은 다음과 같습니다(PIPC 특례가 아니라 **모든 소스에 적용되는 generic 계약**입니다).
+
+| 상황 | status | 종료코드 |
+|---|---|---|
+| 목록 성공 + `enrich_succeeded()` True | ✅ OK | 0 |
+| 목록 성공 + `enrich_succeeded()` False | 🟠 PARTIAL | 1 |
+| 목록 성공 + `enrich()` 가 예외 | 🟠 PARTIAL | 1 |
+| 목록 실패 | ❌ FAIL | 1 |
+
+PARTIAL 의 `detail` 에는 소스 key·표본 URL·본문 길이·첨부 개수·원인(계약 미충족인지 예외인지)이 함께 찍힙니다. 기존 동작은 그대로입니다 — 상세가 PDF 직접 다운로드인 소스(`fss_mgmt_notice`)나 구조화 항목만 채우는 소스(`fss_sanction`)는 기본 판정을 쓰므로 종전과 같이 ✅ 입니다.
+
+### 검증된 것
+
+`tests/test_pipc.py`·`tests/test_pipc_summary.py`·`tests/test_verify_sources.py` 는 위 계약을 **선언한 대로** 지키는지 확인합니다(특히 `enrich_succeeded=False` 가 ✅ 를 만들 수 없음). 상세 fixture 는 `tests/fixtures/synthetic/pipc_*_detail.html` 의 **손으로 만든 구조 fixture**이며 캡처한 실제 응답이 아닙니다 — 통과한다고 라이브 계약이 검증된 것은 아닙니다.
+
+AI 3줄 요약 연동은 라이브와 무관하게 검증됩니다. 두 소스는 PIPC 전용 LLM 코드 없이 기존 `summarizer.Summarizer` 경로를 그대로 타며(`assembly_bill` 만 배치 경로로 갈리고 PIPC 는 일반 경로), 요약은 기존과 같은 `Post.summary` 에 담겨 기존 `notifier` 렌더로 나갑니다. `--no-llm` 동작도 기존 소스와 동일합니다.
+
 ## 알려진 한계
 
 - **예약 실행 지연:** Cloudflare가 예약 시각에 Dispatch를 요청해도 GitHub-hosted runner의 실제 시작 시각은 부하에 따라 늦을 수 있으며 정확한 시작 시각은 보장되지 않습니다.
@@ -294,6 +361,7 @@ npm run deploy -- --secrets-file .dev.vars
   일시 장애에서는 **다른 모델로 자동 전환하지 않습니다**(운영자가 `MODEL` 로 고정한 모델을 존중). 모델을 바꾸는 것은 404 계열(`MODEL_UNAVAILABLE`)에서 `llm.fallback_models` 로 넘어갈 때뿐입니다. 로그의 `Gemini transient 실패 — model=… status=… attempt=…` 로 확인하세요.
 - **Phase 2 이전 누락분:** 상세 재조회 큐가 배포되기 전에 `PENDING`/`ERROR` 로 `seen` 처리된 의안은 자동으로 복구되지 않습니다. state 에 그 실패 정보가 없고, 과거 `seen` 전체를 추측으로 큐에 넣으면 대량 중복 후속 알림이 발생하기 때문입니다. 필요하면 별도의 명시적 backfill 작업으로 처리해야 합니다.
 - **신규 상한 초과분:** 한 소스의 신규가 상한(의안 75건, 그 외 50건)을 넘으면 최신 그만큼만 발송·상세수집되고 나머지는 상세 수집 없이 `seen` 처리됩니다. 그 초과분은 애초에 사용자에게 알려지지 않았으므로 상세 재조회 큐에도 넣지 않습니다(큐는 '이미 알린 의안의 후속 정보'를 위한 것입니다). 이 backlog 는 여전히 별개의 미해결 문제입니다.
+- **PIPC 두 소스 라이브 미검증:** `pipc_notice`·`pipc_press` 는 개발 환경의 egress 차단으로 실제 응답을 받아 보지 못한 채 배포됩니다. 상세 본문 셀렉터·첨부 endpoint·`pageIndex` 가 확인 대상이며, 어긋나도 fail-soft 로 degrade 합니다(목록만 수집되거나 본문이 빔 — 메일·state 는 정상). 범위와 확인 절차는 위 **[개인정보보호위원회(PIPC) 두 소스 — 라이브 미검증 범위](#개인정보보호위원회pipc-두-소스--라이브-미검증-범위)** 참고.
 - **해외 IP 접속 제한:** `fsc.go.kr`·`better.fsc.go.kr`·`open.assembly.go.kr` 는 시간대에 따라 GitHub 러너(해외 IP)에서 연결이 되지 않아 해당 회차에 건너뛸 수 있습니다(로그에 `ConnectTimeout`). 금융감독원(`fss.or.kr`) 5개 소스는 안정적으로 수집됩니다.
   - 연결 실패는 소스별로 격리되어 나머지 소스 수집에는 영향이 없고, 건너뛴 글은 **접속이 되는 다음 회차에 신규로 잡혀 발송**됩니다.
   - 완전히 해결하려면 국내 IP에서 실행해야 합니다(self-hosted runner 또는 국내 서버 cron). 코드는 환경 독립적이라 그대로 사용 가능합니다.
@@ -378,6 +446,7 @@ src/
     base.py                 # 스크래퍼 베이스(페이지네이션·디버그 덤프)
     fsc.py  fss.py          # 금융위 / 금감원 게시판
     better_fsc.py assembly.py  # 회신사례(JSON 목록 + 상세 수집) / 계류의안(Open API + 제안이유 수집)
+    pipc.py                 # 개인정보위 공지사항·보도자료(상세 URL 계약 기반 목록 파싱)
 state/seen.json             # 이미 본 글 ID (자동 커밋)
 scripts/
   send_test_email.py        # SMTP 설정 확인

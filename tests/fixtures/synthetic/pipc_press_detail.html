@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<!--
+  손으로 만든 구조 fixture. 캡처한 실제 PIPC 응답이 아닙니다.
+  (개발 환경에서 pipc.go.kr 접속이 egress 정책으로 차단되어 캡처하지 못했습니다)
+
+  재현하는 상황: 보도자료(BS074) 상세 — 공지사항과 **다른** 본문 컨테이너
+  (.board-view > .view-cont)와 **다른** 첨부 방식(javascript: fn_egov_downFile)을 써서,
+  한 스크래퍼가 두 게시판의 마크업 차이를 모두 견디는지 확인한다.
+  첨부에는 HWPX 도 포함한다(.pdf 만 인식하면 안 된다).
+-->
+<html lang="ko">
+<head><title>개인정보보호위원회 보도자료</title></head>
+<body>
+<header id="header">
+  <nav class="lnb"><ul><li><a href="/np/main/main.do">개인정보보호위원회</a></li></ul></nav>
+</header>
+
+<div id="container">
+  <div class="breadcrumb">홈 &gt; 위원회 소식 &gt; 보도·해명</div>
+
+  <div class="board-view">
+    <p class="subject">개인정보위, 인공지능 학습데이터 처리 안내서 발간</p>
+
+    <ul class="view-info">
+      <li><strong>담당부서</strong> 신기술개인정보과</li>
+      <li><strong>등록일</strong> 2026-09-15</li>
+      <li><strong>조회수</strong> 873</li>
+    </ul>
+
+    <div class="view-cont">
+      <p>개인정보보호위원회는 9월 15일 인공지능 개발·서비스 과정에서의 개인정보
+         처리 기준을 담은 「인공지능 학습데이터 처리 안내서」를 발간했다고 밝혔다.</p>
+      <p>안내서는 공개된 정보를 학습데이터로 활용할 때의 적법근거 판단 기준,
+         가명처리 절차, 안전조치 의무 이행 방법을 사례 중심으로 제시한다.</p>
+      <p>개인정보위는 향후 기술 발전과 현장 의견을 반영해 안내서를 지속적으로
+         보완해 나갈 계획이라고 설명했다.</p>
+    </div>
+
+    <div class="attach">
+      <span>첨부파일</span>
+      <a href="javascript:fn_egov_downFile('FILE_000000000012500','0');" title="보도자료 새창열림">
+        보도자료(인공지능 학습데이터 처리 안내서 발간).hwpx
+      </a>
+      <a href="javascript:fn_egov_downFile('FILE_000000000012500','1');">
+        붙임. 인공지능 학습데이터 처리 안내서.pdf (3.1 MB)
+      </a>
+    </div>
+
+    <ul class="updown">
+      <li>이전글 : 가명정보 활용 우수사례 공모전 결과 발표</li>
+      <li>다음글 : 개인정보 분쟁조정 제도 개선방안 발표</li>
+    </ul>
+  </div>
+
+  <div class="survey">이 페이지에서 제공하는 정보에 만족하십니까?</div>
+</div>
+
+<footer id="footer">
+  <p>Copyright 개인정보보호위원회. All rights reserved.</p>
+</footer>
+</body>
+</html>
