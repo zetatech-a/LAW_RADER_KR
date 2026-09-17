@@ -166,6 +166,7 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:228895",
       "nttId:228868",
       "nttId:228839",
       "nttId:228837",
@@ -648,6 +649,27 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_J2O6J0S9E1H6F1A8O3E4U5N4O4E7D6",
+      "PRC_N2F6G0B9S1I6N1N8Q3E3E0A3F8B5W4",
+      "PRC_Y2Z6F0J9P1V5A1S1T0T2F3Z3Z0M8P8",
+      "PRC_U2E6K0O9W1Q5W1X1G0R3C1Y8C2F8B6",
+      "PRC_S2V6M0C3H2J6G1Q3K3T4F1O2L4C9Z9",
+      "PRC_K2L6J0J9G1G1E1F5D5C9C4K0K3J9K4",
+      "PRC_W2W6T0T9R1S4Q1P0P4X0X5W2X0V7T1",
+      "PRC_D2E6C0C9B0Z2A0V9W4V3V2T3U2T0A8",
+      "PRC_P2P6N0O8M2N4V1T4U4S1S1R3S1A6Y0",
+      "PRC_U2V6T0T8B2A4A1Y4Z3Y9Y4G3E3F4D4",
+      "PRC_O2M6N0V9V0T9U1T0T0R3S1A1Y7Z6X6",
+      "PRC_G2E6F0D9D0M7K0K9J1J9I1I9Q7Q7P0",
+      "PRC_Q2P6N0O9M1M4V1V7T0U6T4R5R0Z8A0",
+      "PRC_G2H6F0E9E0C7D0L9M2K0K5J4H6I0P5",
+      "PRC_Q2R6P0Q9O1N0N1V1W3U4T1T0R2S8O0",
+      "PRC_O2N6N0M9M1U1V1T2T5S6Q2R0Z5A5Y3",
+      "PRC_Y2W6X0V9W1D1C1D2B5B5A3B8W1X4V0",
+      "PRC_V2U6U0T9T1R4T1A0B0Z5Y2Y9X8X4F3",
+      "PRC_Q2Q6O0N9N0V2W1U3V4T1U0S4A9B6Z7",
+      "PRC_Z2Z6Y0Z9G0H4F1E4E1C0D4Z2A3Y6W4",
+      "PRC_D2D6L0J8K2I8J1H3I4Q3Q0O4N2O3M9",
       "PRC_U2S6T0R9S1Q0R1Z5Z3X8W3W3V5V9D7",
       "PRC_T2R6P0Q9O1P1L1L9J1I5J4H3H1Q9Q1",
       "PRC_R2S6R0P9P1N0P1K8K1J6H2I9G8H6P1",
@@ -2175,23 +2197,33 @@
     "pending_detail": {
       "PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1": {
         "first_seen_at": "2026-08-28T00:26:57Z",
-        "attempts": 192,
+        "attempts": 193,
         "title": "군급식기본법 일부개정법률안 (유용원의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1",
         "date": "2026-08-27",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-09-16T08:54:14Z"
+        "last_attempt_at": "2026-09-17T00:10:23Z"
       },
       "ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1": {
         "first_seen_at": "2026-09-04T00:29:50Z",
-        "attempts": 123,
+        "attempts": 124,
         "title": "영유아특별회계법 일부개정법률안 (정부)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1",
         "date": "2026-09-03",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-09-16T08:54:14Z"
+        "last_attempt_at": "2026-09-17T00:10:23Z"
+      },
+      "PRC_D2D6L0J8K2I8J1H3I4Q3Q0O4N2O3M9": {
+        "first_seen_at": "2026-09-17T00:10:23Z",
+        "attempts": 1,
+        "title": "선거관리위원회법 일부개정법률안 (김용만의원 등 14인)",
+        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_D2D6L0J8K2I8J1H3I4Q3Q0O4N2O3M9",
+        "date": "2026-09-16",
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-09-17T00:10:23Z"
       }
     }
   }
