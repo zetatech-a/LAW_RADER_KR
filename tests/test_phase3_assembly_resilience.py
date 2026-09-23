@@ -48,6 +48,7 @@ _SOURCE = "의안정보시스템 · 계류의안"
 _MODEL_36 = "gemini-3.6-flash"
 _ALIAS = "gemini-flash-latest"
 _LITE = "gemini-3.5-flash-lite"
+_FB38 = "gemini-3.8-flash"
 _M25 = "gemini-2.5-flash"
 
 
@@ -480,7 +481,9 @@ def test_S3_gemini25_keeps_thinking_budget_contract():
     assert "temperature" in gc
 
 
-@pytest.mark.parametrize("model", [_ALIAS, _LITE, "gemini-9-ultra", "gemini-3.6-flash-lite"])
+@pytest.mark.parametrize(
+    "model", [_ALIAS, _LITE, _FB38, "gemini-9-ultra", "gemini-3.6-flash-lite"]
+)
 def test_S4_unknown_models_never_receive_thinking_level(model):
     assert supports_thinking_level(model, "minimal") is False
     assert "thinkingConfig" not in _assembly_gc(model)
@@ -559,20 +562,42 @@ def test_S11_assembly_connection_error_keeps_bounded_retry():
     assert len(s.session.sent) == 3
 
 
-def test_S12_assembly_503_retries_without_switching_model():
+def test_S12_assembly_503_exhausts_retries_then_tries_next_model():
     s = Summarizer(
         _llm(
-            fallback_models=[_LITE],
+            fallback_models=[_FB38],
             max_retries=2,
             retry_backoff_sec=0,
             batch=_batch_cfg(),
         )
     )
+    busy = _err(503, "UNAVAILABLE", "This model is currently experiencing high demand.")
+    s.session = _Session([busy, busy, busy, _ok_resp()])
+    _assembly_generate(s, s.cfg.assembly_batch)
+    # 같은 모델의 기존 재시도(1+2회)를 다 쓴 뒤에만 다음 설정 모델로 넘어간다
+    assert s.session.models == [_MODEL_36] * 3 + [_FB38]
+    assert s._active_model == _FB38
+    assert s._unavailable == set()
+    # 3.8 은 thinkingLevel allowlist 밖이라 minimal 을 보내지 않는다(fail-safe)
+    assert s.session.sent[0]["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "minimal"
+    }
+    gc38 = s.session.sent[3]["generationConfig"]
+    assert "thinkingConfig" not in gc38
+    assert "temperature" not in gc38
+
+
+def test_S12b_assembly_503_on_every_model_stays_transient():
+    s = Summarizer(
+        _llm(fallback_models=[_FB38], max_retries=2, retry_backoff_sec=0, batch=_batch_cfg())
+    )
     s.session = _Session([_err(503, "UNAVAILABLE", "overloaded")])
-    with pytest.raises(Exception) as e:
+    with pytest.raises(LLMCallError) as e:
         _assembly_generate(s, s.cfg.assembly_batch)
     assert classify_error(e.value) is LLMErrorKind.TRANSIENT
-    assert s.session.models == [_MODEL_36] * 3      # 다른 모델로 넘어가지 않는다
+    assert e.value.status == 503
+    assert s.session.models == [_MODEL_36] * 3 + [_FB38] * 3
+    assert s._unavailable == set()
 
 
 def test_S13_assembly_404_still_falls_back_to_configured_model():

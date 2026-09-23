@@ -704,7 +704,8 @@ class Summarizer:
         thinking_level: str | None = None,
         telemetry: "CallTelemetry | None" = None,
     ) -> dict:
-        """모델 목록을 순서대로 시도한다. 404 계열에서만 다음 모델로 넘어간다.
+        """모델 목록을 순서대로 시도한다. 404 계열, 그리고 재시도를 소진한 HTTP 503
+        에서만 다음 모델로 넘어간다.
 
         schema·max_output_tokens 는 호출별 구조화 출력 설정이다. 생략하면 기존 단건
         요약과 완전히 같은 payload 를 보낸다(의안 배치 요약만 값을 넘긴다).
@@ -725,6 +726,9 @@ class Summarizer:
             )
 
         last_reason = ""
+        # 재시도를 소진한 HTTP 503. 뒤 후보까지 성공하지 못하면 이것을 그대로 올린다
+        # (일시 장애 의미를 유지 — MODEL_UNAVAILABLE 로 바꾸지 않는다).
+        last_503: LLMCallError | None = None
         for i, model in enumerate(candidates):
             try:
                 data = self._generate_with(
@@ -737,6 +741,25 @@ class Summarizer:
                     retry_response_timeout=retry_response_timeout,
                     thinking_level=thinking_level,
                 )
+            except LLMCallError as e:
+                # 일시 장애 중 HTTP 503(모델 과부하)만, 그 모델의 재시도를 다 쓴 뒤에
+                # 다음 설정 모델을 시도한다. 503 은 일시적이므로 _unavailable 에 넣지
+                # 않는다. 다른 5xx·408·429·타임아웃·네트워크 실패는 기존대로 전환 없음.
+                rest = [m for m in candidates[i + 1 :] if m not in self._unavailable]
+                if not (
+                    e.kind is LLMErrorKind.TRANSIENT
+                    and e.status == 503
+                    and rest
+                    and (deadline is None or deadline - time.monotonic() >= _MIN_CALL_SEC)
+                ):
+                    raise
+                last_503 = e
+                log.warning(
+                    "Gemini HTTP 503 재시도 소진 — model=%s, 다음 모델 %s 로 전환합니다",
+                    model,
+                    rest[0],
+                )
+                continue
             except _ModelUnavailable as e:
                 last_reason = str(e)
                 self._unavailable.add(model)
@@ -761,6 +784,9 @@ class Summarizer:
                 telemetry.fill_from_response(data)
             return data
 
+        if last_503 is not None:
+            # 뒤 후보가 사용 불가(404)로 끝났어도 앞 모델은 일시 장애였을 뿐이다.
+            raise last_503
         log.error(
             "설정된 모델(%s)이 모두 사용 불가 — 원문 발췌를 사용합니다. 마지막 사유: %s",
             ", ".join(candidates),

@@ -42,7 +42,7 @@ class FetchConfig:
 # 박아두면 그 버전이 수명 종료된 날부터 전 요청이 404 로 죽는다(실제로 겪었다).
 _DEFAULT_MODEL = "gemini-flash-latest"
 # alias 자체가 막히거나 대상 버전이 사라졌을 때 넘어갈 검증된 stable 모델(순서 보존).
-_DEFAULT_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash-lite")
+_DEFAULT_FALLBACK_MODELS = ("gemini-3.6-flash", "gemini-3.8-flash")
 
 # primary 모델을 덮어쓸 환경변수(앞이 우선). GitHub Actions 의 repository Variable
 # `MODEL` 을 workflow 가 GEMINI_MODEL 로 넘겨주므로, 운영자가 코드를 고치지 않고

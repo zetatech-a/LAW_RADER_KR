@@ -78,13 +78,21 @@ def test_config_uses_latest_alias_and_ordered_fallbacks():
     # 특정 버전을 하드코딩하면 그 버전 수명 종료일에 전 요청이 404 로 죽는다.
     cfg = load_config("config.yaml")
     assert cfg.llm.model == "gemini-flash-latest"
-    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
+    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.8-flash"]
     # 호출 순서: primary → fallback 순서 그대로
     assert cfg.llm.model_chain == [
         "gemini-flash-latest",
         "gemini-3.6-flash",
-        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
     ]
+
+
+def test_env_primary_36_dedupes_to_36_then_38(tmp_path, monkeypatch):
+    # 운영: GitHub Variable MODEL=gemini-3.6-flash → 3.6 → 3.8 (중복 제거·순서 보존)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.setenv("MODEL", "gemini-3.6-flash")
+    cfg = load_config("config.yaml")
+    assert cfg.llm.model_chain == ["gemini-3.6-flash", "gemini-3.8-flash"]
 
 
 def test_model_chain_dedupes_and_preserves_order():
@@ -116,7 +124,7 @@ def test_config_defaults_fallbacks_when_key_missing(tmp_path):
     p.write_text(yaml.safe_dump(base, allow_unicode=True), encoding="utf-8")
     cfg = load_config(p)
     assert cfg.llm.model == "gemini-flash-latest"
-    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
+    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.8-flash"]
 
 
 def test_summarize_parses_json_schema_response():
@@ -328,7 +336,7 @@ class _ModelSession:
 
 _PRIMARY = "gemini-flash-latest"
 _FB1 = "gemini-3.6-flash"
-_FB2 = "gemini-3.5-flash-lite"
+_FB2 = "gemini-3.8-flash"
 # thinkingBudget 을 받는 유일한 계열(과거 기본 모델)
 _M25 = "gemini-2.5-flash"
 
@@ -438,8 +446,9 @@ def test_auth_error_does_not_chain_to_next_model():
 
 
 def test_server_error_keeps_retry_policy_and_does_not_chain():
+    # 503 은 재시도 소진 후 다음 모델로 넘어간다 — 아래 503 전용 테스트 참고.
     s = Summarizer(_chain_cfg(max_retries=2, retry_backoff_sec=0))
-    s.session = _ModelSession({_PRIMARY: _err_resp(503, "UNAVAILABLE", "overloaded")})
+    s.session = _ModelSession({_PRIMARY: _err_resp(500, "INTERNAL", "boom")})
     with pytest.raises(RuntimeError):
         s.summarize(_post())
     # 기존 재시도(1+2회)는 유지하되 다른 모델로는 넘어가지 않는다
@@ -450,10 +459,97 @@ def test_server_error_keeps_retry_policy_and_does_not_chain():
 def test_server_error_still_trips_circuit_breaker():
     posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)]
     s = Summarizer(_chain_cfg(max_retries=1, retry_backoff_sec=0, max_consecutive_failures=3))
-    s.session = _ModelSession({_PRIMARY: _err_resp(503, "UNAVAILABLE", "overloaded")})
+    s.session = _ModelSession({_PRIMARY: _err_resp(500, "INTERNAL", "boom")})
     assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
     # 3건에서 브레이커가 열리고, 각 건은 재시도 1회를 포함해 2번씩 호출
     assert s.session.models == [_PRIMARY] * 6
+
+
+# --- HTTP 503(과부하): 같은 모델 재시도를 소진한 뒤에만 다음 설정 모델로 ---
+#
+# 운영 체인(MODEL=gemini-3.6-flash): 3.6 → 3.8. 503 은 일시적이므로 _unavailable 에
+# 넣지 않고, 성공한 모델은 기존 _active_model 캐시로 이후 호출에서 먼저 쓴다.
+
+_BUSY = ("UNAVAILABLE", "This model is currently experiencing high demand. "
+         "Spikes in demand are usually temporary. Please try again later.")
+
+
+def _prod_cfg(**over):
+    return _cfg(model=_FB1, fallback_models=[_FB1, _FB2], retry_backoff_sec=0, **over)
+
+
+def test_503_exhausts_retries_on_current_model_before_fallback(no_sleep):
+    s = Summarizer(_prod_cfg(max_retries=1))
+    s.session = _ModelSession({_FB1: _err_resp(503, *_BUSY), _FB2: _ok_resp()})
+    assert s.summarize(_post()) == ["첫째임", "둘째임", "셋째임"]
+    assert s.session.models == [_FB1, _FB1, _FB2]   # 1+max_retries 회 뒤에 전환
+    assert s._active_model == _FB2
+    assert s._unavailable == set()
+
+
+def test_503_fallback_success_is_cached_for_next_call(no_sleep):
+    s = Summarizer(_prod_cfg(max_retries=1))
+    s.session = _ModelSession({_FB1: _err_resp(503, *_BUSY), _FB2: _ok_resp()})
+    s.summarize(_post(post_id="1"))
+    s.summarize(_post(post_id="2"))
+    # 둘째 요청은 3.6 을 다시 두드리지 않고 3.8 부터 시작한다
+    assert s.session.models == [_FB1, _FB1, _FB2, _FB2]
+
+
+def test_503_on_every_model_stays_transient_and_bounded(no_sleep):
+    s = Summarizer(_prod_cfg(max_retries=2))
+    s.session = _ModelSession({_FB1: _err_resp(503, *_BUSY), _FB2: _err_resp(503, *_BUSY)})
+    with pytest.raises(LLMCallError) as exc:
+        s.summarize(_post())
+    assert exc.value.kind is LLMErrorKind.TRANSIENT
+    assert classify_error(exc.value) is LLMErrorKind.TRANSIENT
+    assert exc.value.status == 503
+    assert exc.value.model == _FB2                  # 마지막으로 소진한 503
+    assert s.session.models == [_FB1] * 3 + [_FB2] * 3
+    assert s._unavailable == set()
+    assert s._active_model is None
+
+
+def test_503_then_404_on_next_model_stays_transient(no_sleep):
+    # 뒤 모델이 404 로 사라져도 앞 모델의 503 은 일시 장애다(MODEL_UNAVAILABLE 로 격상 금지).
+    s = Summarizer(_prod_cfg(max_retries=0))
+    s.session = _ModelSession({_FB1: _err_resp(503, *_BUSY), _FB2: _gone_resp()})
+    with pytest.raises(LLMCallError) as exc:
+        s.summarize(_post())
+    assert exc.value.kind is LLMErrorKind.TRANSIENT
+    assert exc.value.status == 503
+    assert s._unavailable == {_FB2}                 # 404 모델만 기록된다
+
+
+def test_503_on_every_model_still_trips_circuit_breaker(no_sleep):
+    posts = [_post(post_id=str(i), url=f"https://example.com/{i}") for i in range(10)]
+    s = Summarizer(_prod_cfg(max_retries=1, max_consecutive_failures=3))
+    s.session = _ModelSession({_FB1: _err_resp(503, *_BUSY), _FB2: _err_resp(503, *_BUSY)})
+    assert s.summarize_all({"금융위 · 보도자료": posts}) == 0
+    assert s._terminal_failure is None              # 종료성 실패로 바뀌지 않는다
+    # 3건에서 브레이커가 열린다 — 건마다 모델별 2회씩
+    assert s.session.models == [_FB1, _FB1, _FB2, _FB2] * 3
+
+
+def test_503_does_not_fail_over_when_budget_is_spent(monkeypatch):
+    # 남은 시간예산으로 다음 모델을 부를 수 없으면 전환하지 않고 503 그대로 올린다.
+    import src.summarizer as sm
+
+    now = [1000.0]
+    monkeypatch.setattr(sm.time, "monotonic", lambda: now[0])
+
+    class _SlowBusy(_ModelSession):
+        def post(self, url, headers=None, json=None, timeout=None):
+            resp = super().post(url, headers=headers, json=json, timeout=timeout)
+            now[0] += 9.0
+            return resp
+
+    s = Summarizer(_prod_cfg(max_retries=0))
+    s.session = _SlowBusy({_FB1: _err_resp(503, *_BUSY), _FB2: _ok_resp()})
+    with pytest.raises(LLMCallError) as exc:
+        s._generate("p", deadline=1010.0)
+    assert exc.value.status == 503
+    assert s.session.models == [_FB1]
 
 
 def test_timeout_does_not_chain_to_next_model():
@@ -1775,12 +1871,13 @@ def test_retry_exhaustion_reports_the_typed_transient_failure(no_sleep):
 
 
 def test_transient_failure_never_switches_models(no_sleep):
-    """503 으로는 다른 모델로 자동 전환하지 않는다(운영자가 고정한 모델을 존중).
+    """503 이 아닌 일시 장애로는 다른 모델로 자동 전환하지 않는다(운영자가 고정한 모델을 존중).
 
     404(MODEL_UNAVAILABLE)의 기존 대체 정책은 그대로 유지된다 —
-    test_primary_404_falls_back_to_first_fallback 참고.
+    test_primary_404_falls_back_to_first_fallback 참고. 재시도를 소진한 503 만
+    다음 설정 모델을 시도한다 — test_503_* 참고.
     """
-    for status in (500, 502, 503, 504, 408):
+    for status in (500, 502, 504, 408):
         s = Summarizer(_chain_cfg(max_retries=1, retry_backoff_sec=0))
         s.session = _ModelSession({_PRIMARY: _err_resp(status, "UNAVAILABLE", "boom")})
         with pytest.raises(LLMCallError):
