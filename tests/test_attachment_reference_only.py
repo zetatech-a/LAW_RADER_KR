@@ -356,3 +356,281 @@ def test_body_kind_telemetry(caplog):
     assert f"cleaned_chars={len(NOTICE)}" in warnings[0]
     # 본문 자체는 로그에 싣지 않는다.
     assert all(NOTICE not in m for m in messages)
+
+
+# ═══ 보강: PR 전 regression coverage ══════════════════════════════════════════
+#
+# 위 테스트와 겹치지 않는 경계만 추가한다. 요구사항 문구를 **원문 그대로**(한 줄)
+# 고정하고, 판정이 길이 기준·HTTP 계층·상한·집계·다른 렌더링 경로에 새지 않는지 본다.
+
+from types import SimpleNamespace  # noqa: E402
+
+from src.models import ProposalContentStatus  # noqa: E402
+from src.snippet import is_attachment_reference_only, normalize_lines  # noqa: E402
+from src.summarizer import _prepare_body  # noqa: E402
+
+FP_SINGLE_LINE_1 = (
+    "자세한 내용은 첨부파일을 참고하시기 바랍니다. "
+    "신청은 2026년 10월 5일까지이며 대상은 금융회사입니다."
+)
+FP_SINGLE_LINE_2 = "첨부파일을 참고하여 신고 절차를 진행해야 하며, 위반 시 과태료가 부과됩니다."
+
+
+# ── 1·2. classifier: 요구 문구 원문 그대로 ────────────────────────────────────
+
+
+def test_required_sentences_exact_text():
+    assert (
+        classify_body("자세한 내용은 첨부파일 참고 부탁드립니다.")
+        is BodyKind.ATTACHMENT_REFERENCE_ONLY
+    )
+    assert (
+        classify_body("세부사항은 붙임을 참고하시기 바랍니다.")
+        is BodyKind.ATTACHMENT_REFERENCE_ONLY
+    )
+    assert classify_body("") is BodyKind.EMPTY
+    assert classify_body(" 　\n\t  ") is BodyKind.EMPTY  # 전각·nbsp 공백 포함
+    assert classify_body("접수기간은 9월 30일까지입니다.") is BodyKind.CONTENT
+
+
+@pytest.mark.parametrize("body", [FP_SINGLE_LINE_1, FP_SINGLE_LINE_2])
+@pytest.mark.parametrize("title", ["", TITLE])
+def test_false_positive_single_line_stays_content(body, title):
+    """안내문과 실제 내용이 한 줄에 이어진 경우도 CONTENT (substring 판정 금지)."""
+    assert classify_body(body, title) is BodyKind.CONTENT
+
+
+@pytest.mark.parametrize("body", [FP_SINGLE_LINE_1, FP_SINGLE_LINE_2])
+def test_false_positive_stays_content_even_wrapped_in_page_noise(body):
+    """머리말·첨부 목록을 걷어낸 뒤에도 실제 내용이 남으면 CONTENT."""
+    raw = (
+        f"{TITLE}\n등록일 2026-09-23\n담당부서 금융정책과\n{body}\n"
+        "첨부파일\n보도자료.hwpx\n보도자료.pdf"
+    )
+    assert classify_body(raw, TITLE) is BodyKind.CONTENT
+
+
+@pytest.mark.parametrize("body", [FP_SINGLE_LINE_1, FP_SINGLE_LINE_2])
+def test_false_positive_is_still_summarized(body):
+    """오판이 없으면 정상 본문은 그대로 Gemini 를 부른다."""
+    post = _post(body=body)
+    s, calls = _counting_summarizer(_cfg(min_body_chars=10))
+
+    assert ai_target_count(_cfg(min_body_chars=10), {SOURCE: [post]}) == 1
+    assert s.summarize_all({SOURCE: [post]}) == 1
+    assert calls["n"] == 1
+
+
+# ── 3. raw body noise × min_body_chars ────────────────────────────────────────
+
+
+def test_raw_noise_passes_length_gate_but_is_excluded_by_classifier():
+    """raw body 는 min_body_chars 를 넘는다 — 제외 사유는 길이가 아니라 판정이다."""
+    cfg = _cfg()  # min_body_chars=80
+    post = _post(attachments=_attachments())
+    collapsed = " ".join(post.body.split())
+
+    assert len(collapsed) >= cfg.min_body_chars
+    assert len(NOTICE) < cfg.min_body_chars
+    # 원본에 바로 fullmatch 하는 구현이라면 놓친다(이 테스트가 그 회귀를 막는다).
+    assert not is_attachment_reference_only(collapsed)
+    assert not is_attachment_reference_only(" ".join(normalize_lines(post.body)))
+    assert classify_body(post.body, post.title) is BodyKind.ATTACHMENT_REFERENCE_ONLY
+    assert _prepare_body(cfg, post) == ""
+    # 같은 머리말에 실제 본문이 오면 그대로 대상이다.
+    normal = _post(body=RAW_NOTICE_BODY.replace(NOTICE, NORMAL_BODY))
+    assert _prepare_body(cfg, normal) != ""
+
+
+def test_raw_noise_long_enough_for_default_config_threshold():
+    """config.yaml 기본 min_body_chars 로 로드해도 같은 결론이다."""
+    from src.config import load_config
+
+    llm = load_config().llm
+    padded = RAW_NOTICE_BODY.replace(
+        "보도자료.pdf", "\n".join(f"보도자료_{i}.pdf" for i in range(20))
+    )
+    post = _post(body=padded, attachments=_attachments())
+
+    assert len(" ".join(padded.split())) >= llm.min_body_chars
+    assert classify_body(post.body, post.title) is BodyKind.ATTACHMENT_REFERENCE_ONLY
+    assert _prepare_body(llm, post) == ""
+
+
+# ── 4. summarizer ─────────────────────────────────────────────────────────────
+
+
+def test_attachment_only_never_reaches_http_layer():
+    """_generate 보다 아래(HTTP 세션)에서도 호출이 0회다."""
+    s = Summarizer(_cfg())
+    http = {"n": 0}
+
+    def _post_http(*a, **kw):
+        http["n"] += 1
+        raise AssertionError("attachment-only 글로 HTTP 요청을 보내면 안 된다")
+
+    s.session.post = _post_http
+    post = _post(attachments=_attachments())
+
+    assert s.summarize_all({SOURCE: [post]}) == 0
+    assert http["n"] == 0
+    assert post.summary == []
+
+
+def test_attachment_only_does_not_consume_max_posts_quota():
+    """상한 적용 전에 빠지므로 뒤쪽 정상 글이 요약 몫을 잃지 않는다."""
+    attach_only = _post(post_id="1", url="https://example.com/1")
+    normal = _post(body=NORMAL_BODY, post_id="2", url="https://example.com/2")
+    s, calls = _counting_summarizer(_cfg(max_posts=1))
+
+    assert s.summarize_all({SOURCE: [attach_only, normal]}) == 1
+    assert calls["n"] == 1
+    assert normal.summary and not attach_only.summary
+
+
+def test_ai_target_count_matches_actual_calls_on_mixed_batch():
+    """집계 대상 수 == 실제 호출 수 (판정 기준이 하나다)."""
+    posts = [
+        _post(post_id="1", url="https://example.com/1"),                       # 첨부 안내
+        _post(post_id="2", url="https://example.com/2", body=NORMAL_BODY),     # 정상
+        _post(post_id="3", url="https://example.com/3", body="짧은 공지입니다."),  # 짧음
+        _post(post_id="4", url="https://example.com/4", body=""),              # 빈 본문
+        _post(post_id="5", url="https://example.com/5", body=NORMAL_BODY + " " + NOTICE),
+    ]
+    s, calls = _counting_summarizer()
+
+    assert ai_target_count(_cfg(), {SOURCE: posts}) == 2
+    s.summarize_all({SOURCE: posts})
+    assert calls["n"] == 2
+
+
+def test_ai_summary_log_excludes_attachment_only_from_fallback(caplog):
+    """AI 집계의 대상·발췌 폴백 건수에 attachment-only 가 잡히지 않는다."""
+    attach_only = _post(post_id="1", url="https://example.com/1")
+    normal = _post(body=NORMAL_BODY, post_id="2", url="https://example.com/2")
+    s, _ = _counting_summarizer()
+    s.summarize_all({SOURCE: [attach_only, normal]})
+
+    with caplog.at_level(logging.INFO, logger=main_mod.log.name):
+        main_mod._log_ai_summary(
+            SimpleNamespace(llm=_cfg()), {SOURCE: [attach_only, normal]}
+        )
+    assert "AI 요약 집계 — 대상 1건 / 요약 1건 / 발췌 폴백 0건" in [
+        r.getMessage() for r in caplog.records
+    ]
+
+
+def test_normal_sufficient_body_prepared_input_is_unchanged():
+    """정상 본문의 요약 입력(공백 정규화 + 절단)은 판정 추가 전과 같다."""
+    cfg = _cfg(max_input_chars=50)
+    post = _post(body=NORMAL_BODY)
+    assert _prepare_body(cfg, post) == " ".join(NORMAL_BODY.split())[:50]
+
+
+def test_short_attachment_only_is_excluded_by_length_first():
+    """min_body_chars 미달이면 판정 이전에 기존 규칙으로 빠진다(순서 불변)."""
+    post = _post(body=NOTICE)
+    assert len(NOTICE) < _cfg().min_body_chars
+    assert _prepare_body(_cfg(), post) == ""
+    assert ai_target_count(_cfg(), {SOURCE: [post]}) == 0
+
+
+# ── 5. notifier ───────────────────────────────────────────────────────────────
+
+
+def test_attachment_only_short_body_still_gets_notice():
+    """렌더링은 길이와 무관하다 — 안내문 한 줄짜리 글도 재출력하지 않는다."""
+    post = _post(body=NOTICE, attachments=_attachments())
+    html_out = build_html({SOURCE: [post]})
+    text_out = build_text({SOURCE: [post]})
+
+    assert "본문 안내" in html_out and ATTACHMENT_ONLY_TEXT in html_out
+    assert "[본문 안내]" in text_out and ATTACHMENT_ONLY_TEXT in text_out
+    assert NOTICE not in html_out and NOTICE not in text_out
+    assert build_fallback_snippet(post.body, post.title) not in html_out
+
+
+def test_attachment_only_notice_appears_exactly_once_per_part():
+    post = _post(attachments=_attachments())
+    assert build_html({SOURCE: [post]}).count(ATTACHMENT_ONLY_TEXT) == 1
+    assert build_text({SOURCE: [post]}).count(ATTACHMENT_ONLY_TEXT) == 1
+
+
+def test_attachment_only_without_files_mentions_no_file_check():
+    post = _post(attachments=[])
+    for out in (build_html({SOURCE: [post]}), build_text({SOURCE: [post]})):
+        assert "첨부파일을 확인" not in out
+        assert "📎" not in out
+        assert "첨부:" not in out
+
+
+def test_attachment_only_does_not_add_ai_notice():
+    """AI 요약이 없으므로 하단 AI 유의사항도 붙지 않는다."""
+    post = _post(attachments=_attachments())
+    assert "AI 요약은 생성형 AI" not in build_html({SOURCE: [post]})
+    assert "AI 요약은 생성형 AI" not in build_text({SOURCE: [post]})
+
+
+def test_mixed_digest_changes_only_the_attachment_only_card():
+    """같은 메일 안에서 정상 글의 발췌·요약 카드는 단독 렌더링과 같다."""
+    attach_only = _post(post_id="1", url="https://example.com/1",
+                        attachments=_attachments())
+    fallback = _post(post_id="2", url="https://example.com/2", body=NORMAL_BODY)
+    summarized = _post(post_id="3", url="https://example.com/3", body=NORMAL_BODY,
+                       summary=["요약 1", "요약 2", "요약 3"])
+    text_out = build_text({SOURCE: [attach_only, fallback, summarized]})
+    html_out = build_html({SOURCE: [attach_only, fallback, summarized]})
+
+    snippet = build_fallback_snippet(NORMAL_BODY, TITLE)
+    assert f"    [원문 발췌]\n      {snippet}\n" in text_out
+    assert f"{GENERAL_FALLBACK_DIV}{snippet}</div>" in html_out
+    assert "    [AI 3줄 요약]\n      · 요약 1\n      · 요약 2\n      · 요약 3\n" in text_out
+    assert html_out.count("본문 안내") == 1
+    assert text_out.count("[본문 안내]") == 1
+
+
+def test_empty_general_body_output_is_unchanged():
+    """EMPTY 는 관찰용이다 — 빈 본문 카드는 예전처럼 본문 블록이 없다."""
+    post = _post(body="")
+    html_out = build_html({SOURCE: [post]})
+    text_out = build_text({SOURCE: [post]})
+
+    assert "본문 안내" not in html_out and "[본문 안내]" not in text_out
+    assert "[원문 발췌]" not in text_out
+    assert GENERAL_FALLBACK_DIV not in html_out
+
+
+def test_assembly_pending_output_is_unchanged():
+    bill = _post(
+        source_key=ASSEMBLY_SOURCE_KEY,
+        source_name="국회 · 계류의안",
+        title="대부업법 일부개정법률안",
+        body="",
+        proposal_status=ProposalContentStatus.PENDING,
+    )
+    html_out = build_html({"국회 · 계류의안": [bill]})
+    text_out = build_text({"국회 · 계류의안": [bill]})
+
+    assert "제안이유 및 주요내용 · 등록 대기" in html_out
+    assert "[제안이유 및 주요내용 · 등록 대기]" in text_out
+    assert "본문 안내" not in html_out and "[본문 안내]" not in text_out
+
+
+def test_assembly_summary_and_detail_update_output_unchanged():
+    """의안 AI 요약·상세 업데이트 섹션은 본문이 안내문이어도 기존 라벨 그대로."""
+    bill = _post(
+        source_key=ASSEMBLY_SOURCE_KEY,
+        source_name="국회 · 계류의안",
+        title="대부업법 일부개정법률안",
+        body=NOTICE,
+        summary=["의안 요약 1", "의안 요약 2", "의안 요약 3"],
+        proposal_status=ProposalContentStatus.AVAILABLE,
+    )
+    updates = {"국회 · 계류의안": [bill]}
+    html_out = build_html({}, detail_updates_by_source=updates)
+    text_out = build_text({}, detail_updates_by_source=updates)
+
+    assert "제안이유 및 주요내용 · AI 3줄 요약" in html_out
+    assert "[제안이유 및 주요내용 · AI 3줄 요약]" in text_out
+    assert "의안 상세 업데이트" in text_out
+    assert "본문 안내" not in html_out and "[본문 안내]" not in text_out
