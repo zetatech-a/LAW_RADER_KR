@@ -34,6 +34,7 @@ import requests
 
 from .config import LLMConfig
 from .models import ASSEMBLY_SOURCE_KEY, Post
+from .snippet import BodyKind, classify_body
 
 log = logging.getLogger(__name__)
 
@@ -323,9 +324,15 @@ def _prepare_body(cfg: LLMConfig, post: Post) -> str:
 
     Summarizer 인스턴스 없이도 '이 글이 요약 대상인가'를 물을 수 있도록 모듈 함수로
     둔다(집계 로그가 같은 규칙을 쓰게 하기 위함).
+
+    본문 전체가 첨부 참조 안내 한 문장뿐인 글("자세한 내용은 첨부파일 참고 …")은
+    요약할 내용이 없으므로 대상이 아니다(src/snippet.py classify_body). 길이 기준
+    (min_body_chars)은 그대로 먼저 적용한다 — 판정과 길이 기준은 역할이 다르다.
     """
     body = " ".join((post.body or "").split())
     if len(body) < cfg.min_body_chars:
+        return ""
+    if classify_body(post.body, post.title) is BodyKind.ATTACHMENT_REFERENCE_ONLY:
         return ""
     return body[: cfg.max_input_chars]
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import html as html_lib
 import re
+from enum import Enum
 
 from bs4 import BeautifulSoup
 
@@ -529,6 +530,126 @@ def build_fallback_snippet(
     if not is_meaningful(text):
         text = " ".join(lines)
     return truncate_snippet(text, limit)
+
+
+# ── 5-1) 본문 성격 판정(일반 게시물) ─────────────────────────────────────────
+#
+# 일부 기관 게시물은 웹 본문 없이 "자세한 내용은 첨부파일 참고 부탁드립니다." 한 줄만
+# 싣는다. 이런 글을 정상 본문처럼 요약 대상에 넣으면 LLM 이 요약할 내용이 없고, 메일에는
+# 그 안내문이 원문 발췌처럼 실린다. 여기서는 **정제 후 남은 본문 전체가 첨부 참조
+# 안내 한 문장뿐인 경우만** 가려낸다.
+#
+# 원칙:
+#   - 원본에 바로 정규식을 대지 않는다. 상세 페이지 본문에는 제목·등록일·담당부서·
+#     첨부 목록이 섞여 들어오므로, 발췌와 같은 정제(normalize_lines·strip_edge_noise)를
+#     먼저 거친 뒤 판정한다.
+#   - '첨부'·'참고' 같은 낱말의 포함 여부가 아니라 **전체 일치**로 판정한다. 안내문 뒤에
+#     한 문장이라도 실제 내용이 붙으면 CONTENT 다. 애매하면 CONTENT 로 둔다 — 실제
+#     본문을 첨부 안내로 오인하는 쪽(요약·발췌가 통째로 사라짐)이 더 위험하다.
+#   - 결과는 Post 에 저장하지 않는다. 필요한 곳에서 같은 입력으로 다시 계산한다(결정적).
+
+
+class BodyKind(str, Enum):
+    """일반 게시물 본문의 성격."""
+
+    CONTENT = "content"
+    ATTACHMENT_REFERENCE_ONLY = "attachment_reference_only"
+    EMPTY = "empty"
+
+
+# "등록일 2026-09-23" 처럼 구분자 없이 공백으로 붙은 라벨+값. 발췌 정제는 이 형태를
+# 지우지 않는다(구분자가 없으면 본문 문장일 수 있어서). 판정용 정제에서만, 값이 그
+# 라벨에 기대되는 모양(날짜·부서명·전화·조회수·파일명)일 때 "라벨: 값" 으로 바꿔
+# 기존 규칙(is_labelled_value)이 알아보게 한다.
+_SPACED_LABEL_VALUE = re.compile(rf"^({_LABEL_ALT})\s+(\S.*)$")
+
+
+def _labelled_for_classification(lines: list[str]) -> list[str]:
+    """판정 전용: 라벨+값 쌍을 "라벨: 값" 한 줄로 모은다(발췌에는 쓰지 않는다).
+
+    - "등록일 2026-09-23"          → "등록일: 2026-09-23"
+    - "담당부서" / "금융정책과"      → "담당부서: 금융정책과"
+
+    값 모양은 라벨별 규칙(_value_rule)을 그대로 쓴다. 값을 검사하지 않는 라벨(제목·
+    이전글·다음글)과 '첨부파일' 라벨만 있는 줄은 건드리지 않는다 — 후자는 뒤따르는
+    파일명 목록을 strip_edge_noise 가 이미 한꺼번에 걷어낸다.
+
+    발췌(build_fallback_snippet)에 이 단계를 넣지 않는 이유: 부서명 모양의 소제목
+    ("기대효과")이 값으로 먹힐 수 있다. 판정에서는 그렇게 벗겨져도 남은 전체가 첨부
+    안내 한 문장과 정확히 일치해야만 결과가 달라지므로 오판 여지가 없다.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _SPACED_LABEL_VALUE.match(line)
+        if m:
+            rule = _value_rule(m.group(1))
+            if rule is not None and rule.match(m.group(2)):
+                out.append(f"{m.group(1)}: {m.group(2)}")
+                i += 1
+                continue
+        m = _LABEL_ONLY.match(line)
+        if m and i + 1 < len(lines) and not _ATTACHMENT_LABEL_ONLY.match(line):
+            rule = _value_rule(m.group(1))
+            value = lines[i + 1]
+            if rule is not None and not is_label_line(value) and rule.match(value):
+                out.append(f"{m.group(1)}: {value}")
+                i += 2
+                continue
+        out.append(line)
+        i += 1
+    return out
+
+
+def clean_body_text(body: str, title: str = "") -> str:
+    """판정용으로 정제한 본문(머리말·꼬리말·제목 중복을 걷어낸 실질 본문)."""
+    lines = normalize_lines(body)
+    if not lines:
+        return ""
+    return " ".join(strip_edge_noise(_labelled_for_classification(lines), title))
+
+
+# 첨부 참조 안내 한 문장. 앞머리("자세한 내용은")·조사·종결은 선택이지만, 대상
+# ("첨부"·"붙임" 계열)과 동사("참고·참조·확인")는 반드시 있어야 하고 **본문 전체**가
+# 이 한 문장이어야 한다(fullmatch). 목록을 넓히지 않는다 — 놓치면 기존 동작으로
+# 남을 뿐이지만, 잘못 잡으면 실제 본문이 요약·발췌에서 사라진다.
+_ATTACH_LEAD = (
+    r"(?:(?:보다\s*)?(?:자세한|상세한|상세|세부|구체적인|관련)\s*(?:내용|사항)"
+    r"\s*(?:은|는)\s*,?\s*)"
+)
+_ATTACH_TARGET = r"(?:첨부|붙임)\s*(?:파일|자료)?"
+_ATTACH_VERB = r"(?:참고|참조|확인)"
+_ATTACH_TAIL = (
+    r"(?:\s*(?:하여|해)\s*(?:주시기\s*바랍니다|주시길\s*바랍니다|주십시오|주세요)"
+    r"|하시기\s*바랍니다|하시길\s*바랍니다|하십시오|하세요"
+    r"|\s*(?:바랍니다|바람|부탁드립니다))"
+)
+_ATTACHMENT_REFERENCE_ONLY = re.compile(
+    rf"[※☞▶*·•\-\s]*{_ATTACH_LEAD}?{_ATTACH_TARGET}\s*(?:을|를)?\s*"
+    rf"{_ATTACH_VERB}{_ATTACH_TAIL}?\s*[.!]?"
+)
+
+
+def is_attachment_reference_only(text: str) -> bool:
+    """정제된 본문 전체가 첨부 참조 안내 한 문장뿐인가."""
+    return bool(_ATTACHMENT_REFERENCE_ONLY.fullmatch(" ".join((text or "").split())))
+
+
+def classify_body(body: str, title: str = "") -> BodyKind:
+    """일반 게시물 본문을 CONTENT / ATTACHMENT_REFERENCE_ONLY / EMPTY 로 판정한다.
+
+    길이는 보지 않는다 — 짧은 정상 공지("접수기간은 9월 30일까지입니다.")도 CONTENT
+    다. 요약할 만큼 긴지는 summarizer 의 min_body_chars 가 따로 정한다.
+    EMPTY 는 관찰(집계 로그)용이다. 호출부는 EMPTY 에서 기존 동작을 바꾸지 않는다 —
+    실제로 본문이 없는 것인지 수집이 어긋난 것인지 이 정보만으로는 가를 수 없다.
+    """
+    text = clean_body_text(body, title)
+    if not is_meaningful(text):
+        return BodyKind.EMPTY
+    if is_attachment_reference_only(text):
+        return BodyKind.ATTACHMENT_REFERENCE_ONLY
+    return BodyKind.CONTENT
 
 
 # ── 6) 의안 전용 발췌 ───────────────────────────────────────────────────────

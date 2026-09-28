@@ -50,6 +50,7 @@ from .fetcher import Fetcher
 from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
 from .notifier import missing_email_settings, send_digest, verify_smtp_login
 from .scrapers import build_scraper
+from .snippet import BodyKind, classify_body, clean_body_text
 from .state import State, utcnow_iso
 from .summarizer import ai_target_count, summarize_posts
 
@@ -433,6 +434,7 @@ def run(argv=None) -> int:
         log.info("--no-llm: LLM 요약 생략")
 
     # AI 집계는 요약 단계를 지난 뒤, 발송 직전에 남긴다(발송 성패와 무관하게 기록).
+    _log_body_kinds(llm_input)
     _log_ai_summary(cfg, llm_input)
 
     if args.dry_run:
@@ -730,6 +732,40 @@ def _log_detail_summary(
             assembly_detail.succeeded,
             assembly_detail.pending,
         )
+
+
+def _log_body_kinds(posts_by_source: dict[str, list[Post]]) -> None:
+    """일반 게시물 본문 판정 집계(src/snippet.py classify_body). 관찰용이다.
+
+    첨부 참조 안내뿐인 글은 요약 대상에서 빠지므로 AI 집계에 잡히지 않는다 — 그 수를
+    여기서 따로 남긴다. 첨부 목록이 비어 있는데 첨부 안내만 있으면 수집 쪽 이상일 수
+    있어 경고로 남긴다. 본문 자체는 로그에 싣지 않는다.
+    """
+    counts = {kind: 0 for kind in BodyKind}
+    for posts in posts_by_source.values():
+        for p in posts:
+            # 의안과 구조화 항목이 있는 글은 본문 발췌 경로를 타지 않는다.
+            if p.source_key == ASSEMBLY_SOURCE_KEY or p.details:
+                continue
+            kind = classify_body(p.body, p.title)
+            counts[kind] += 1
+            if kind is not BodyKind.ATTACHMENT_REFERENCE_ONLY:
+                continue
+            (log.warning if not p.attachments else log.info)(
+                "[%s] body_kind=%s raw_chars=%d cleaned_chars=%d attachments=%d %s",
+                p.source_key,
+                kind.value,
+                len(p.body or ""),
+                len(clean_body_text(p.body, p.title)),
+                len(p.attachments),
+                p.url,
+            )
+    log.info(
+        "본문 판정(일반) — content=%d / attachment_reference_only=%d / empty=%d",
+        counts[BodyKind.CONTENT],
+        counts[BodyKind.ATTACHMENT_REFERENCE_ONLY],
+        counts[BodyKind.EMPTY],
+    )
 
 
 def _log_ai_summary(cfg, posts_by_source: dict[str, list[Post]]) -> None:
