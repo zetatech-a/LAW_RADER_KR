@@ -9,7 +9,12 @@ from email.utils import formataddr
 
 from .config import EmailConfig
 from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
-from .snippet import build_assembly_fallback_lines, build_fallback_snippet
+from .snippet import (
+    BodyKind,
+    build_assembly_fallback_lines,
+    build_fallback_snippet,
+    classify_body,
+)
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +74,26 @@ _UPDATE_NOTICE = (
     "기존에 등록 대기 또는 상세 수집 실패였던 의안의 "
     "제안이유 및 주요내용이 확인되었습니다."
 )
+
+
+# 웹 본문이 첨부 참조 안내 한 문장뿐인 일반 게시물. 그 안내문을 원문 발췌처럼 다시
+# 싣지 않고 짧은 안내로 바꾼다. 첨부 목록이 비어 있으면 없는 첨부파일을 확인하라고
+# 하지 않도록 중립 문구를 쓴다(수집 쪽 이상일 수 있어 main 이 따로 경고를 남긴다).
+_ATTACHMENT_ONLY_LABEL = "본문 안내"
+_ATTACHMENT_ONLY_TEXT = "웹 본문에 상세 내용이 없어 첨부파일을 확인해 주세요."
+_ATTACHMENT_ONLY_NO_FILES_TEXT = "웹 본문에는 첨부자료 참조 안내만 있습니다."
+
+
+def _is_attachment_reference_only(p: Post) -> bool:
+    """일반 게시물 본문이 첨부 참조 안내뿐인가(의안은 판정하지 않는다)."""
+    return (
+        p.source_key != ASSEMBLY_SOURCE_KEY
+        and classify_body(p.body, p.title) is BodyKind.ATTACHMENT_REFERENCE_ONLY
+    )
+
+
+def _attachment_only_text(p: Post) -> str:
+    return _ATTACHMENT_ONLY_TEXT if p.attachments else _ATTACHMENT_ONLY_NO_FILES_TEXT
 
 
 def _is_pending(p: Post) -> bool:
@@ -194,6 +219,17 @@ def _summary_block(p: Post, accent: str) -> str:
                 f"<div style='margin:10px 0 0;font-size:10px;letter-spacing:.8px;"
                 f"font-weight:700;color:{accent}'>{_esc(_body_label(p))}</div>"
                 f"{body_html}"
+            )
+        # 본문이 첨부 참조 안내뿐이면 그 문장을 발췌로 싣지 않고 짧은 안내로 바꾼다.
+        # 첨부 칩은 _card 가 기존대로 이어서 붙인다.
+        if _is_attachment_reference_only(p):
+            return (
+                "<div style='margin:10px 0 0;padding:10px 12px;background:#f8fafc;"
+                "border:1px solid #e2e8f0;border-radius:6px'>"
+                f"<div style='margin:0 0 6px;font-size:10px;letter-spacing:.8px;"
+                f"font-weight:700;color:{accent}'>{_esc(_ATTACHMENT_ONLY_LABEL)}</div>"
+                "<div style='font-size:13px;line-height:1.6;color:#475569'>"
+                f"{_esc(_attachment_only_text(p))}</div></div>"
             )
         return (
             "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
@@ -396,6 +432,9 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
                 lines.append(f"    [{_summary_label(p)}]")
                 for s in p.summary:
                     lines.append(f"      · {s}")
+            elif p.body and _is_attachment_reference_only(p):
+                lines.append(f"    [{_ATTACHMENT_ONLY_LABEL}]")
+                lines.append(f"      {_attachment_only_text(p)}")
             elif p.body:
                 lines.append(f"    [{_body_label(p)}]")
                 if p.source_key == ASSEMBLY_SOURCE_KEY:
