@@ -634,3 +634,210 @@ def test_assembly_summary_and_detail_update_output_unchanged():
     assert "[제안이유 및 주요내용 · AI 3줄 요약]" in text_out
     assert "의안 상세 업데이트" in text_out
     assert "본문 안내" not in html_out and "[본문 안내]" not in text_out
+
+
+# ═══ PR #34 Codex 리뷰 대응 ══════════════════════════════════════════════════
+#
+# R1: 판정은 발췌용 상용구 규칙(_PRESS_NOTICE·_JS_NOTICE·_SURVEY)으로 실제 문장을 지우면
+#     안 된다 — 지우고 나면 첨부 안내만 남아 본문 전체가 요약에서 빠진다.
+# R2: "첨부된 파일/자료" 표현.
+# R3: '붙임' 라벨 + 파일명 목록.
+
+from src.snippet import (  # noqa: E402
+    _JS_NOTICE,
+    _PRESS_NOTICE,
+    _SURVEY,
+    clean_body_text,
+    strip_edge_noise,
+)
+
+# Codex 가 제시한 문장 그대로("명확히 표기"). 현재 _PRESS_NOTICE 는 "출처를" 바로 뒤에
+# 동사가 와야 걸리므로 이 문장은 원래도 걸리지 않았다 — 그래도 회귀 방지로 고정한다.
+R1_CODEX_EXACT = (
+    "온라인 금융상품 광고에는 수익률을 인용할 때 소비자가 확인할 수 있도록 "
+    "자료의 출처를 명확히 표기해 주시기 바랍니다."
+)
+# 같은 취지로 _PRESS_NOTICE 에 **실제로 걸리는** 문장(수정 전 오판 재현).
+R1_PRESS_MATCHING = (
+    "온라인 금융상품 광고에는 수익률을 인용할 때 "
+    "소비자가 확인할 수 있도록 자료의 출처를 표기해 주시기 바랍니다."
+)
+R1_PRESS_SHORT = "온라인 금융상품 광고에는 자료의 출처를 표기해 주시기 바랍니다."
+R1_JS = "이 서비스는 자바스크립트를 사용하므로 브라우저 설정에서 허용해 주시기 바랍니다."
+R1_SURVEY = "이 페이지의 정보에 만족하십니까?"
+
+
+def test_r1_codex_exact_sentence_does_not_hit_press_notice_rule():
+    """재현 기록: Codex 원문("명확히 표기")은 현재 규칙에 걸리지 않는다."""
+    assert not _PRESS_NOTICE.match(R1_CODEX_EXACT)
+    assert classify_body(f"{R1_CODEX_EXACT}\n{NOTICE}") is BodyKind.CONTENT
+
+
+@pytest.mark.parametrize(
+    "sentence, rule",
+    [
+        (R1_PRESS_MATCHING, _PRESS_NOTICE),
+        (R1_PRESS_SHORT, _PRESS_NOTICE),
+        (R1_JS, _JS_NOTICE),
+        (R1_SURVEY, _SURVEY),
+    ],
+)
+def test_r1_sentence_rules_do_not_strip_text_before_classification(sentence, rule):
+    """발췌에서 지우는 문장 모양 규칙에 걸려도 판정에서는 남는다 → CONTENT."""
+    assert rule.match(sentence)  # 전제: 발췌용 규칙에는 실제로 걸리는 문장이다
+    body = f"{sentence}\n{NOTICE}"
+    assert clean_body_text(body) == f"{sentence} {NOTICE}"
+    assert classify_body(body) is BodyKind.CONTENT
+    # 뒤에 붙은 경우도 같다.
+    assert classify_body(f"{NOTICE}\n{sentence}") is BodyKind.CONTENT
+
+
+def test_r1_semantic_edge_sentence_stays_ai_target_even_with_page_noise():
+    """머리말이 붙어 raw 가 길어도 실제 안내 문장이 있으면 요약 대상 그대로."""
+    body = RAW_NOTICE_BODY.replace(NOTICE, f"{R1_PRESS_MATCHING}\n{NOTICE}")
+    post = _post(body=body, attachments=_attachments())
+    s, calls = _counting_summarizer()
+
+    assert classify_body(post.body, post.title) is BodyKind.CONTENT
+    assert ai_target_count(_cfg(), {SOURCE: [post]}) == 1
+    assert s.summarize_all({SOURCE: [post]}) == 1
+    assert calls["n"] == 1
+
+
+def test_r1_general_fallback_still_strips_press_notice():
+    """발췌(기본 모드)는 예전처럼 보도 안내를 걷어낸다 — 판정 모드만 보수적이다."""
+    lines = [R1_PRESS_MATCHING, BODY_FOR_FALLBACK]
+    assert strip_edge_noise(lines) == [BODY_FOR_FALLBACK]
+    assert strip_edge_noise(lines, for_classification=True) == lines
+    assert build_fallback_snippet("\n".join(lines)) == BODY_FOR_FALLBACK
+
+
+BODY_FOR_FALLBACK = "금융위원회는 대부업 등록요건 강화 방안을 발표하였다."
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "자세한 내용은 첨부된 파일을 확인해 주시기 바랍니다.",
+        "세부사항은 첨부된 자료를 참고하시기 바랍니다.",
+    ],
+)
+def test_r2_attached_file_phrase_is_attachment_reference(body):
+    assert classify_body(body) is BodyKind.ATTACHMENT_REFERENCE_ONLY
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "첨부된 파일을 검토한 결과 위반 사실이 확인되었습니다.\n과태료는 500만원입니다.",
+        "첨부된 자료는 신고 시 제출해야 하며,\n제출기한은 2026년 10월 10일까지입니다.",
+        # 대상 명사 없는 "첨부된" 은 받지 않는다.
+        "자세한 내용은 첨부된 참고하시기 바랍니다.",
+    ],
+)
+def test_r2_attached_file_mentions_in_content_stay_content(body):
+    assert classify_body(body) is BodyKind.CONTENT
+
+
+def test_r2_attached_file_phrase_with_page_noise_skips_gemini():
+    body = RAW_NOTICE_BODY.replace(
+        NOTICE, "자세한 내용은 첨부된 파일을 확인해 주시기 바랍니다."
+    )
+    post = _post(body=body, attachments=_attachments())
+    s, calls = _counting_summarizer()
+
+    assert len(" ".join(body.split())) >= _cfg().min_body_chars
+    assert classify_body(post.body, post.title) is BodyKind.ATTACHMENT_REFERENCE_ONLY
+    assert ai_target_count(_cfg(), {SOURCE: [post]}) == 0
+    assert s.summarize_all({SOURCE: [post]}) == 0
+    assert calls["n"] == 0
+
+
+R3_BODY = "자세한 내용은 붙임을 참고하시기 바랍니다.\n붙임\n보도자료.hwp\n보도자료.pdf"
+R3_RAW_BODY = (
+    f"{TITLE}\n"
+    "등록일 2026-09-29\n"
+    "담당부서 금융정책과\n"
+    "\n"
+    "자세한 내용은 붙임을 참고하시기 바랍니다.\n"
+    "\n"
+    "붙임\n"
+    "보도자료.hwp\n"
+    "보도자료.pdf\n"
+)
+
+
+def test_r3_enclosure_label_with_file_list_is_attachment_reference():
+    assert classify_body(R3_BODY) is BodyKind.ATTACHMENT_REFERENCE_ONLY
+    assert classify_body(R3_RAW_BODY, TITLE) is BodyKind.ATTACHMENT_REFERENCE_ONLY
+
+
+@pytest.mark.parametrize("label", ["붙임", "붙임자료", "붙임 자료", "붙임파일", "붙임:"])
+def test_r3_enclosure_label_variants(label):
+    body = f"자세한 내용은 붙임을 참고하시기 바랍니다.\n{label}\n1. 보도자료.hwpx"
+    assert classify_body(body) is BodyKind.ATTACHMENT_REFERENCE_ONLY
+
+
+def test_r3_enclosure_list_before_notice_is_also_stripped():
+    body = "붙임\n보도자료.hwp\n자세한 내용은 붙임을 참고하시기 바랍니다."
+    assert classify_body(body) is BodyKind.ATTACHMENT_REFERENCE_ONLY
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # 파일명이 없으면 '붙임' 줄은 목록이 아니다 — 구조적 증거가 없으면 지우지 않는다.
+        "자세한 내용은 붙임을 참고하시기 바랍니다.\n붙임",
+        # 목록 뒤에 실제 내용이 오면 CONTENT.
+        "붙임\n보도자료.hwp\n신청기간은 10월 5일까지입니다.\n"
+        "자세한 내용은 붙임을 참고하시기 바랍니다.",
+        # 목록이 있어도 실제 내용 문장이 있으면 CONTENT.
+        "신청기간은 10월 5일까지입니다.\n자세한 내용은 붙임을 참고하시기 바랍니다.\n"
+        "붙임\n보도자료.hwp",
+    ],
+)
+def test_r3_enclosure_handling_does_not_create_false_positives(body):
+    assert classify_body(body) is BodyKind.CONTENT
+
+
+def test_r3_raw_body_over_min_body_chars_is_excluded_and_skips_gemini():
+    """길이 기준은 통과하는 raw body — 제외 사유는 판정이다."""
+    cfg = _cfg(min_body_chars=60)
+    post = _post(body=R3_RAW_BODY, attachments=_attachments())
+    s, calls = _counting_summarizer(cfg)
+
+    assert len(" ".join(R3_RAW_BODY.split())) >= cfg.min_body_chars
+    assert _prepare_body(cfg, post) == ""
+    assert ai_target_count(cfg, {SOURCE: [post]}) == 0
+    assert s.summarize_all({SOURCE: [post]}) == 0
+    assert calls["n"] == 0
+
+
+def test_r3_general_fallback_snippet_is_unchanged():
+    """'붙임' 목록 처리는 판정 전용이다 — 발췌 결과는 수정 전과 같다."""
+    assert build_fallback_snippet(R3_BODY) == (
+        "자세한 내용은 붙임을 참고하시기 바랍니다. 붙임 보도자료.hwp 보도자료.pdf"
+    )
+
+
+# ── 세 리뷰를 함께 고친 뒤의 invariant ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "body, title, expected",
+    [
+        (NOTICE, "", BodyKind.ATTACHMENT_REFERENCE_ONLY),
+        ("자세한 내용은 첨부된 파일을 확인해 주시기 바랍니다.", "",
+         BodyKind.ATTACHMENT_REFERENCE_ONLY),
+        ("자세한 내용은 붙임을 참고하시기 바랍니다.\n붙임\nfoo.pdf", "",
+         BodyKind.ATTACHMENT_REFERENCE_ONLY),
+        (f"{TITLE}\n등록일 2026-09-23\n담당부서 금융정책과\n{NOTICE}\n첨부파일\nfoo.pdf",
+         TITLE, BodyKind.ATTACHMENT_REFERENCE_ONLY),
+        (f"신청기간은 10월 5일까지입니다.\n{NOTICE}", "", BodyKind.CONTENT),
+        (f"{R1_PRESS_SHORT}\n{NOTICE}", "", BodyKind.CONTENT),
+        ("첨부된 파일을 검토한 결과 위반 사실이 확인되었습니다.\n과태료는 500만원입니다.",
+         "", BodyKind.CONTENT),
+    ],
+)
+def test_codex_review_invariants(body, title, expected):
+    assert classify_body(body, title) is expected

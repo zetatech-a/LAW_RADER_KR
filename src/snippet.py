@@ -304,6 +304,10 @@ _DECORATION = re.compile(r"^[\s\-=_~*·・ㆍ‧∙•▪◦□■○●◇◆�
 _BARE_FILENAME = _VALUE_FILE
 # 첨부 목록 문맥을 만드는 라벨(_META_LABELS 의 부분집합).
 _ATTACHMENT_LABEL_ONLY = re.compile(r"^(?:첨부파일|첨부)\s*[:：]?$")
+# 본문 판정(classify_body) 전용: '붙임' 계열 라벨. 참조 문장 속 "붙임"과 섞이지 않도록
+# **줄 전체가 라벨**이고 바로 뒤에 실제 파일명 줄이 이어질 때만 목록으로 본다.
+# 발췌(build_fallback_snippet)에는 쓰지 않는다 — 기존 발췌 결과를 바꾸지 않기 위함.
+_ENCLOSURE_LABEL_ONLY = re.compile(r"^붙임\s*(?:파일|자료)?\s*[:：]?$")
 
 # 페이지 하단 만족도 조사. **줄 전체**가 그 안내문일 때만 지운다 — "만족도 조사" 는
 # 실제 보도자료 본문("금융감독원은 금융소비자 만족도 조사를 실시했다")에도 나오는 말이라
@@ -388,6 +392,22 @@ def is_boilerplate(line: str) -> bool:
     구분자 없이 라벨 낱말만 있는 줄("등록일")은 여기 들지 않는다 — 인라인 강조 때문에
     본문 첫 단어가 떨어져 나온 것일 수 있어(strip_edge_noise 가 문맥을 보고 정한다).
     """
+    return bool(
+        is_structural_noise(line)
+        or _SURVEY.match(line)
+        or _PRESS_NOTICE.match(line)
+        or _JS_NOTICE.match(line)
+    )
+
+
+def is_structural_noise(line: str) -> bool:
+    """형식만으로 페이지 골격임이 확정되는 줄(장식·메뉴·breadcrumb·라벨+값).
+
+    is_boilerplate 의 부분집합이다. 만족도·보도 안내·자바스크립트 안내처럼 **문장 모양**
+    으로 판정하는 규칙은 뺀다 — 발췌를 다듬는 데는 쓸 만하지만, 본문 전체를 요약에서
+    뺄지 정하는 판정에서는 실제 안내 문장("…출처를 표기해 주시기 바랍니다")을 지울 수
+    있어 쓰지 않는다.
+    """
     if not line:
         return True
     return bool(
@@ -395,20 +415,33 @@ def is_boilerplate(line: str) -> bool:
         or _nav_key(line) in _NAV_WORDS
         or _BREADCRUMB.match(line)
         or is_labelled_value(line)
-        or _SURVEY.match(line)
-        or _PRESS_NOTICE.match(line)
-        or _JS_NOTICE.match(line)
     )
 
 
-def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
+def strip_edge_noise(
+    lines: list[str], title: str = "", *, for_classification: bool = False
+) -> list[str]:
     """본문 앞뒤에 붙은 제목 중복·상용구·메타데이터 줄을 걷어낸다.
 
     앞에서부터, 그리고 뒤에서부터 '확실한 군더더기'만 벗겨 내고 실제 내용을 만나면
     즉시 멈춘다. 가운데를 훑지 않으므로 본문 문장이 사라질 여지가 없다.
+
+    for_classification=True 는 본문 판정(classify_body) 전용이다. 기본값(False)의
+    동작은 그대로다.
+      - 문장 모양으로 판정하는 상용구(보도·만족도·자바스크립트 안내)는 지우지 않고
+        구조적 군더더기(is_structural_noise)만 지운다. 판정은 본문 전체를 요약에서 뺄지
+        정하므로 발췌보다 보수적이어야 한다.
+      - '붙임' 라벨 + 파일명 목록도 첨부 목록으로 걷어낸다(파일명 줄이 있어야만).
     """
+    boilerplate = is_structural_noise if for_classification else is_boilerplate
+
     def noise(line: str) -> bool:
-        return is_duplicate_title(line, title) or is_boilerplate(line)
+        return is_duplicate_title(line, title) or boilerplate(line)
+
+    def is_attachment_label(line: str) -> bool:
+        return bool(_ATTACHMENT_LABEL_ONLY.match(line)) or (
+            for_classification and bool(_ENCLOSURE_LABEL_ONLY.match(line))
+        )
 
     def is_bare_meta_label(index: int) -> bool:
         """lines[index] 가 '값 없이 선 라벨' 인가(구분자 없는 라벨 낱말).
@@ -461,6 +494,15 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
     start = 0
     while start < len(lines):
         line = lines[start]
+        # '붙임' 은 메타 라벨이 아니므로(noise 아님) 파일명 줄이 뒤따를 때만 목록으로 본다.
+        if (
+            for_classification
+            and _ENCLOSURE_LABEL_ONLY.match(line)
+            and start + 1 < len(lines)
+            and _BARE_FILENAME.match(lines[start + 1])
+        ):
+            start = after_attachment_run(start + 1)
+            continue
         if not (noise(line) or is_bare_meta_label(start)):
             break
         # '첨부파일' 라벨 뒤에는 크기 표기가 없는 파일명이 여러 줄 이어질 수 있다.
@@ -483,7 +525,7 @@ def strip_edge_noise(lines: list[str], title: str = "") -> list[str]:
         run = end
         while run > start and _BARE_FILENAME.match(lines[run - 1]):
             run -= 1
-        if run < end and run > start and _ATTACHMENT_LABEL_ONLY.match(lines[run - 1]):
+        if run < end and run > start and is_attachment_label(lines[run - 1]):
             end = run - 1
             continue
         # 꼬리말이 "담당부서 / 기업회계팀" 처럼 라벨+값 두 줄로 끝나는 경우.
@@ -542,7 +584,9 @@ def build_fallback_snippet(
 # 원칙:
 #   - 원본에 바로 정규식을 대지 않는다. 상세 페이지 본문에는 제목·등록일·담당부서·
 #     첨부 목록이 섞여 들어오므로, 발췌와 같은 정제(normalize_lines·strip_edge_noise)를
-#     먼저 거친 뒤 판정한다.
+#     먼저 거친 뒤 판정한다. 단 판정 모드(for_classification=True)로 부른다 — 구조적
+#     군더더기만 지우고, 보도·만족도 안내처럼 문장 모양으로 고르는 규칙은 쓰지 않는다
+#     (그 규칙에 걸린 실제 안내 문장이 지워져 첨부 안내만 남는 오판을 막는다).
 #   - '첨부'·'참고' 같은 낱말의 포함 여부가 아니라 **전체 일치**로 판정한다. 안내문 뒤에
 #     한 문장이라도 실제 내용이 붙으면 CONTENT 다. 애매하면 CONTENT 로 둔다 — 실제
 #     본문을 첨부 안내로 오인하는 쪽(요약·발췌가 통째로 사라짐)이 더 위험하다.
@@ -607,7 +651,11 @@ def clean_body_text(body: str, title: str = "") -> str:
     lines = normalize_lines(body)
     if not lines:
         return ""
-    return " ".join(strip_edge_noise(_labelled_for_classification(lines), title))
+    return " ".join(
+        strip_edge_noise(
+            _labelled_for_classification(lines), title, for_classification=True
+        )
+    )
 
 
 # 첨부 참조 안내 한 문장. 앞머리("자세한 내용은")·조사·종결은 선택이지만, 대상
@@ -618,7 +666,8 @@ _ATTACH_LEAD = (
     r"(?:(?:보다\s*)?(?:자세한|상세한|상세|세부|구체적인|관련)\s*(?:내용|사항)"
     r"\s*(?:은|는)\s*,?\s*)"
 )
-_ATTACH_TARGET = r"(?:첨부|붙임)\s*(?:파일|자료)?"
+# "첨부된" 은 뒤에 대상 명사(파일·자료)가 있어야만 받는다("첨부된을 참고" 같은 조각 불가).
+_ATTACH_TARGET = r"(?:(?:첨부|붙임)\s*(?:파일|자료)?|첨부된\s*(?:파일|자료))"
 _ATTACH_VERB = r"(?:참고|참조|확인)"
 _ATTACH_TAIL = (
     r"(?:\s*(?:하여|해)\s*(?:주시기\s*바랍니다|주시길\s*바랍니다|주십시오|주세요)"
