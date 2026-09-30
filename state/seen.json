@@ -194,6 +194,7 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:232572",
       "nttId:232288",
       "nttId:232271",
       "nttId:232253",
@@ -724,6 +725,47 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_W2U6Q0R9P1Q4O1P3N3N5V5U8U1S3U2",
+      "PRC_D2C6C0K9K1J4H1I3G3H6P5P3N5M0N0",
+      "PRC_F2D6L0L9K2K2J1J4I5I7E4C0D9C0C3",
+      "PRC_C2J6K0I9J0H3I1G7O0P5N3N3L7N8L5",
+      "PRC_Y2T6U0S9T0R9S1Q8Y3Z6X5X1W2W5V0",
+      "PRC_J2R6P0Q9O0P9N1O7K3K4I2H9H3G2G7",
+      "PRC_67E8E2FACA3247CDA80A77E56A2F75",
+      "PRC_X2X6W0W9V1V7T1C4C0A2B3Z2A5Y6Z4",
+      "PRC_D2R6F0P9A0L9I0Z9C5Z1E5J8E4M7Z5",
+      "PRC_G2E6F0D9E1C7K1L4J0K8I3J6H6I9Q4",
+      "PRC_A526CDC7C963414AB15C215C87E933",
+      "PRC_T2E6P0D9J1I6S1D8R4M4B1I7E3P3F9",
+      "PRC_C2Z6R0K9C1R6R1W8M1Z7Y0G5Q7F9T5",
+      "PRC_K2J6H0I9G2H2O1P6N1M6M1L9L6T1U5",
+      "PRC_D2C6C0K9K1J7K1I5I0H2P5P1N0O0M5",
+      "PRC_G2G6J0G9R1T6J1U8O3L0I2H6V4W6J0",
+      "PRC_Q2P6L0U9U1L6V1O8O4U0T5R8L5N7A2",
+      "PRC_Y2Q6I0C9R1J5U2G0O4L3J1L1M1V0Z2",
+      "PRC_G2N6O0M9N1L7M1K7S4T4R4S2Q9Q2P7",
+      "PRC_R2B6H0S9O1A6F1I8K2Z9S0A8X9Q8D8",
+      "PRC_K2L6J0K9F2G1E1F0D1B6C2K6L5J6J1",
+      "PRC_S2T6S0Z9A2Y2Z1X6Y2W0X1E8D5E6C3",
+      "PRC_H2Y6E0R9U1C6B1S8F4D6R3Z8B4M5G8",
+      "PRC_Z2G6W0T9E1V5P2Z0L3G4R3R7C7J2B2",
+      "PRC_R2G6P0T9G1T5A2Y0N3W8Z2M3K0S7N0",
+      "PRC_B2W6O0T9S1N6E1T8Y3N6Q4R7J7E0R4",
+      "PRC_M2H6P0W9L0D9O0O9Y4F8B2O3B8W0Y9",
+      "PRC_Q2P6N0O9V2W2V1V6T1S6T4O9P6N0O3",
+      "PRC_L2G6O0Z9A0D9T0I9M4N9P4A0O5D8R6",
+      "PRC_X2N6I0U9K1M7C0D8N4W6K5A9G0G2C5",
+      "PRC_O2O6D0O9D0V9C0Y9F5B1H0A0E6L7T0",
+      "PRC_J2R6S0Q9Q2P2N1O6W1W7V1V6T4S3T6",
+      "PRC_R2P6Q0O9P2N3O1W4U1V9T3U0S4S7B1",
+      "PRC_K2Z6J0K3E3P1R1H8L3F7A5L7Y8G9Z8",
+      "PRC_G2E6F0D7D1L5K1K4I5J6I3I6E3C7D9",
+      "PRC_Q2M6M0K9L0J3K1I7J0R9P4Q4O5P2N3",
+      "PRC_N2M6N0L9L2K2K1S6T5R0P3Q8O4P8L5",
+      "PRC_M2X6E0A9C1P5Q2P0V4I6Y1V6X7Z6S5",
+      "PRC_O2X6C0G9Q1F5R2Q0E4Q4W0K8I8F3K6",
+      "PRC_E2H6E0G9I1V5H2J0P4F1L4Z4M8D2M5",
+      "PRC_A2Z6D0R9B1T5C2K0P3H9K2Z7M7C7W3",
       "PRC_C2A5I0J4H0I1G1H6F5B2B2Z5A8Z2Z3",
       "PRC_C1054F64ACFD46E9B1C9983DAAA6C3",
       "PRC_D2C6C0A7B3J1K1I5H0H9F4G5O4O5N4",
@@ -2448,33 +2490,43 @@
     "pending_detail": {
       "PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1": {
         "first_seen_at": "2026-08-28T00:26:57Z",
-        "attempts": 315,
+        "attempts": 316,
         "title": "군급식기본법 일부개정법률안 (유용원의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1",
         "date": "2026-08-27",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-09-29T09:09:02Z"
+        "last_attempt_at": "2026-09-30T00:13:28Z"
       },
       "ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1": {
         "first_seen_at": "2026-09-04T00:29:50Z",
-        "attempts": 246,
+        "attempts": 247,
         "title": "영유아특별회계법 일부개정법률안 (정부)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1",
         "date": "2026-09-03",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-09-29T09:09:02Z"
+        "last_attempt_at": "2026-09-30T00:13:28Z"
       },
       "PRC_D2D6L0J8K2I8J1H3I4Q3Q0O4N2O3M9": {
         "first_seen_at": "2026-09-17T00:10:23Z",
-        "attempts": 123,
+        "attempts": 124,
         "title": "선거관리위원회법 일부개정법률안 (김용만의원 등 14인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_D2D6L0J8K2I8J1H3I4Q3Q0O4N2O3M9",
         "date": "2026-09-16",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-09-29T09:09:02Z"
+        "last_attempt_at": "2026-09-30T00:13:28Z"
+      },
+      "PRC_D2C6C0K9K1J4H1I3G3H6P5P3N5M0N0": {
+        "first_seen_at": "2026-09-30T00:13:28Z",
+        "attempts": 1,
+        "title": "영산강수계 물관리 및 주민지원 등에 관한 법률안 (안호영의원 등 10인)",
+        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_D2C6C0K9K1J4H1I3G3H6P5P3N5M0N0",
+        "date": "2026-09-29",
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-09-30T00:13:28Z"
       }
     }
   },
