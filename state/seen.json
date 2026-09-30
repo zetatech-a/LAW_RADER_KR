@@ -148,6 +148,7 @@
   },
   "fsc_legislation": {
     "seen": [
+      "noticeId:4177",
       "noticeId:4176",
       "noticeId:4175",
       "noticeId:4174",
@@ -419,6 +420,7 @@
   },
   "fss_rule_amendment": {
     "seen": [
+      "lrgSlno:4385",
       "lrgSlno:4347",
       "lrgSlno:4365",
       "lrgSlno:4346",
