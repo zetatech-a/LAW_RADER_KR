@@ -586,7 +586,7 @@ _KEY_BULLET = re.compile(r"^(?:[□○ㅇ•▪▶①-⑳❶-❿➊-➓]+\s*|[-�
 _KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
 _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
 _KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:(?:목록|\(\s*\d+\s*\))(?=\s|첨부|$)|$)")
-_KEY_TERMINAL = re.compile(r'''[가-힣A-Za-z]\s*[.!?…]+["'”’」』)\]】》]*(?=\s|[가-힣0-9]|$)''')
+_KEY_TERMINAL = re.compile(r'''[가-힣A-Za-z0-9%)\]」』】》]\s*[.!?…]+["'”’」』)\]】》]*(?=\s|[가-힣0-9]|$)''')
 _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "이를", "이번", "통해", "관련", "따라", "것으로", "하도록"})
 
 # 역할 판단은 발췌 출력에만 적용한다. Gemini 입력·호출·재시도에는 사용하지 않는다.
@@ -594,7 +594,9 @@ _RULE_CHANGE = re.compile(r"개정|신설|폐지|삭제|도입|확대|축소|강
 _RULE_HISTORY = re.compile(r"^(?:현행(?:법|규정|제도)?(?:은|는)|기존(?:에는|의)|지난|당시|그간)")
 _RULE_NEW_CLAUSE = re.compile(r"(?:그러나|하지만|이에\s*따라|개정안(?:은|에서는)|앞으로는|이번\s*개정안은).{0,120}(?:개정|신설|폐지|삭제|도입|확대|축소|강화|완화|금지)\s*(?:하|한|함|되|됨|할|해|했)")
 _RULE_CHANGE_PREDICATE = re.compile(r"(?:개정|신설|폐지|삭제|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지)\s*(?:하|한|함|되|됨|할|해|했|를|을)")
-_RULE_CONDITION = re.compile(r"대상(?:은|는|으로)|적용\s*대상|기준(?:은|는)|조건|요건|이상|이하|초과|미만|한도|다만|제외|예외")
+_RULE_CONDITION = re.compile(r"대상(?:은|는|으로|\s*(?:회사|법인|기업|기관|사업자))|적용\s*(?:대상|회사|기업|기관|사업자)|기준(?:은|는)|조건|요건|한도|다만|제외|예외")
+_RULE_THRESHOLD = re.compile(r"\d[\d,.]*\s*(?:억원|조원|원|%|명|건|개)?\s*(?:이상|이하|초과|미만)(?:인|의|에 해당하는)?\s*(?:회사|기업|기관|은행|사업자|소비자|투자자|이용자|경우|때)")
+_KEY_NUMERIC_CELLS = re.compile(r"(?:^|\s)[-−△]?\d[\d,.]*%?(?:\s+[-−△]?\d[\d,.]*%?){3}")
 _RULE_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일|\d+\s*영업일|\d+\s*개월|오늘|내일|내년|올해|즉시|공포한 날")
 _RULE_CALENDAR_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일")
 _RULE_SCHEDULE = re.compile(r"시행|적용|접수|신청|제출|모집|판매|공표|공포|기한|마감")
@@ -689,12 +691,12 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
         # 예외는 변경 문장과 함께 읽어야 하므로 별도 조건 문장으로 우선한다.
         if re.match(r"^(?:다만|단,|예외)", sentence):
             return 8
-        return 4 if section == label or _RULE_CONDITION.search(sentence) else 0
+        return 4 if section == label or _RULE_CONDITION.search(sentence) or _RULE_THRESHOLD.search(sentence) else 0
     if label in ("시행·기한", "후속 일정"):
         # 날짜만으로 시행일이라 부르지 않는다. 회의/발표일도 일정으로 바꾸지 않는다.
         if _RULE_PAST_EVENT.search(sentence):
             return 0
-        if label == "후속 일정" and (
+        if (
             _RULE_PAST_PREDICATE.search(sentence) and not _RULE_FUTURE.search(sentence)
         ):
             return 0
@@ -703,7 +705,7 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
             or (_RULE_SCHEDULE.search(sentence) and _RULE_TIME_BOUND.search(sentence))
         )) else 0
     if label in ("주요 현황", "세부 수치"):
-        return 4 if _KEY_FACT.search(sentence) and _RULE_STAT_FACT.search(sentence) else 0
+        return 4 if re.search(r"\d", sentence) and _RULE_STAT_FACT.search(sentence) else 0
     return 0
 
 
@@ -717,6 +719,15 @@ def _key_sentences(text: str) -> list[str]:
     start = 0
     for match in _KEY_TERMINAL.finditer(text):
         sentence = text[start:match.end()].strip()
+        after = text[match.end():].lstrip()
+        # 숫자 뒤의 점은 소수점/날짜일 수도 있다. 다음 숫자나 날짜 조사로 이어지면
+        # 경계로 쓰지 않고, 백분율·괄호·완결된 숫자 문장은 정상적으로 분리한다.
+        if re.search(r"\d\s*\.$", sentence) and (
+            after[:1].isdigit()
+            or (re.search(r"(?:\d{2,4}\s*\.\s*)?\d{1,2}\s*\.\s*\d{1,2}\s*\.$", sentence)
+                and re.match(r"(?:부터|까지|이후|이전|에|시행|적용)", after))
+        ):
+            continue
         if not _ENUMERATION_LABEL.fullmatch(sentence):
             sentences.append(sentence)
             start = match.end()
@@ -801,7 +812,10 @@ def build_rule_excerpt_rows(
                 continue
             # 긴 숫자 표는 별도 표 보기에서 확인할 정보다. 다수 셀을 합친 문자열이
             # 문장보다 높은 '수치 점수'를 받아 카드 전체를 차지하지 않게 한다.
-            if len(re.findall(r"\d[\d,.]*", sentence)) > 12:
+            if (len(re.findall(r"\d[\d,.]*", sentence)) > 12
+                    and _KEY_NUMERIC_CELLS.search(sentence)
+                    and not _RULE_CHANGE_PREDICATE.search(sentence)
+                    and not re.search(r"(?:다|함|임|음|요)[.!?…]?[\"”’)]?$", sentence)):
                 continue
             if sentence not in candidates:
                 candidates.append(sentence)
@@ -855,7 +869,7 @@ def build_rule_excerpt_rows(
         if role in ("대상·조건", "주요 현황", "세부 수치"):
             # 구체적인 시행 일정은 일정 역할에 남긴다. 예외 문장은 조건에서 유지한다.
             non_schedule = [i for i in eligible if not _role_strength("시행·기한", candidates[i], sections[i])]
-            eligible = non_schedule or eligible
+            eligible = non_schedule if role in ("주요 현황", "세부 수치") else non_schedule or eligible
         if not eligible:
             continue
         best = max(eligible, key=lambda i: scores[i] + 3 * _role_strength(role, candidates[i], sections[i]))

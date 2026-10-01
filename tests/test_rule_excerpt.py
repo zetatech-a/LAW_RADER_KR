@@ -347,9 +347,57 @@ def test_real_fsc_research_retains_obligation_and_statistics_without_false_date(
     post = next(p for p in _fsc_corpus() if p['post_id'] == '87831')
     rows = build_rule_excerpt_rows(post['body'], post['title'])
     text = ' '.join(s for _, s in rows)
-    for fact in ('3년간 매년 2회', '1년간 2회', '11.6조원', '2.0조원', '20.4%'):
+    for fact in ('3년간 매년 2회', '1년간 2회', '11.6조원', '20.4%'):
         assert fact in text
+    assert '2.0조원' in text or '2조원' in text  # 원문 요약 부분과 본문이 같은 금액을 다르게 표기한다.
     assert any(role == '대상·조건' and 'IPO' in s for role, s in rows)
     assert all(role != '시행·기한' for role, _ in rows)
     assert '협회규정 ➌' not in text
     assert '그간 증권사' not in text
+
+
+@pytest.mark.parametrize('fact', ['첫날 판매액은 2,140억원(35.7%).', '판매 비율은 35.7%.', '판매 건수는 2140.'])
+def test_numeric_and_parenthesized_sentence_endings_keep_followup_schedule(fact):
+    body = fact + ' 온라인 판매는 10월 8일부터 재개할 예정이다.'
+    rows = build_rule_excerpt_rows(body, '판매 결과')
+    assert len(rows) == 2
+    assert any(text == fact for _, text in rows)
+    assert ('후속 일정', '온라인 판매는 10월 8일부터 재개할 예정이다.') in rows
+
+
+def test_numeric_boundary_still_preserves_dates_and_decimal_signs():
+    body = '규정은 2026. 10. 15.부터 시행한다. 손실률은 -3.5%이다. 적용 회사는 은행이다.'
+    lines = build_key_excerpt_lines(body, '규정 개정')
+    assert len(lines) == 3
+    assert any('2026. 10. 15.부터' in text for text in lines)
+    assert any('-3.5%' in text for text in lines)
+    assert build_key_excerpt_lines('규정은 10. 15.부터 시행한다. 보고 대상은 은행이다.')[0] == '규정은 10. 15.부터 시행한다.'
+
+
+def test_policy_roles_also_reject_completed_sales():
+    body = '판매 방식을 확대한다. 온라인 판매는 10월 8일부터 재개됐다.'
+    rows = build_rule_excerpt_rows(body, '판매 방식 개정')
+    assert not any(role == '시행·기한' for role, _ in rows)
+
+
+def test_statistical_comparison_is_not_an_eligibility_condition():
+    body = ('은행의 보고 의무를 신설한다. 수익은 전년 대비 20% 이상으로 증가했다. '
+            '적용 회사는 금융회사이다. 2027년부터 시행한다.')
+    rows = build_rule_excerpt_rows(body, '보고 의무 신설')
+    assert ('대상·조건', '적용 회사는 금융회사이다.') in rows
+    assert not any(role == '대상·조건' and '수익' in text for role, text in rows)
+
+
+def test_numeric_eligibility_threshold_still_gets_condition_role():
+    body = '보고 의무를 신설한다. 자산 100억원 이상인 회사에 보고 의무를 부여한다. 2027년부터 시행한다.'
+    assert ('대상·조건', '자산 100억원 이상인 회사에 보고 의무를 부여한다.') in build_rule_excerpt_rows(body, '보고 의무 신설')
+
+
+def test_prose_with_many_article_numbers_is_not_discarded_as_a_table():
+    body = ' '.join(f'제{i}조' for i in range(1, 14)) + '의 보고 의무를 폐지한다.'
+    assert build_key_excerpt_lines(body, '보고 의무 폐지') == [body]
+
+
+def test_many_numbered_facts_with_a_predicate_are_not_discarded():
+    body = '분기별 공급액은 ' + ' '.join(str(i) for i in range(1, 14)) + '억원으로 증가하였다.'
+    assert build_key_excerpt_lines(body, '공급 실적') == [body]
