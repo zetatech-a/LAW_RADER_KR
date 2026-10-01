@@ -8,8 +8,6 @@ on:
       - 'config.yaml'
       - 'scripts/check_gemini.py'
       - '.github/workflows/summary-check.yml'
-  push:
-    branches: ['codex/fix-gemini-summary-20261001']
   workflow_dispatch:
     inputs:
       live:
@@ -33,7 +31,7 @@ jobs:
       - run: pip install -r requirements.txt pytest
       - run: python -m pytest -q
   gemini:
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.live) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.live }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

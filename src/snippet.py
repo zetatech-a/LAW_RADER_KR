@@ -623,6 +623,17 @@ def build_key_excerpt_lines(
     if max_lines <= 0 or max_line_chars <= 0:
         return []
     lines = strip_edge_noise(normalize_lines(body), title)
+    # 제목도 span마다 줄이 갈릴 수 있다. 앞쪽 여러 줄의 합이 제목과 정확히
+    # 같은 경우만 제거해 본문 첫 문장에 중복 제목이 붙지 않게 한다.
+    title_key = _title_key(title)
+    if len(title_key) >= _MIN_TITLE_KEY_CHARS:
+        for end in range(1, min(len(lines), 12) + 1):
+            prefix = _title_key(" ".join(lines[:end]))
+            if prefix == title_key:
+                lines = lines[end:]
+                break
+            if not title_key.startswith(prefix):
+                break
     # 문장 도중의 HTML/span 줄바꿈은 합치고, 실제 항목 시작만 경계로 보존한다.
     paragraphs: list[str] = []
     pending: list[str] = []

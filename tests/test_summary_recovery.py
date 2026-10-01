@@ -189,3 +189,11 @@ def test_numeric_table_does_not_displace_policy_sentences():
     assert len(lines) == 3
     assert all("현황" not in line for line in lines)
     assert "1,234억원" in " ".join(lines)
+
+
+def test_title_fragmented_across_spans_is_removed_only_on_exact_match():
+    title = "금융회사 보고 의무 신설"
+    body = "금융회사\n보고 의무\n신설\n은행의 월별 보고 의무를 신설한다."
+    assert build_key_excerpt_lines(body, title) == ["은행의 월별 보고 의무를 신설한다."]
+    assert build_key_excerpt_lines("수익률\n-3.5%\n감소하였다.", "수익률 3.5% 감소하였다.") == [
+        "수익률 -3.5% 감소하였다."]

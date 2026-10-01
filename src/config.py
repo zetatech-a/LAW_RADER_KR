@@ -163,7 +163,7 @@ class LLMConfig:
     # 0 = 비활성(공유 상한 없음) — 새 키를 생략한 기존 custom config 는 예전
     # 동작 그대로다. 실제 단계 마감은 min(단계 마감, 공유 마감) 이다.
     total_budget_sec: float = 0.0
-    # model 이 사용 불가(404/NOT_FOUND)일 때 이 순서로 넘어갈 대체 모델들.
+    # 모델 부재/재시도 소진 503/확인된 모델별 429에 이 순서로 시도할 대체 모델들.
     fallback_models: list[str] = field(default_factory=list)
     api_key: str = ""
     # 의안 전용 배치 요약 설정(일반 게시물 경로에는 영향 없음).
