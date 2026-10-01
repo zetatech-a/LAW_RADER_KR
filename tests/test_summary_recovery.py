@@ -1,12 +1,15 @@
 """2026-10-01 한도/과부하 장애와 API 없는 핵심 발췌 회귀 테스트."""
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from src.snippet import build_key_excerpt_lines
 from src.notifier import build_html, build_text
 from src.summarizer import LLMCallError, LLMErrorKind, Summarizer, _quota_info
+from src.config import SourceConfig
+from src.scrapers.fsc import FscBoardScraper
 from test_summarizer import _cfg, _post, _FakeResponse, _stub, _envelope
 
 
@@ -197,3 +200,18 @@ def test_title_fragmented_across_spans_is_removed_only_on_exact_match():
     assert build_key_excerpt_lines(body, title) == ["은행의 월별 보고 의무를 신설한다."]
     assert build_key_excerpt_lines("수익률\n-3.5%\n감소하였다.", "수익률 3.5% 감소하였다.") == [
         "수익률 -3.5% 감소하였다."]
+
+
+def test_fsc_enrichment_preserves_inline_words_and_amounts():
+    html = ('<div class="board-view-wrap"><div class="body">'
+            '<p>금융회사는 보고 의무를 신설하<span>였</span>다.</p>'
+            '<p>과징금은 1,<strong>234</strong>억원이며 수익률은 <b>-3.5%</b>이다.</p>'
+            '<p>개정 규정은 2027년부터 시행된다.</p></div></div>')
+    fetcher = SimpleNamespace(get=lambda *args, **kwargs: html, text=lambda response: response)
+    source = SourceConfig(key="fsc_press", name="금융위", type="fsc_board", list_url="https://example.com")
+    post = _post(body="")
+    FscBoardScraper(source, fetcher).enrich(post)
+    assert "신설하였다." in post.body
+    assert "1,234억원" in post.body
+    assert "-3.5%" in post.body
+    assert len(build_key_excerpt_lines(post.body)) == 3
