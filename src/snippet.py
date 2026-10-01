@@ -581,6 +581,7 @@ _KEY_ACTION = re.compile(r"개정|신설|폐지|삭제|도입|확대|축소|강�
 _KEY_TARGET = re.compile(r"대상|금융회사|금융기관|은행|보험사|보험회사|소비자|투자자|사업자|기업|이용자|개인정보|신용정보")
 _KEY_TIMING = re.compile(r"시행|적용|예정|기한|까지|부터|의견|입법예고|행정예고")
 _KEY_FACT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원|년|월|일|명|개|건)")
+_KEY_AMOUNT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원)")
 _KEY_BULLET = re.compile(r"^(?:[□○ㅇ•▪▶]+\s*|[-–—]\s+|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)]\s+)")
 _KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
 _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
@@ -672,10 +673,11 @@ def build_key_excerpt_lines(
     frequency = Counter(t for words in tokens for t in words)
     features = [
         {name for name, pattern in (("action", _KEY_ACTION), ("target", _KEY_TARGET),
-                                    ("timing", _KEY_TIMING), ("fact", _KEY_FACT))
+                                    ("timing", _KEY_TIMING), ("fact", _KEY_FACT),
+                                    ("amount", _KEY_AMOUNT))
          if pattern.search(s)} for s in candidates
     ]
-    weights = {"action": 5, "target": 2, "timing": 3, "fact": 2}
+    weights = {"action": 5, "target": 2, "timing": 3, "fact": 2, "amount": 2}
     scores = [
         sum(weights[f] for f in features[i])
         + min(4, 2 * len(title_tokens & tokens[i]))
