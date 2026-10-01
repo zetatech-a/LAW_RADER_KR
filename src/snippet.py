@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import html as html_lib
 import re
+from collections import Counter
 from enum import Enum
 
 from bs4 import BeautifulSoup
@@ -572,6 +573,146 @@ def build_fallback_snippet(
     if not is_meaningful(text):
         text = " ".join(lines)
     return truncate_snippet(text, limit)
+
+
+# 외부 모델 없이 원문 문장을 고르는 추출식 요약. 새 문장을 생성하거나 법적 효과를
+# 추론하지 않는다. 변경 내용/대상/일정을 우선하고 중복을 줄여 최대 세 줄을 표시한다.
+_KEY_ACTION = re.compile(r"개정|신설|폐지|삭제|도입|확대|축소|강화|완화|의무|금지|과징금|제재|의결|시행|적용|인상|인하|상향|하향|추진|개선")
+_KEY_TARGET = re.compile(r"대상|금융회사|금융기관|은행|보험사|보험회사|소비자|투자자|사업자|기업|이용자|개인정보|신용정보")
+_KEY_TIMING = re.compile(r"시행|적용|예정|기한|까지|부터|의견|입법예고|행정예고")
+_KEY_FACT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원|년|월|일|명|개|건)")
+_KEY_BULLET = re.compile(r"^(?:[□○ㅇ•▪▶]+\s*|[-–—]\s+|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)]\s+)")
+_KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
+_KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
+_KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:목록|\(\s*\d+\s*\))?\s*$")
+_KEY_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+")
+_KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "이를", "이번", "통해", "관련", "따라", "것으로", "하도록"})
+
+
+def _key_tokens(text: str) -> set[str]:
+    return {t for t in re.findall(r"[가-힣A-Za-z]{2,}", text) if t not in _KEY_STOPWORDS}
+
+
+def _key_sentences(text: str) -> list[str]:
+    """문장부호 앞 공백도 처리하되 날짜/소수점/열거 라벨의 마침표는 보존한다."""
+    sentences: list[str] = []
+    pending = ""
+    for piece in _KEY_SENTENCE_BOUNDARY.split(text):
+        pending = f"{pending} {piece}".strip() if pending else piece
+        before_punctuation = pending[:-1].rstrip()
+        if (pending[-1:] in ".!?…" and before_punctuation
+                and before_punctuation[-1].isalpha()
+                and not _ENUMERATION_LABEL.fullmatch(pending)):
+            sentences.append(pending)
+            pending = ""
+    if pending:
+        sentences.append(pending)
+    return sentences
+
+
+def build_key_excerpt_lines(
+    body: str, title: str = "", *, max_lines: int = 3, max_line_chars: int = 300,
+) -> list[str]:
+    """본문 전체에서 핵심 원문 문장 최대 3개를 고른다(짧은 글은 실제 문장 수만).
+
+    제목 관련성·정책 변화·수치·대상·일정 + 문장 간 정보 다양성으로 순위를 정한다.
+    선택 후 원문 순서로 표시하며 긴 문장만 어절 경계에서 생략 표시를 붙인다.
+    날짜/소수점/음수는 문장 경계나 목록기호로 해석하지 않는다.
+    """
+    if max_lines <= 0 or max_line_chars <= 0:
+        return []
+    lines = strip_edge_noise(normalize_lines(body), title)
+    # 문장 도중의 HTML/span 줄바꿈은 합치고, 실제 항목 시작만 경계로 보존한다.
+    paragraphs: list[str] = []
+    pending: list[str] = []
+    for line in lines:
+        if _KEY_ATTACHMENT_LIST.fullmatch(line) and pending:
+            break
+        if _KEY_HEADING.fullmatch(line) and (
+            not pending or pending[-1].endswith((".", "!", "?", "…"))
+        ):
+            continue
+        if re.match(r"^[ⅠⅡⅢⅣⅤ]\.\s+", line):
+            if pending:
+                paragraphs.append(" ".join(pending))
+                pending = []
+            continue
+        section_start = bool(_KEY_SECTION_START.match(line))
+        if re.fullmatch(r"\*+", line):
+            # HTML의 별표 참조가 별도 줄로 나올 수 있다. 문장 중간 참조를 경계로
+            # 쓰면 '의무 * 를 신설한다'가 잘려 법적 효과가 사라진다.
+            section_start = bool(pending and pending[-1].endswith((".", "!", "?", "…")))
+        if (_KEY_BULLET.match(line) or section_start) and pending:
+            paragraphs.append(" ".join(pending))
+            pending = []
+        pending.append(line)
+    if pending:
+        paragraphs.append(" ".join(pending))
+
+    candidates: list[str] = []
+    for paragraph in paragraphs:
+        for sentence in _key_sentences(paragraph):
+            sentence = _KEY_BULLET.sub("", sentence, count=1).strip()
+            if (not sentence or _KEY_HEADING.fullmatch(sentence)
+                    or is_duplicate_title(sentence, title)
+                    or is_boilerplate(sentence) or is_structural_noise(sentence)
+                    or is_attachment_reference_only(sentence)):
+                continue
+            # 긴 숫자 표는 별도 표 보기에서 확인할 정보다. 다수 셀을 합친 문자열이
+            # 문장보다 높은 '수치 점수'를 받아 카드 전체를 차지하지 않게 한다.
+            if len(re.findall(r"\d[\d,.]*", sentence)) > 12:
+                continue
+            if sentence not in candidates:
+                candidates.append(sentence)
+    if not candidates:
+        return []
+
+    tokens = [_key_tokens(s) for s in candidates]
+    title_tokens = _key_tokens(title)
+    frequency = Counter(t for words in tokens for t in words)
+    features = [
+        {name for name, pattern in (("action", _KEY_ACTION), ("target", _KEY_TARGET),
+                                    ("timing", _KEY_TIMING), ("fact", _KEY_FACT))
+         if pattern.search(s)} for s in candidates
+    ]
+    weights = {"action": 5, "target": 2, "timing": 3, "fact": 2}
+    scores = [
+        sum(weights[f] for f in features[i])
+        + min(4, 2 * len(title_tokens & tokens[i]))
+        + min(2, sum(frequency[t] > 1 for t in tokens[i]) * .25)
+        + 1 / (i + 1)
+        + (3 if i == 0 and not re.search(r"배경을 설명|감사 인사|간담회를 개최", candidates[i]) else 0)
+        - (6 if candidates[i].startswith("*") else 0)
+        - (4 if re.search(r"예\s*:", candidates[i]) else 0)
+        - (2 if re.search(r"그간|문제점|지적되어", candidates[i]) else 0)
+        - (4 if re.search(r"배경을 설명|감사 인사|간담회를 개최", candidates[i]) else 0)
+        - min(5, max(0, len(candidates[i]) - max_line_chars) / max_line_chars)
+        for i in range(len(candidates))
+    ]
+    selected: list[int] = []
+    covered: set[str] = set()
+    while len(selected) < min(max_lines, len(candidates)):
+        best = None
+        best_score = -float("inf")
+        for i in range(len(candidates)):
+            if i in selected:
+                continue
+            similarity = max((len(tokens[i] & tokens[j]) / max(1, len(tokens[i] | tokens[j]))
+                              for j in selected), default=0)
+            # 수치가 다른 문장은 별개 사실이므로 중복으로 버리지 않는다.
+            if any(len(tokens[i] & tokens[j]) / max(1, len(tokens[i] | tokens[j])) > .85
+                   and re.findall(r"[-−△]?\d[\d,.]*", candidates[i])
+                   == re.findall(r"[-−△]?\d[\d,.]*", candidates[j]) for j in selected):
+                continue
+            score = scores[i] + 2 * len(features[i] - covered) - 8 * similarity
+            if score > best_score:
+                best, best_score = i, score
+        if best is None:
+            break
+        selected.append(best)
+        covered.update(features[best])
+    return [s if len(s) <= max_line_chars else _cut_at_word(s, max_line_chars - 2) + " …"
+            for s in (candidates[i] for i in sorted(selected))]
 
 
 # ── 5-1) 본문 성격 판정(일반 게시물) ─────────────────────────────────────────

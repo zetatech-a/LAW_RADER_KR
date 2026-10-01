@@ -237,7 +237,8 @@ def test_gemini_failure_on_normal_body_keeps_fail_soft_fallback():
     assert calls["n"] == 1
     assert post.summary == []
     html_out = build_html({SOURCE: [post]})
-    assert build_fallback_snippet(post.body, post.title) in html_out
+    from src.snippet import build_key_excerpt_lines
+    assert all(line in html_out for line in build_key_excerpt_lines(post.body, post.title))
     assert "본문 안내" not in html_out
 
 
@@ -296,16 +297,19 @@ def test_details_output_still_takes_precedence():
     assert "본문 안내" not in build_text({SOURCE: [attach_only]})
 
 
-def test_general_fallback_rendering_is_unchanged():
-    """20 — 요약이 없는 정상 글은 기존 발췌 블록 그대로(새 라벨 없음)."""
+def test_general_fallback_rendering_selects_key_sentences():
+    """20 — 정상 본문은 API 없이 핵심 원문 문장을 카드로 표시한다."""
     post = _post(body=NORMAL_BODY)
     snippet = build_fallback_snippet(post.body, post.title)
     html_out = build_html({SOURCE: [post]})
     text_out = build_text({SOURCE: [post]})
 
-    assert f"{GENERAL_FALLBACK_DIV}{snippet}</div>" in html_out
+    from src.snippet import build_key_excerpt_lines
+    selected = build_key_excerpt_lines(post.body, post.title)
+    assert all(line in html_out for line in selected)
+    assert "원문 발췌 · 핵심 3줄" in html_out
     assert "본문 안내" not in html_out
-    assert f"    [원문 발췌]\n      {snippet}\n" in text_out
+    assert all(f"      · {line}" in text_out for line in selected)
 
 
 # ── D. 의안 경로 불변 ────────────────────────────────────────────────────────
@@ -582,8 +586,10 @@ def test_mixed_digest_changes_only_the_attachment_only_card():
     html_out = build_html({SOURCE: [attach_only, fallback, summarized]})
 
     snippet = build_fallback_snippet(NORMAL_BODY, TITLE)
-    assert f"    [원문 발췌]\n      {snippet}\n" in text_out
-    assert f"{GENERAL_FALLBACK_DIV}{snippet}</div>" in html_out
+    from src.snippet import build_key_excerpt_lines
+    selected = build_key_excerpt_lines(NORMAL_BODY, TITLE)
+    assert all(f"      · {line}" in text_out for line in selected)
+    assert all(line in html_out for line in selected)
     assert "    [AI 3줄 요약]\n      · 요약 1\n      · 요약 2\n      · 요약 3\n" in text_out
     assert html_out.count("본문 안내") == 1
     assert text_out.count("[본문 안내]") == 1

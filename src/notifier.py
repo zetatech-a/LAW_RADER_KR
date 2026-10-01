@@ -13,6 +13,7 @@ from .snippet import (
     BodyKind,
     build_assembly_fallback_lines,
     build_fallback_snippet,
+    build_key_excerpt_lines,
     classify_body,
 )
 
@@ -115,7 +116,8 @@ def _body_label(p: Post) -> str:
     """AI 요약이 없을 때 쓰는 발췌 블록 제목."""
     if p.source_key == ASSEMBLY_SOURCE_KEY:
         return _ASSEMBLY_BODY_LABEL
-    return _BODY_LABEL
+    n = len(build_key_excerpt_lines(p.body, p.title))
+    return f"{_BODY_LABEL} · 핵심 {n}줄" if n else _BODY_LABEL
 
 
 def _has_summary(*groups: "dict[str, list[Post]] | None") -> bool:
@@ -210,16 +212,7 @@ def _summary_block(p: Post, accent: str) -> str:
         # 고른 여러 구간을 싣는다. 그 외 소스는 기존과 같이 라벨 없이 한 줄 발췌만.
         if p.source_key == ASSEMBLY_SOURCE_KEY:
             lines = _assembly_excerpt(p)
-            body_html = "".join(
-                "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;"
-                f"color:#475569'>{_esc(line)}</div>"
-                for line in lines
-            )
-            return (
-                f"<div style='margin:10px 0 0;font-size:10px;letter-spacing:.8px;"
-                f"font-weight:700;color:{accent}'>{_esc(_body_label(p))}</div>"
-                f"{body_html}"
-            )
+            return _excerpt_block(_body_label(p), lines, accent)
         # 본문이 첨부 참조 안내뿐이면 그 문장을 발췌로 싣지 않고 짧은 안내로 바꾼다.
         # 첨부 칩은 _card 가 기존대로 이어서 붙인다.
         if _is_attachment_reference_only(p):
@@ -231,10 +224,10 @@ def _summary_block(p: Post, accent: str) -> str:
                 "<div style='font-size:13px;line-height:1.6;color:#475569'>"
                 f"{_esc(_attachment_only_text(p))}</div></div>"
             )
-        return (
-            "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
-            f"{_esc(build_fallback_snippet(p.body, p.title))}</div>"
-        )
+        lines = build_key_excerpt_lines(p.body, p.title)
+        if not lines:
+            return ""
+        return _excerpt_block(_body_label(p), lines, accent)
 
     # 원문이 아직 공개되지 않은 의안. 빈 카드로 두면 수집이 깨진 것처럼 보인다.
     if _is_pending(p):
@@ -247,6 +240,26 @@ def _summary_block(p: Post, accent: str) -> str:
             f"{_esc(_PENDING_TEXT)}</div></div>"
         )
     return ""
+
+
+def _excerpt_block(label: str, lines: list[str], accent: str) -> str:
+    """AI 카드와 같은 여백/불릿/기관색. 문장은 원문 자동선별임을 명시한다."""
+    items = "".join(
+        "<tr><td valign='top' style='padding:2px 8px 2px 0;"
+        f"font-size:13px;line-height:1.6;color:{accent}'>•</td>"
+        "<td style='padding:2px 0;font-size:13px;line-height:1.6;color:#334155'>"
+        f"{_esc(line)}</td></tr>" for line in lines
+    )
+    return (
+        "<div style='margin:10px 0 0;padding:10px 12px;background:#f8fafc;"
+        "border:1px solid #e2e8f0;border-radius:6px'>"
+        f"<div style='margin:0 0 6px;font-size:10px;letter-spacing:.8px;"
+        f"font-weight:700;color:{accent}'>{_esc(label)}</div>"
+        f"<table role='presentation' cellpadding='0' cellspacing='0' "
+        f"style='border-collapse:collapse'>{items}</table>"
+        "<div style='margin-top:6px;font-size:11px;color:#64748b'>"
+        "원문 문장을 자동으로 선별했습니다.</div></div>"
+    )
 
 
 def _card(p: Post, accent: str) -> str:
@@ -440,7 +453,8 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
                 if p.source_key == ASSEMBLY_SOURCE_KEY:
                     lines.extend(f"      {line}" for line in _assembly_excerpt(p))
                 else:
-                    lines.append(f"      {build_fallback_snippet(p.body, p.title)}")
+                    lines.extend(f"      · {line}" for line in build_key_excerpt_lines(p.body, p.title))
+                lines.append("      원문 문장을 자동으로 선별했습니다.")
             elif _is_pending(p):
                 lines.append(f"    [{_PENDING_LABEL}]")
                 lines.append(f"      {_PENDING_TEXT}")

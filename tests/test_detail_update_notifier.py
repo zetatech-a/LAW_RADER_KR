@@ -322,15 +322,15 @@ def test_detail_update_without_ai_uses_the_same_improved_fallback():
         assert _AMD in rendered
 
 
-def test_general_post_fallback_is_still_the_220_char_snippet():
-    from src.snippet import build_fallback_snippet
+def test_general_post_fallback_uses_bounded_key_excerpt():
+    from src.snippet import build_key_excerpt_lines
 
     post = _press()
     post.body = "가나다라마바사아자차 " * 60
     grouped = {PRESS: [post]}
-    expected = build_fallback_snippet(post.body, post.title)
+    expected = build_key_excerpt_lines(post.body, post.title)[0]
     assert expected in build_html(grouped)
-    assert f"      {expected}" in build_text(grouped)
+    assert f"      · {expected}" in build_text(grouped)
 
 
 def test_assembly_fallback_escapes_html():

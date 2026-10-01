@@ -78,12 +78,13 @@ def test_config_uses_latest_alias_and_ordered_fallbacks():
     # 특정 버전을 하드코딩하면 그 버전 수명 종료일에 전 요청이 404 로 죽는다.
     cfg = load_config("config.yaml")
     assert cfg.llm.model == "gemini-flash-latest"
-    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.8-flash"]
+    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
     # 호출 순서: primary → fallback 순서 그대로
     assert cfg.llm.model_chain == [
         "gemini-flash-latest",
         "gemini-3.6-flash",
         "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
     ]
 
 
@@ -92,7 +93,7 @@ def test_env_primary_36_dedupes_to_36_then_38(tmp_path, monkeypatch):
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     monkeypatch.setenv("MODEL", "gemini-3.6-flash")
     cfg = load_config("config.yaml")
-    assert cfg.llm.model_chain == ["gemini-3.6-flash", "gemini-3.8-flash"]
+    assert cfg.llm.model_chain == ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
 
 
 def test_model_chain_dedupes_and_preserves_order():
@@ -1499,7 +1500,7 @@ def test_email_falls_back_to_body_without_summary():
 
     text = build_text(grouped)
     assert "원문 본문 발췌가 여기 나온다" in text
-    assert "[원문 발췌]" in text
+    assert "[원문 발췌 · 핵심 1줄]" in text
     assert "생성형 AI" not in text   # 요약이 없으면 텍스트 파트에도 유의사항이 없다
 
 
