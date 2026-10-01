@@ -152,6 +152,7 @@
   },
   "fsc_legislation": {
     "seen": [
+      "noticeId:4178",
       "noticeId:4177",
       "noticeId:4176",
       "noticeId:4175",
@@ -204,6 +205,7 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:233627",
       "nttId:233557",
       "nttId:233554",
       "nttId:233555",
@@ -2649,6 +2651,7 @@
   },
   "pipc_press": {
     "seen": [
+      "nttId:12550",
       "nttId:12549",
       "nttId:12548",
       "nttId:12538",
