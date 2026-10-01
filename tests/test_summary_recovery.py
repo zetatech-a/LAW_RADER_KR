@@ -215,3 +215,12 @@ def test_fsc_enrichment_preserves_inline_words_and_amounts():
     assert "1,234억원" in post.body
     assert "-3.5%" in post.body
     assert len(build_key_excerpt_lines(post.body)) == 3
+
+
+def test_concatenated_attachment_labels_and_sentences_are_handled():
+    body = ("은행의 보고 의무를 신설한다.보고 기준은 1,234억원이다.2026.10.15.부터 적용한다.\n"
+            "첨부파일 (2)첨부파일 목록 report.hwpx 파일다운로드 report.pdf 파일뷰어")
+    lines = build_key_excerpt_lines(body)
+    assert len(lines) == 3
+    assert "첨부" not in " ".join(lines)
+    assert "2026.10.15." in lines[2]

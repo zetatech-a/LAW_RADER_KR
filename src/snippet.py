@@ -585,8 +585,10 @@ _KEY_AMOUNT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원)")
 _KEY_BULLET = re.compile(r"^(?:[□○ㅇ•▪▶]+\s*|[-–—]\s+|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)]\s+)")
 _KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
 _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
-_KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:목록|\(\s*\d+\s*\))?\s*$")
-_KEY_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+")
+_KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:(?:목록|\(\s*\d+\s*\))(?=\s|첨부|$)|$)")
+_KEY_SENTENCE_BOUNDARY = re.compile(
+    r"(?<=[.!?…])\s+|(?<=[가-힣A-Za-z][.!?…])(?=[가-힣])|(?<=[다함임음요][.!?])(?=\d)"
+)
 _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "이를", "이번", "통해", "관련", "따라", "것으로", "하도록"})
 
 
@@ -638,7 +640,7 @@ def build_key_excerpt_lines(
     paragraphs: list[str] = []
     pending: list[str] = []
     for line in lines:
-        if _KEY_ATTACHMENT_LIST.fullmatch(line) and pending:
+        if _KEY_ATTACHMENT_LIST.match(line) and pending:
             break
         if _KEY_HEADING.fullmatch(line) and (
             not pending or pending[-1].endswith((".", "!", "?", "…"))
