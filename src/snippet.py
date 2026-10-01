@@ -591,6 +591,59 @@ _KEY_SENTENCE_BOUNDARY = re.compile(
 )
 _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "이를", "이번", "통해", "관련", "따라", "것으로", "하도록"})
 
+# 역할 판단은 발췌 출력에만 적용한다. Gemini 입력·호출·재시도에는 사용하지 않는다.
+_RULE_CHANGE = re.compile(r"개정|신설|폐지|삭제|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지")
+_RULE_HISTORY = re.compile(r"^(?:현행(?:법|규정|제도)?(?:은|는)|기존(?:에는|의)|지난|당시|그간)")
+_RULE_NEW_ACTION = re.compile(r"(?:개정|신설|폐지|삭제|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지)\s*(?:한다|함|하기로|할 예정|된다|됨)")
+_RULE_CHANGE_PREDICATE = re.compile(r"(?:개정|신설|폐지|삭제|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지)\s*(?:하|한|함|되|됨|할|해|했|를|을)")
+_RULE_CONDITION = re.compile(r"대상(?:은|는|으로)|적용\s*대상|기준(?:은|는)|조건|요건|이상|이하|초과|미만|한도|다만|제외|예외")
+_RULE_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일|\d+\s*영업일|\d+\s*개월|오늘|내일|내년|올해|즉시|공포한 날")
+_RULE_SCHEDULE = re.compile(r"시행|적용|접수|신청|제출|모집|판매|공표|공포|기한|마감")
+_RULE_TIME_BOUND = re.compile(
+    rf"(?:{_RULE_DATE.pattern}).{{0,24}}(?:부터|까지|예정|마감|시행|접수|신청|제출|경과)"
+    rf"|(?:시행일|기한|마감일|접수기간).{{0,12}}(?:{_RULE_DATE.pattern})"
+)
+_RULE_PAST_EVENT = re.compile(r"개최하였|개최했|개최하였다|논의하였|논의했다|발표일|배포일|등록일|게시일")
+_RULE_STAT_TITLE = re.compile(r"현황|동향|통계|실적|결과|판매")
+_RULE_STAT_FACT = re.compile(r"공급|판매|증가|감소|잔여|소진|총|목표|비율|수익|손실|규모")
+
+
+def _excerpt_roles(title: str, candidates: list[str]) -> tuple[str, ...]:
+    """문서 유형별 질문. 유형이 불명확하면 일반 중요도 선별로 돌아간다."""
+    if _RULE_CHANGE.search(title):
+        return ("변경 내용", "대상·조건", "시행·기한")
+    if _RULE_STAT_TITLE.search(title) and any(_KEY_FACT.search(s) for s in candidates):
+        return ("주요 현황", "세부 수치", "후속 일정")
+    if any(_RULE_CHANGE.search(s) and not _RULE_HISTORY.search(s) for s in candidates):
+        return ("변경 내용", "대상·조건", "시행·기한")
+    return ()
+
+
+def _role_strength(label: str, sentence: str) -> int:
+    if sentence.startswith(("*", "※")) or re.search(r"배경을 설명|감사 인사|간담회를 개최", sentence):
+        return 0
+    if label == "변경 내용":
+        if _RULE_HISTORY.search(sentence) and not _RULE_NEW_ACTION.search(sentence):
+            return 0
+        if _RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence) and not _RULE_CHANGE_PREDICATE.search(sentence):
+            return 0
+        if _RULE_CHANGE_PREDICATE.search(sentence):
+            return 2 if re.search(r"논의해갈|점검하고|논의할 계획|논의를 지속", sentence) else 6
+        return 4 if _RULE_CHANGE.search(sentence) else 0
+    if label == "대상·조건":
+        # 예외는 변경 문장과 함께 읽어야 하므로 별도 조건 문장으로 우선한다.
+        if re.match(r"^(?:다만|단,|예외)", sentence):
+            return 8
+        return 4 if _RULE_CONDITION.search(sentence) else 0
+    if label in ("시행·기한", "후속 일정"):
+        # 날짜만으로 시행일이라 부르지 않는다. 회의/발표일도 일정으로 바꾸지 않는다.
+        return 6 if (_RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence)
+                     and _RULE_TIME_BOUND.search(sentence)
+                     and not _RULE_PAST_EVENT.search(sentence)) else 0
+    if label in ("주요 현황", "세부 수치"):
+        return 4 if _KEY_FACT.search(sentence) and _RULE_STAT_FACT.search(sentence) else 0
+    return 0
+
 
 def _key_tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"[가-힣A-Za-z]{2,}", text) if t not in _KEY_STOPWORDS}
@@ -613,13 +666,13 @@ def _key_sentences(text: str) -> list[str]:
     return sentences
 
 
-def build_key_excerpt_lines(
+def build_rule_excerpt_rows(
     body: str, title: str = "", *, max_lines: int = 3, max_line_chars: int = 300,
-) -> list[str]:
-    """본문 전체에서 핵심 원문 문장 최대 3개를 고른다(짧은 글은 실제 문장 수만).
+) -> list[tuple[str, str]]:
+    """원문 문장을 역할별로 최대 3개 선별한다. 없는 역할은 만들어 채우지 않는다.
 
     제목 관련성·정책 변화·수치·대상·일정 + 문장 간 정보 다양성으로 순위를 정한다.
-    선택 후 원문 순서로 표시하며 긴 문장만 어절 경계에서 생략 표시를 붙인다.
+    확실한 역할이 있으면 질문 순서, 일반 중요도 선별이면 원문 순서로 표시한다.
     날짜/소수점/음수는 문장 경계나 목록기호로 해석하지 않는다.
     """
     if max_lines <= 0 or max_line_chars <= 0:
@@ -705,7 +758,29 @@ def build_key_excerpt_lines(
         for i in range(len(candidates))
     ]
     selected: list[int] = []
+    labels: dict[int, str] = {}
     covered: set[str] = set()
+    roles = _excerpt_roles(title, candidates)
+
+    def is_duplicate(i: int) -> bool:
+        # 수치가 다른 문장은 별개 사실이므로 중복으로 버리지 않는다.
+        return any(len(tokens[i] & tokens[j]) / max(1, len(tokens[i] | tokens[j])) > .85
+                   and re.findall(r"[-−△]?\d[\d,.]*", candidates[i])
+                   == re.findall(r"[-−△]?\d[\d,.]*", candidates[j]) for j in selected)
+
+    for role in roles[:max_lines]:
+        eligible = [i for i, s in enumerate(candidates)
+                    if i not in selected and not is_duplicate(i) and _role_strength(role, s)]
+        if role in ("대상·조건", "주요 현황", "세부 수치"):
+            # 구체적인 시행 일정은 일정 역할에 남긴다. 예외 문장은 조건에서 유지한다.
+            non_schedule = [i for i in eligible if not _role_strength("시행·기한", candidates[i])]
+            eligible = non_schedule or eligible
+        if not eligible:
+            continue
+        best = max(eligible, key=lambda i: scores[i] + 3 * _role_strength(role, candidates[i]))
+        selected.append(best)
+        labels[best] = role
+        covered.update(features[best])
     while len(selected) < min(max_lines, len(candidates)):
         best = None
         best_score = -float("inf")
@@ -714,10 +789,7 @@ def build_key_excerpt_lines(
                 continue
             similarity = max((len(tokens[i] & tokens[j]) / max(1, len(tokens[i] | tokens[j]))
                               for j in selected), default=0)
-            # 수치가 다른 문장은 별개 사실이므로 중복으로 버리지 않는다.
-            if any(len(tokens[i] & tokens[j]) / max(1, len(tokens[i] | tokens[j])) > .85
-                   and re.findall(r"[-−△]?\d[\d,.]*", candidates[i])
-                   == re.findall(r"[-−△]?\d[\d,.]*", candidates[j]) for j in selected):
+            if is_duplicate(i):
                 continue
             score = scores[i] + 2 * len(features[i] - covered) - 8 * similarity
             if score > best_score:
@@ -726,8 +798,19 @@ def build_key_excerpt_lines(
             break
         selected.append(best)
         covered.update(features[best])
-    return [s if len(s) <= max_line_chars else _cut_at_word(s, max_line_chars - 2) + " …"
-            for s in (candidates[i] for i in sorted(selected))]
+    ordered = selected if labels else sorted(selected)
+    return [(labels.get(i, "주요 내용"),
+             candidates[i] if len(candidates[i]) <= max_line_chars
+             else _cut_at_word(candidates[i], max_line_chars - 2) + " …")
+            for i in ordered]
+
+
+def build_key_excerpt_lines(
+    body: str, title: str = "", *, max_lines: int = 3, max_line_chars: int = 300,
+) -> list[str]:
+    """규칙 기반 발췌의 원문 부분(라벨 없는 호출자와 공유)."""
+    return [text for _, text in build_rule_excerpt_rows(
+        body, title, max_lines=max_lines, max_line_chars=max_line_chars)]
 
 
 # ── 5-1) 본문 성격 판정(일반 게시물) ─────────────────────────────────────────

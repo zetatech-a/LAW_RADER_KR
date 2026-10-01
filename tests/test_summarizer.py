@@ -78,13 +78,12 @@ def test_config_uses_latest_alias_and_ordered_fallbacks():
     # 특정 버전을 하드코딩하면 그 버전 수명 종료일에 전 요청이 404 로 죽는다.
     cfg = load_config("config.yaml")
     assert cfg.llm.model == "gemini-flash-latest"
-    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.8-flash"]
     # 호출 순서: primary → fallback 순서 그대로
     assert cfg.llm.model_chain == [
         "gemini-flash-latest",
         "gemini-3.6-flash",
         "gemini-3.8-flash",
-        "gemini-3.5-flash-lite",
     ]
 
 
@@ -93,7 +92,7 @@ def test_env_primary_36_dedupes_to_36_then_38(tmp_path, monkeypatch):
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     monkeypatch.setenv("MODEL", "gemini-3.6-flash")
     cfg = load_config("config.yaml")
-    assert cfg.llm.model_chain == ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    assert cfg.llm.model_chain == ["gemini-3.6-flash", "gemini-3.8-flash"]
 
 
 def test_model_chain_dedupes_and_preserves_order():

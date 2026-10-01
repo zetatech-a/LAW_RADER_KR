@@ -22,14 +22,12 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import random
 import re
 import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from email.utils import parsedate_to_datetime
 from itertools import zip_longest
 
 import requests
@@ -105,86 +103,6 @@ class LLMError(RuntimeError):
 
 class LLMCallError(LLMError):
     """HTTP 호출 계층의 실패(상태 코드로 분류됨)."""
-
-    def __init__(self, message: str, *, quota: "QuotaInfo | None" = None, **kwargs):
-        super().__init__(message, **kwargs)
-        self.quota = quota
-
-
-@dataclass(frozen=True)
-class QuotaInfo:
-    """429의 구조화된 근거. 불명확한 한도를 모델별 한도로 추정하지 않는다."""
-
-    violations: tuple[dict, ...] = ()
-    retry_after_sec: float = 0.0
-
-    @property
-    def model_scoped(self) -> bool:
-        return bool(self.violations) and all(
-            "permodel" in str(v.get("quotaId", "")).lower()
-            and isinstance(v.get("quotaDimensions"), dict)
-            and bool(v["quotaDimensions"].get("model"))
-            for v in self.violations
-        )
-
-    @property
-    def persistent(self) -> bool:
-        # 일일 한도/할당량 0은 수 초 후 재시도로 복구되지 않는다.
-        return any(
-            "perday" in str(v.get("quotaId", "")).lower()
-            or str(v.get("quotaValue", "")) == "0"
-            for v in self.violations
-        )
-
-    def diagnostic(self) -> str:
-        # 프로젝트 식별자·키·원문은 기록하지 않고 필요한 한도 필드만 남긴다.
-        fields = [
-            {"metric": v.get("quotaMetric"), "id": v.get("quotaId"),
-             "model": v["quotaDimensions"].get("model")
-             if isinstance(v.get("quotaDimensions"), dict) else None,
-             "limit": v.get("quotaValue")}
-            for v in self.violations
-        ]
-        return json.dumps({"violations": fields, "retry_after_sec": self.retry_after_sec,
-                           "model_scoped": self.model_scoped,
-                           "persistent": self.persistent}, ensure_ascii=False)
-
-
-def _delay_seconds(value) -> float:
-    try:
-        delay = float(str(value).removesuffix("s"))
-        return delay if math.isfinite(delay) and delay >= 0 else 0.0
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _quota_info(resp) -> QuotaInfo:
-    try:
-        error = (resp.json() or {}).get("error") or {}
-    except (ValueError, AttributeError):
-        error = {}
-    if not isinstance(error, dict):
-        error = {}
-    violations = []
-    delay = 0.0
-    details = error.get("details")
-    for detail in details if isinstance(details, list) else []:
-        if not isinstance(detail, dict):
-            continue
-        if str(detail.get("@type", "")).endswith("QuotaFailure"):
-            values = detail.get("violations")
-            if isinstance(values, list):
-                violations.extend(v for v in values if isinstance(v, dict))
-        if str(detail.get("@type", "")).endswith("RetryInfo"):
-            delay = max(delay, _delay_seconds(detail.get("retryDelay")))
-    header = (getattr(resp, "headers", None) or {}).get("Retry-After")
-    if header:
-        delay = max(delay, _delay_seconds(header))
-        try:
-            delay = max(delay, parsedate_to_datetime(header).timestamp() - time.time())
-        except (TypeError, ValueError, OverflowError):
-            pass
-    return QuotaInfo(tuple(violations), max(0.0, delay))
 
 
 # 재시도해도 같은 답이 오는 실패. 여기에 없는 것만 bounded retry 대상이다.
@@ -290,8 +208,8 @@ _PROMPT = """당신은 한국 금융규제 담당 실무자를 돕는 요약가�
 _LIST_PREFIX = re.compile(r"^(?:[-–—]+\s+|[•*·▪◦]+\s*|\(?\d{1,2}[.)]\s+)")
 
 
-# 모델 부재 판정에는 인증·한도·서버 장애를 섞지 않는다. 503/모델별 429의
-# 대체 모델 전환은 _generate에서 별도 판단한다.
+# 인증·한도·서버 장애는 모델 문제가 아니므로 다른 모델을 연쇄 호출하지 않는다.
+# (기존 재시도·시간예산·서킷 브레이커 정책을 그대로 따른다)
 _NEVER_CHAIN_STATUS = frozenset({401, 403, 429})
 
 # "이 모델은 없거나 이 프로젝트에 제공되지 않는다"는 뜻의 응답 메시지 조각.
@@ -555,7 +473,6 @@ class Summarizer:
         self._active_model: str | None = None
         # 사용 불가로 확인된 모델(404 등). 이후 게시글에서 다시 시도하지 않는다.
         self._unavailable: set[str] = set()
-        self._quota_blocked: dict[str, LLMCallError] = {}
         # 이번 summarize_all() 실행에서 확정된 종료성 실패(AUTH 등). summarize_all 이
         # 매 호출 시작 시 None 으로 되돌리므로 실행 사이에 끌려가지 않는다.
         self._terminal_failure: LLMErrorKind | None = None
@@ -578,7 +495,6 @@ class Summarizer:
         # 이번 invocation 에서만 유효한 상태로 시작한다. 인스턴스에 남겨 두면 지난
         # 실행의 401 이 이번 실행의 정상 키까지 막는다(sticky terminal 금지).
         self._terminal_failure = None
-        self._quota_blocked.clear()
 
         # 일반·의안 두 단계가 **함께** 쓸 상위 마감. 여기서 딱 한 번 만들고 두 단계가
         # 같은 절대 시각을 공유한다 — 단계마다 다시 만들면(now+360 을 두 번) 공유
@@ -766,11 +682,7 @@ class Summarizer:
             body=body,
         )
         data = self._generate(prompt, deadline)
-        lines = self._parse(data)
-        if not lines:
-            log.info("Gemini 빈 요약 배열 — model=%s finish=%s usage=%s",
-                     self._active_model, self._finish_reason(data), data.get("usageMetadata", {}))
-        return lines
+        return self._parse(data)
 
     # --- 내부 ---
     def _model_candidates(self) -> list[str]:
@@ -780,11 +692,10 @@ class Summarizer:
         모델은 제외한다. 활성 모델이 뒤늦게 사라져도 같은 호출에서 남은 모델로 넘어간다.
         """
         out: list[str] = []
-        if (self._active_model and self._active_model not in self._unavailable
-                and self._active_model not in self._quota_blocked):
+        if self._active_model and self._active_model not in self._unavailable:
             out.append(self._active_model)
         for name in self._models:
-            if name not in self._unavailable and name not in self._quota_blocked and name not in out:
+            if name not in self._unavailable and name not in out:
                 out.append(name)
         return out
 
@@ -800,8 +711,8 @@ class Summarizer:
         thinking_level: str | None = None,
         telemetry: "CallTelemetry | None" = None,
     ) -> dict:
-        """모델 목록을 순서대로 시도한다. 404 계열, 재시도 소진 HTTP 503,
-        구조화 응답으로 확인한 모델별 429에서 다음 모델로 넘어간다.
+        """모델 목록을 순서대로 시도한다. 404 계열, 그리고 재시도를 소진한 HTTP 503
+        에서만 다음 모델로 넘어간다.
 
         schema·max_output_tokens 는 호출별 구조화 출력 설정이다. 생략하면 기존 단건
         요약과 완전히 같은 payload 를 보낸다(의안 배치 요약만 값을 넘긴다).
@@ -815,8 +726,6 @@ class Summarizer:
         started = time.monotonic()
         candidates = self._model_candidates()
         if not candidates:
-            if self._quota_blocked:
-                raise next(reversed(self._quota_blocked.values()))
             raise SummaryUnavailable(
                 f"설정된 모델({', '.join(self._models) or '없음'})이 모두 사용 불가 — "
                 "원문 발췌를 사용합니다",
@@ -827,7 +736,6 @@ class Summarizer:
         # 재시도를 소진한 HTTP 503. 뒤 후보까지 성공하지 못하면 이것을 그대로 올린다
         # (일시 장애 의미를 유지 — MODEL_UNAVAILABLE 로 바꾸지 않는다).
         last_503: LLMCallError | None = None
-        last_quota: LLMCallError | None = None
         for i, model in enumerate(candidates):
             try:
                 data = self._generate_with(
@@ -841,20 +749,6 @@ class Summarizer:
                     thinking_level=thinking_level,
                 )
             except LLMCallError as e:
-                # 429가 모델별 한도임이 구조화 응답으로 확인될 때만 설정된 대체 모델을
-                # 시도한다. 프로젝트 전체/결제/불명확한 한도와 인증 오류는 전환하지 않는다.
-                if e.kind is LLMErrorKind.RATE_LIMIT and e.quota and e.quota.model_scoped:
-                    self._quota_blocked[model] = e
-                    last_quota = e
-                    if self._active_model == model:
-                        self._active_model = None
-                    rest = [m for m in candidates[i + 1:]
-                            if m not in self._unavailable and m not in self._quota_blocked]
-                    if rest and (deadline is None or deadline - time.monotonic() >= _MIN_CALL_SEC):
-                        log.warning("Gemini 모델별 한도 — model=%s, 다음 모델 %s 로 전환합니다",
-                                    model, rest[0])
-                        continue
-                    raise
                 # 일시 장애 중 HTTP 503(모델 과부하)만, 그 모델의 재시도를 다 쓴 뒤에
                 # 다음 설정 모델을 시도한다. 503 은 일시적이므로 _unavailable 에 넣지
                 # 않는다. 다른 5xx·408·429·타임아웃·네트워크 실패는 기존대로 전환 없음.
@@ -897,8 +791,6 @@ class Summarizer:
                 telemetry.fill_from_response(data)
             return data
 
-        if last_quota is not None:
-            raise last_quota
         if last_503 is not None:
             # 뒤 후보가 사용 불가(404)로 끝났어도 앞 모델은 일시 장애였을 뿐이다.
             raise last_503
@@ -1006,7 +898,6 @@ class Summarizer:
         last_error = ""
         last_kind = LLMErrorKind.TRANSIENT
         last_status: int | None = None
-        last_quota: QuotaInfo | None = None
         attempt = 0
         total = self.cfg.max_retries + 1
         while attempt <= self.cfg.max_retries:
@@ -1075,11 +966,6 @@ class Summarizer:
             last_status = resp.status_code
             last_kind = classify_status(resp.status_code)
             last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
-            last_quota = _quota_info(resp) if resp.status_code == 429 else None
-            if last_quota is not None:
-                diagnostic = last_quota.diagnostic()
-                last_error += f" quota={diagnostic}"
-                log.warning("Gemini 할당량 진단 — model=%s %s", model, diagnostic)
 
             # 모델 자체가 없거나 이 프로젝트에 제공되지 않음 → 다음 모델로 넘긴다.
             # (재시도해도 같은 결과이므로 여기서 즉시 빠진다)
@@ -1118,12 +1004,8 @@ class Summarizer:
                     resp.status_code,
                 )
                 break
-            if last_quota is not None and last_quota.persistent:
-                log.warning("일일 한도 또는 할당량 0 — model=%s (같은 모델 재시도 생략)", model)
-                break
             if not self._sleep_before_retry(
-                attempt, deadline, model, last_kind, str(resp.status_code),
-                minimum_wait=last_quota.retry_after_sec if last_quota else 0.0,
+                attempt, deadline, model, last_kind, str(resp.status_code)
             ):
                 break
             attempt += 1
@@ -1133,7 +1015,6 @@ class Summarizer:
             kind=last_kind,
             model=model,
             status=last_status,
-            quota=last_quota,
         )
 
     def _sleep_before_retry(
@@ -1143,8 +1024,6 @@ class Summarizer:
         model: str,
         kind: "LLMErrorKind",
         status: str,
-        *,
-        minimum_wait: float = 0.0,
     ) -> bool:
         """재시도해야 하면 백오프만큼 자고 True. 더 시도하지 않을 상황이면 False.
 
@@ -1163,7 +1042,7 @@ class Summarizer:
             return False
 
         base = self.cfg.retry_backoff_sec * (2**attempt)
-        wait = max(minimum_wait, base + base * random.uniform(0.0, _RETRY_JITTER_RATIO))
+        wait = base + base * random.uniform(0.0, _RETRY_JITTER_RATIO)
         # 백오프 대기 + 최소한의 재요청 시간이 예산 밖이면 재시도를 포기한다.
         if deadline is not None and time.monotonic() + wait + _MIN_CALL_SEC > deadline:
             log.info(
@@ -1236,11 +1115,7 @@ class Summarizer:
         now = time.monotonic()
         wait = self._min_interval - (now - self._last_call)
         if deadline is not None:
-            if wait > max(0.0, deadline - now):
-                # 짧아진 대기로 RPM을 어기거나 sleep의 시계 오차로 마감 직전에
-                # 소켓을 여는 대신 이 요청을 포기한다. _last_call은 갱신하지 않는다.
-                raise LLMCallError("호출 간격 대기에 필요한 시간예산 부족",
-                                   kind=LLMErrorKind.TRANSIENT)
+            wait = min(wait, deadline - now)
         if wait > 0:
             time.sleep(wait)
 

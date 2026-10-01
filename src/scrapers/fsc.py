@@ -28,7 +28,6 @@ from bs4 import BeautifulSoup
 
 from ..fetcher import AttachmentTooLarge
 from ..models import Attachment, Post
-from ..snippet import strip_html
 from .base import BaseScraper, clean_text
 
 log = logging.getLogger(__name__)
@@ -490,9 +489,7 @@ class FscBoardScraper(BaseScraper):
                 or soup.select_one("#content")
             )
             if body_el:
-                # 강조 span/strong마다 줄을 나누면 '되<strong>었</strong>습니다'나
-                # '1,<span>234</span>억원'이 잘린다. 실제 블록/줄바꿈 경계만 보존한다.
-                post.body = clean_text(strip_html(str(body_el)))
+                post.body = clean_text(body_el.get_text("\n"))
             # 목록에 게시일 전용 요소가 없는 레이아웃이면 상세 머리말에서 보강한다.
             # (목록에서 이미 얻었으면 덮어쓰지 않는다.)
             if not post.date:

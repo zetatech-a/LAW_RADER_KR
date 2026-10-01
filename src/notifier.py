@@ -12,8 +12,7 @@ from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
 from .snippet import (
     BodyKind,
     build_assembly_fallback_lines,
-    build_fallback_snippet,
-    build_key_excerpt_lines,
+    build_rule_excerpt_rows,
     classify_body,
 )
 
@@ -116,8 +115,13 @@ def _body_label(p: Post) -> str:
     """AI 요약이 없을 때 쓰는 발췌 블록 제목."""
     if p.source_key == ASSEMBLY_SOURCE_KEY:
         return _ASSEMBLY_BODY_LABEL
-    n = len(build_key_excerpt_lines(p.body, p.title))
+    n = len(_general_excerpt(p))
     return f"{_BODY_LABEL} · 핵심 {n}줄" if n else _BODY_LABEL
+
+
+def _general_excerpt(p: Post) -> list[str]:
+    return [f"{role}: {sentence}" if role != "주요 내용" else sentence
+            for role, sentence in build_rule_excerpt_rows(p.body, p.title)]
 
 
 def _has_summary(*groups: "dict[str, list[Post]] | None") -> bool:
@@ -209,7 +213,7 @@ def _summary_block(p: Post, accent: str) -> str:
 
     if p.body:
         # 의안은 발췌의 출처(제안이유 및 주요내용)를 밝히고, 220자 한 줄 대신 원문에서
-        # 고른 여러 구간을 싣는다. 그 외 소스는 기존과 같이 라벨 없이 한 줄 발췌만.
+        # 고른 여러 구간을 싣는다. 일반 글은 역할별 핵심 원문을 선별한다.
         if p.source_key == ASSEMBLY_SOURCE_KEY:
             lines = _assembly_excerpt(p)
             return _excerpt_block(_body_label(p), lines, accent)
@@ -224,7 +228,7 @@ def _summary_block(p: Post, accent: str) -> str:
                 "<div style='font-size:13px;line-height:1.6;color:#475569'>"
                 f"{_esc(_attachment_only_text(p))}</div></div>"
             )
-        lines = build_key_excerpt_lines(p.body, p.title)
+        lines = _general_excerpt(p)
         if not lines:
             return ""
         return _excerpt_block(_body_label(p), lines, accent)
@@ -453,7 +457,7 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
                 if p.source_key == ASSEMBLY_SOURCE_KEY:
                     lines.extend(f"      {line}" for line in _assembly_excerpt(p))
                 else:
-                    lines.extend(f"      · {line}" for line in build_key_excerpt_lines(p.body, p.title))
+                    lines.extend(f"      · {line}" for line in _general_excerpt(p))
                 lines.append("      원문 문장을 자동으로 선별했습니다.")
             elif _is_pending(p):
                 lines.append(f"    [{_PENDING_LABEL}]")

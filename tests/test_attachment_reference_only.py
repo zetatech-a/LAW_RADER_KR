@@ -309,7 +309,7 @@ def test_general_fallback_rendering_selects_key_sentences():
     assert all(line in html_out for line in selected)
     assert "원문 발췌 · 핵심 3줄" in html_out
     assert "본문 안내" not in html_out
-    assert all(f"      · {line}" in text_out for line in selected)
+    assert all(line in text_out for line in selected)
 
 
 # ── D. 의안 경로 불변 ────────────────────────────────────────────────────────
@@ -588,7 +588,7 @@ def test_mixed_digest_changes_only_the_attachment_only_card():
     snippet = build_fallback_snippet(NORMAL_BODY, TITLE)
     from src.snippet import build_key_excerpt_lines
     selected = build_key_excerpt_lines(NORMAL_BODY, TITLE)
-    assert all(f"      · {line}" in text_out for line in selected)
+    assert all(line in text_out for line in selected)
     assert all(line in html_out for line in selected)
     assert "    [AI 3줄 요약]\n      · 요약 1\n      · 요약 2\n      · 요약 3\n" in text_out
     assert html_out.count("본문 안내") == 1
