@@ -582,49 +582,104 @@ _KEY_TARGET = re.compile(r"대상|금융회사|금융기관|은행|보험사|보
 _KEY_TIMING = re.compile(r"시행|적용|예정|기한|까지|부터|의견|입법예고|행정예고")
 _KEY_FACT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원|년|월|일|명|개|건)")
 _KEY_AMOUNT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원)")
-_KEY_BULLET = re.compile(r"^(?:[□○ㅇ•▪▶]+\s*|[-–—]\s+|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)]\s+)")
+_KEY_BULLET = re.compile(r"^(?:[□○ㅇ•▪▶①-⑳❶-❿➊-➓]+\s*|[-–—]\s+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)]\s+)")
 _KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
 _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
 _KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:(?:목록|\(\s*\d+\s*\))(?=\s|첨부|$)|$)")
-_KEY_SENTENCE_BOUNDARY = re.compile(
-    r"(?<=[.!?…])\s+|(?<=[가-힣A-Za-z][.!?…])(?=[가-힣])|(?<=[다함임음요][.!?])(?=\d)"
-)
+_KEY_TERMINAL = re.compile(r'''[가-힣A-Za-z]\s*[.!?…]+["'”’」』)\]】》]*(?=\s|[가-힣0-9]|$)''')
 _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "이를", "이번", "통해", "관련", "따라", "것으로", "하도록"})
 
 # 역할 판단은 발췌 출력에만 적용한다. Gemini 입력·호출·재시도에는 사용하지 않는다.
 _RULE_CHANGE = re.compile(r"개정|신설|폐지|삭제|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지")
 _RULE_HISTORY = re.compile(r"^(?:현행(?:법|규정|제도)?(?:은|는)|기존(?:에는|의)|지난|당시|그간)")
-_RULE_NEW_ACTION = re.compile(r"(?:개정|신설|폐지|삭제|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지)\s*(?:한다|함|하기로|할 예정|된다|됨)")
+_RULE_NEW_CLAUSE = re.compile(r"(?:그러나|하지만|이에\s*따라|개정안(?:은|에서는)|앞으로는|이번\s*개정안은).{0,120}(?:개정|신설|폐지|삭제|도입|확대|축소|강화|완화|금지)\s*(?:하|한|함|되|됨|할|해|했)")
 _RULE_CHANGE_PREDICATE = re.compile(r"(?:개정|신설|폐지|삭제|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지)\s*(?:하|한|함|되|됨|할|해|했|를|을)")
 _RULE_CONDITION = re.compile(r"대상(?:은|는|으로)|적용\s*대상|기준(?:은|는)|조건|요건|이상|이하|초과|미만|한도|다만|제외|예외")
 _RULE_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일|\d+\s*영업일|\d+\s*개월|오늘|내일|내년|올해|즉시|공포한 날")
+_RULE_CALENDAR_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일")
 _RULE_SCHEDULE = re.compile(r"시행|적용|접수|신청|제출|모집|판매|공표|공포|기한|마감")
 _RULE_TIME_BOUND = re.compile(
-    rf"(?:{_RULE_DATE.pattern}).{{0,24}}(?:부터|까지|예정|마감|시행|접수|신청|제출|경과)"
+    rf"(?:{_RULE_DATE.pattern}).{{0,16}}(?:부터|까지|마감|경과)"
+    rf"|(?:{_RULE_DATE.pattern})\s*(?:[.)]\s*)*(?:에|부터|이후|후)?\s*(?:시행|적용|판매|접수|신청|제출|마감)"
     rf"|(?:시행일|기한|마감일|접수기간).{{0,12}}(?:{_RULE_DATE.pattern})"
 )
 _RULE_PAST_EVENT = re.compile(r"개최하였|개최했|개최하였다|논의하였|논의했다|발표일|배포일|등록일|게시일")
+_RULE_PAST_PREDICATE = re.compile(r"(?:됐|했|하였|되었|받았|끝났|종료됐|완료됐|재개됐|시작됐|개시됐|소진됐|출시됐)|(?:판매|재개|시작|종료|공급)\s*되\s*었")
+_RULE_FUTURE = re.compile(r"예정|계획|시행(?:한다|함|된다|됨)|(?:재개|시작|개시|판매|공급|접수|신청)\s*(?:한다|할|함|된다|됨|가능)|부터.{0,12}(?:적용|제출|접수|신청)")
 _RULE_STAT_TITLE = re.compile(r"현황|동향|통계|실적|결과|판매")
 _RULE_STAT_FACT = re.compile(r"공급|판매|증가|감소|잔여|소진|총|목표|비율|수익|손실|규모")
 
+# 소제목은 정확한 짧은 형태만 인정한다. 같은 낱말을 포함한 본문은 버리지 않는다.
+_EXCERPT_HEADINGS = (
+    ("배경", re.compile(r"(?:추진\s*배경|제안\s*이유|배경|현행\s*제도)")),
+    ("변경 내용", re.compile(r"(?:개정|변경|개선)\s*(?:내용|사항)|주요\s*개정\s*내용")),
+    ("대상·조건", re.compile(r"(?:(?:적용|지원|신청)\s*대상|대상\s*(?:및|·)\s*(?:요건|조건)|지원\s*요건)")),
+    ("시행·기한", re.compile(r"(?:시행\s*(?:일|시기|일정)|적용\s*시기|(?:의견\s*)?제출\s*기한|(?:신청|접수|입법예고)\s*기간|향후\s*(?:일정|계획))")),
+    ("주요 현황", re.compile(r"(?:주요\s*)?(?:판매|공급|모집)\s*(?:결과|현황|실적)|주요\s*현황")),
+    ("주요 내용", re.compile(r"주요\s*내용|제안이유\s*및\s*주요내용|기대\s*효과")),
+)
+_EXCERPT_PARTICLE = re.compile(r"^(?:은|는|이|가|을|를|의|와|과|으로|로|에서|에게|간|부터|까지)(?:\s*[.,])?$")
+_EXCERPT_VERB_STEM = re.compile(r"(?:신설|폐지|개정|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지|판매|출시|공급|모집|소진|적용|시행)$")
+_EXCERPT_VERB_SUFFIX = re.compile(r"^(?:되|되어|되었으며|되었다|된다|됩니다|됨|될|된|하|하고|하며|한다|함|하였다|합니다|되는|되고|될 예정)(?:[.,])?$")
+_EXCERPT_ENDING = re.compile(r"^(?:었습니다|었으며|었다|었고|습니다|며|이며|입니다|이다)(?:\s*[.,])?$")
 
-def _excerpt_roles(title: str, candidates: list[str]) -> tuple[str, ...]:
+
+def _excerpt_heading(line: str) -> str:
+    text = _KEY_BULLET.sub("", line, count=1).strip().rstrip(":：")
+    for role, pattern in _EXCERPT_HEADINGS:
+        if pattern.fullmatch(text):
+            return role
+    return ""
+
+
+def _join_excerpt_parts(parts: list[str], title: str = "") -> str:
+    """출력 전용: 별도 줄의 조사·활용 어미와 명백한 숫자 조각만 이어 붙인다."""
+    text = ""
+    for part in parts:
+        join = bool(text and (
+            (_EXCERPT_PARTICLE.fullmatch(part) and re.search(r"[가-힣)\]]$", text))
+            or (re.match(r"^(?:은|는|을|를|의|으로|로|에서)(?=\s|[\[(])", part)
+                and re.search(r"[가-힣)\]]$", text))
+            or (_EXCERPT_VERB_STEM.search(text) and _EXCERPT_VERB_SUFFIX.fullmatch(part))
+            or (text.endswith(("되", "하", "이")) and _EXCERPT_ENDING.fullmatch(part))
+            or (re.search(r"[가-힣0-9%)\]]$", text) and re.fullmatch(r"(?:이다|이며|입니다)(?:\s*[.,])?", part))
+            or (re.search(r"\d,$", text) and re.match(r"\d{3}(?:\D|$)", part))
+        ))
+        text += ("" if join or not text else " ") + part
+    # 숫자 사이 공백·부호는 그대로 둔다. 괄호와 문장부호의 형식 공백만 정리한다.
+    text = re.sub(r"([\[(])\s+", r"\1", text)
+    text = re.sub(r"\s+([\])])", r"\1", text)
+    # 제목에 실제로 존재하는 복합어만 복원한다. 임의의 한국어 단어는 합치지 않는다.
+    for word in re.findall(r"[가-힣]{4,}", title):
+        end = r"(?=$|[^가-힣]|(?:은|는|이|가|을|를|의|와|과|으로|로|에서|에게|부터|까지)(?:$|[^가-힣]))"
+        pattern = r"(?<![가-힣])" + r"\s*".join(word) + end
+        text = re.sub(pattern, word, text)
+    return re.sub(r"(?<=[가-힣A-Za-z)\]])\s+([.,!?])", r"\1", text)
+
+
+def _excerpt_roles(title: str, candidates: list[str], sections: list[str]) -> tuple[str, ...]:
     """문서 유형별 질문. 유형이 불명확하면 일반 중요도 선별로 돌아간다."""
     if _RULE_CHANGE.search(title):
         return ("변경 내용", "대상·조건", "시행·기한")
     if _RULE_STAT_TITLE.search(title) and any(_KEY_FACT.search(s) for s in candidates):
         return ("주요 현황", "세부 수치", "후속 일정")
+    if any(section in ("변경 내용", "대상·조건", "시행·기한") for section in sections):
+        return ("변경 내용", "대상·조건", "시행·기한")
     if any(_RULE_CHANGE.search(s) and not _RULE_HISTORY.search(s) for s in candidates):
         return ("변경 내용", "대상·조건", "시행·기한")
     return ()
 
 
-def _role_strength(label: str, sentence: str) -> int:
+def _role_strength(label: str, sentence: str, section: str = "") -> int:
     if sentence.startswith(("*", "※")) or re.search(r"배경을 설명|감사 인사|간담회를 개최", sentence):
         return 0
+    if label in ("변경 내용", "대상·조건") and _RULE_HISTORY.search(sentence) and not _RULE_NEW_CLAUSE.search(sentence):
+        return 0
     if label == "변경 내용":
-        if _RULE_HISTORY.search(sentence) and not _RULE_NEW_ACTION.search(sentence):
+        if section == "배경" and not _RULE_NEW_CLAUSE.search(sentence):
             return 0
+        if section == label:
+            return 6
         if _RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence) and not _RULE_CHANGE_PREDICATE.search(sentence):
             return 0
         if _RULE_CHANGE_PREDICATE.search(sentence):
@@ -634,12 +689,19 @@ def _role_strength(label: str, sentence: str) -> int:
         # 예외는 변경 문장과 함께 읽어야 하므로 별도 조건 문장으로 우선한다.
         if re.match(r"^(?:다만|단,|예외)", sentence):
             return 8
-        return 4 if _RULE_CONDITION.search(sentence) else 0
+        return 4 if section == label or _RULE_CONDITION.search(sentence) else 0
     if label in ("시행·기한", "후속 일정"):
         # 날짜만으로 시행일이라 부르지 않는다. 회의/발표일도 일정으로 바꾸지 않는다.
-        return 6 if (_RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence)
-                     and _RULE_TIME_BOUND.search(sentence)
-                     and not _RULE_PAST_EVENT.search(sentence)) else 0
+        if _RULE_PAST_EVENT.search(sentence):
+            return 0
+        if label == "후속 일정" and (
+            _RULE_PAST_PREDICATE.search(sentence) and not _RULE_FUTURE.search(sentence)
+        ):
+            return 0
+        return 6 if (_RULE_DATE.search(sentence) and (
+            (section == "시행·기한" and (_RULE_CALENDAR_DATE.search(sentence) or _RULE_TIME_BOUND.search(sentence)))
+            or (_RULE_SCHEDULE.search(sentence) and _RULE_TIME_BOUND.search(sentence))
+        )) else 0
     if label in ("주요 현황", "세부 수치"):
         return 4 if _KEY_FACT.search(sentence) and _RULE_STAT_FACT.search(sentence) else 0
     return 0
@@ -650,19 +712,16 @@ def _key_tokens(text: str) -> set[str]:
 
 
 def _key_sentences(text: str) -> list[str]:
-    """문장부호 앞 공백도 처리하되 날짜/소수점/열거 라벨의 마침표는 보존한다."""
+    """닫는 따옴표/괄호까지 문장에 포함하고 날짜·소수점·열거 표식은 보존한다."""
     sentences: list[str] = []
-    pending = ""
-    for piece in _KEY_SENTENCE_BOUNDARY.split(text):
-        pending = f"{pending} {piece}".strip() if pending else piece
-        before_punctuation = pending[:-1].rstrip()
-        if (pending[-1:] in ".!?…" and before_punctuation
-                and before_punctuation[-1].isalpha()
-                and not _ENUMERATION_LABEL.fullmatch(pending)):
-            sentences.append(pending)
-            pending = ""
-    if pending:
-        sentences.append(pending)
+    start = 0
+    for match in _KEY_TERMINAL.finditer(text):
+        sentence = text[start:match.end()].strip()
+        if not _ENUMERATION_LABEL.fullmatch(sentence):
+            sentences.append(sentence)
+            start = match.end()
+    if text[start:].strip():
+        sentences.append(text[start:].strip())
     return sentences
 
 
@@ -690,19 +749,30 @@ def build_rule_excerpt_rows(
             if not title_key.startswith(prefix):
                 break
     # 문장 도중의 HTML/span 줄바꿈은 합치고, 실제 항목 시작만 경계로 보존한다.
-    paragraphs: list[str] = []
+    paragraphs: list[tuple[str, str]] = []
     pending: list[str] = []
+    section = ""
+
+    def flush() -> None:
+        if pending:
+            paragraphs.append((section, _join_excerpt_parts(pending, title)))
+            pending.clear()
+
     for line in lines:
         if _KEY_ATTACHMENT_LIST.match(line) and pending:
             break
+        # 무종결 소제목 뒤에서 배경 문단이 시작하는 경우 둘을 한 문장으로 합치지 않는다.
+        if _RULE_HISTORY.match(line) and pending:
+            flush()
+        heading = _excerpt_heading(line)
+        if heading:
+            flush()
+            section = heading
+            continue
         if _KEY_HEADING.fullmatch(line) and (
             not pending or pending[-1].endswith((".", "!", "?", "…"))
         ):
-            continue
-        if re.match(r"^[ⅠⅡⅢⅣⅤ]\.\s+", line):
-            if pending:
-                paragraphs.append(" ".join(pending))
-                pending = []
+            flush()
             continue
         section_start = bool(_KEY_SECTION_START.match(line))
         if re.fullmatch(r"\*+", line):
@@ -710,14 +780,18 @@ def build_rule_excerpt_rows(
             # 쓰면 '의무 * 를 신설한다'가 잘려 법적 효과가 사라진다.
             section_start = bool(pending and pending[-1].endswith((".", "!", "?", "…")))
         if (_KEY_BULLET.match(line) or section_start) and pending:
-            paragraphs.append(" ".join(pending))
-            pending = []
-        pending.append(line)
-    if pending:
-        paragraphs.append(" ".join(pending))
+            flush()
+        if re.match(r"^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]", line):
+            section = ""
+        # 순서 표식만 벗기고 뒤의 실질 문장을 보존한다(로마 숫자 포함).
+        content = _KEY_BULLET.sub("", line, count=1).strip()
+        if content:
+            pending.append(content)
+    flush()
 
     candidates: list[str] = []
-    for paragraph in paragraphs:
+    sections: list[str] = []
+    for context, paragraph in paragraphs:
         for sentence in _key_sentences(paragraph):
             sentence = _KEY_BULLET.sub("", sentence, count=1).strip()
             if (not sentence or _KEY_HEADING.fullmatch(sentence)
@@ -731,6 +805,7 @@ def build_rule_excerpt_rows(
                 continue
             if sentence not in candidates:
                 candidates.append(sentence)
+                sections.append(context)
     if not candidates:
         return []
 
@@ -743,6 +818,9 @@ def build_rule_excerpt_rows(
                                     ("amount", _KEY_AMOUNT))
          if pattern.search(s)} for s in candidates
     ]
+    for i, flags in enumerate(features):
+        if not _role_strength("시행·기한", candidates[i], sections[i]):
+            flags.discard("timing")
     weights = {"action": 5, "target": 2, "timing": 3, "fact": 2, "amount": 2}
     scores = [
         sum(weights[f] for f in features[i])
@@ -754,13 +832,16 @@ def build_rule_excerpt_rows(
         - (4 if re.search(r"예\s*:", candidates[i]) else 0)
         - (2 if re.search(r"그간|문제점|지적되어", candidates[i]) else 0)
         - (4 if re.search(r"배경을 설명|감사 인사|간담회를 개최", candidates[i]) else 0)
+        - (6 if re.search(r"논의해갈|점검하고|논의할 계획|논의를 지속", candidates[i]) else 0)
         - min(5, max(0, len(candidates[i]) - max_line_chars) / max_line_chars)
+        + (5 if sections[i] and sections[i] != "배경" else 0)
+        - (8 if sections[i] == "배경" else 0)
         for i in range(len(candidates))
     ]
     selected: list[int] = []
     labels: dict[int, str] = {}
     covered: set[str] = set()
-    roles = _excerpt_roles(title, candidates)
+    roles = _excerpt_roles(title, candidates, sections)
 
     def is_duplicate(i: int) -> bool:
         # 수치가 다른 문장은 별개 사실이므로 중복으로 버리지 않는다.
@@ -770,14 +851,14 @@ def build_rule_excerpt_rows(
 
     for role in roles[:max_lines]:
         eligible = [i for i, s in enumerate(candidates)
-                    if i not in selected and not is_duplicate(i) and _role_strength(role, s)]
+                    if i not in selected and not is_duplicate(i) and _role_strength(role, s, sections[i])]
         if role in ("대상·조건", "주요 현황", "세부 수치"):
             # 구체적인 시행 일정은 일정 역할에 남긴다. 예외 문장은 조건에서 유지한다.
-            non_schedule = [i for i in eligible if not _role_strength("시행·기한", candidates[i])]
+            non_schedule = [i for i in eligible if not _role_strength("시행·기한", candidates[i], sections[i])]
             eligible = non_schedule or eligible
         if not eligible:
             continue
-        best = max(eligible, key=lambda i: scores[i] + 3 * _role_strength(role, candidates[i]))
+        best = max(eligible, key=lambda i: scores[i] + 3 * _role_strength(role, candidates[i], sections[i]))
         selected.append(best)
         labels[best] = role
         covered.update(features[best])

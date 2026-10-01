@@ -12,6 +12,7 @@ from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
 from .snippet import (
     BodyKind,
     build_assembly_fallback_lines,
+    build_fallback_snippet,
     build_rule_excerpt_rows,
     classify_body,
 )
@@ -453,12 +454,16 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
                 lines.append(f"    [{_ATTACHMENT_ONLY_LABEL}]")
                 lines.append(f"      {_attachment_only_text(p)}")
             elif p.body:
-                lines.append(f"    [{_body_label(p)}]")
                 if p.source_key == ASSEMBLY_SOURCE_KEY:
-                    lines.extend(f"      {line}" for line in _assembly_excerpt(p))
+                    excerpt = _assembly_excerpt(p)
+                    prefix = "      "
                 else:
-                    lines.extend(f"      · {line}" for line in _general_excerpt(p))
-                lines.append("      원문 문장을 자동으로 선별했습니다.")
+                    excerpt = _general_excerpt(p)
+                    prefix = "      · "
+                if excerpt:
+                    lines.append(f"    [{_body_label(p)}]")
+                    lines.extend(f"{prefix}{line}" for line in excerpt)
+                    lines.append("      원문 문장을 자동으로 선별했습니다.")
             elif _is_pending(p):
                 lines.append(f"    [{_PENDING_LABEL}]")
                 lines.append(f"      {_PENDING_TEXT}")

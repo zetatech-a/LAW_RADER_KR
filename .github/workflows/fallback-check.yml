@@ -6,6 +6,7 @@ on:
       - 'src/snippet.py'
       - 'src/notifier.py'
       - 'tests/**'
+      - 'requirements.txt'
       - '.github/workflows/fallback-check.yml'
   workflow_dispatch:
 

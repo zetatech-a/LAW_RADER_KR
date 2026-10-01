@@ -1,4 +1,8 @@
 """AI 요약 실패 후 표시하는 규칙 기반 발췌 회귀 테스트."""
+import pytest
+import json
+from pathlib import Path
+
 from src.snippet import build_key_excerpt_lines, build_rule_excerpt_rows
 from src.notifier import build_html, build_text
 from test_summarizer import _post
@@ -64,16 +68,16 @@ def test_fragmented_site_body_ignores_attachment_list_and_preserves_reference():
             "첨부파일 (2)\n첨부파일 목록\nreport.pdf\n파일다운로드")
     lines = build_key_excerpt_lines(body)
     assert len(lines) == 3
-    assert "신설한다 ." in lines[0]
+    assert "신설한다." in lines[0]
     assert "1,234억원" in lines[1]
-    assert "[ 붙임 ]" in lines[2]
+    assert "[붙임]" in lines[2]
     assert "파일다운로드" not in " ".join(lines)
 
 
 def test_inline_stars_do_not_detach_the_action_from_its_subject():
     body = "금융회사의\n보고 의무\n*\n를 폐지한다\n.\n*\n가상 규정 부칙"
     lines = build_key_excerpt_lines(body)
-    assert lines[0] == "금융회사의 보고 의무 * 를 폐지한다 ."
+    assert lines[0] == "금융회사의 보고 의무 * 를 폐지한다."
 
 
 def test_numeric_table_does_not_displace_policy_sentences():
@@ -191,3 +195,161 @@ def test_todays_discussion_does_not_invent_an_effective_date():
             "오늘 함께 논의된 리서치 제도 종합 개선방안이 현장에서 차질없이 시행되고 안착될 수 있도록 소통할 예정이다.")
     rows = build_rule_excerpt_rows(body, "보고 의무 신설")
     assert all(role != "시행·기한" for role, _ in rows)
+
+
+def test_assembly_empty_selection_keeps_bounded_fallback():
+    from src.models import ASSEMBLY_SOURCE_KEY
+    post = _post(body="가. 나.")
+    post.source_key = ASSEMBLY_SOURCE_KEY
+    for rendered in (build_html({post.source_name: [post]}), build_text({post.source_name: [post]})):
+        assert "가. 나." in rendered
+        assert "제안이유 및 주요내용 발췌" in rendered
+
+
+def test_empty_filtered_general_body_has_no_false_selection_notice():
+    post = _post(body="금융회사 통계 " + " ".join(str(i) for i in range(30)))
+    for rendered in (build_html({post.source_name: [post]}), build_text({post.source_name: [post]})):
+        assert post.url in rendered
+        assert "원문 발췌" not in rendered
+        assert "자동으로 선별" not in rendered
+
+
+@pytest.mark.parametrize("ending", ["재개됐다.", "재개되었습니다.", "재개되었다.", "시작했다.", "종료하였습니다."])
+def test_completed_sales_are_not_followup_schedules(ending):
+    body = "온라인 판매는 10월 8일부터 " + ending
+    assert all(role != "후속 일정" for role, _ in build_rule_excerpt_rows(body, "판매 결과"))
+
+
+@pytest.mark.parametrize("history", [
+    "현행법은 은행의 판매를 금지한다.",
+    "기존에는 은행의 판매를 금지한다.",
+    "현행법은 새로 가입한 은행의 판매를 금지한다.",
+])
+def test_present_tense_current_law_is_not_a_change(history):
+    rows = build_rule_excerpt_rows(history + " 보험회사에 월별 보고 의무를 신설한다.", "보고 의무 신설")
+    assert rows[0] == ("변경 내용", "보험회사에 월별 보고 의무를 신설한다.")
+    assert all(role != "변경 내용" or text != history for role, text in rows)
+
+
+def test_current_law_with_explicit_new_clause_keeps_the_actual_change():
+    text = "현행법은 은행의 판매를 금지한다. 그러나 개정안에서는 보고 의무를 신설한다."
+    assert build_rule_excerpt_rows(text, "보고 의무 신설")[0] == (
+        "변경 내용", "그러나 개정안에서는 보고 의무를 신설한다.")
+
+
+def test_genuine_new_clause_in_background_section_is_still_selected():
+    body = "추진 배경\n현행법은 은행의 판매를 금지한다. 그러나 개정안에서는 보고 의무를 신설한다."
+    assert build_rule_excerpt_rows(body, "보고 의무 신설")[0] == (
+        "변경 내용", "그러나 개정안에서는 보고 의무를 신설한다.")
+
+
+@pytest.mark.parametrize("close", ["”", "’", "\"", "'", ")", "]", "」", "』"])
+def test_quoted_or_bracketed_sentence_endings_are_separate(close):
+    body = f"은행의 보고 의무를 신설한다.{close} 적용 대상은 보험회사이다. 2027년부터 시행한다."
+    lines = build_key_excerpt_lines(body, "보고 의무 신설")
+    assert len(lines) == 3
+    assert lines[0] == f"은행의 보고 의무를 신설한다.{close}"
+    assert "보험회사" in lines[1]
+    assert "2027년" in lines[2]
+
+
+@pytest.mark.parametrize("marker", ["Ⅰ.", "Ⅱ.", "Ⅴ.", "Ⅵ.", "①", "➌"])
+def test_enumeration_preserves_the_policy_content(marker):
+    assert build_key_excerpt_lines(marker + " 은행의 보고 의무를 신설한다.") == [
+        "은행의 보고 의무를 신설한다."]
+
+
+def test_headings_supply_context_and_separate_unpunctuated_items():
+    body = ("Ⅰ. 추진 배경\n현행법은 은행의 판매를 금지한다.\n"
+            "Ⅱ. 변경 내용\n은행의 보고 범위 확대\n"
+            "적용 대상:\n은행과 보험회사\n"
+            "시행 일정\n2027년 1월 1일부터\n")
+    assert build_rule_excerpt_rows(body, "보고 제도 안내") == [
+        ("변경 내용", "은행의 보고 범위 확대"),
+        ("대상·조건", "은행과 보험회사"),
+        ("시행·기한", "2027년 1월 1일부터")]
+
+
+def test_headings_do_not_delete_substantive_lines_containing_heading_words():
+    body = "Ⅰ. 적용 대상은 은행이며 보고 의무를 신설한다.\nⅡ. 시행 일정은 2027년부터이다."
+    lines = build_key_excerpt_lines(body)
+    assert any("보고 의무를 신설한다" in line for line in lines)
+    assert any("2027년" in line for line in lines)
+
+
+def test_roman_new_section_does_not_inherit_background_role():
+    body = "추진 배경\n현행법은 은행의 판매를 금지한다.\nⅡ. 보험회사의 보고 의무를 신설한다."
+    assert build_rule_excerpt_rows(body, "보고 의무 신설")[0] == (
+        "변경 내용", "보험회사의 보고 의무를 신설한다.")
+
+
+def test_fragment_joining_improves_readability_without_changing_input():
+    body = ("은행\n은\n보고 의무를\n신설\n한다\n.\n"
+            "보고 기준\n은\n1,\n234억원\n이며\n수익률은\n-3.5%\n이다\n.\n"
+            "개정 규정은\n2027년\n부터\n시행\n된다\n.")
+    lines = build_key_excerpt_lines(body, "보고 의무 신설")
+    assert lines == ["은행은 보고 의무를 신설한다.",
+                     "보고 기준은 1,234억원이며 수익률은 -3.5%이다.",
+                     "개정 규정은 2027년부터 시행된다."]
+    assert "\n" in body  # 정돈은 출력에만 적용한다.
+
+
+def test_number_cells_and_negation_are_not_joined_or_removed():
+    body = "자산은\n100\n200\n억원이며\n-3.5%\n이하인 회사에는 적용하지 않는다."
+    line = build_key_excerpt_lines(body)[0]
+    assert "100 200" in line
+    assert "-3.5%" in line
+    assert "적용하지 않는다" in line
+
+
+def test_plan_heading_does_not_turn_todays_discussion_into_schedule():
+    body = ("변경 내용\n은행의 보고 의무를 신설한다.\n향후 계획\n"
+            "오늘 함께 논의된 리서치 제도 종합 개선방안이 현장에서 차질없이 시행되고 안착될 수 있도록 소통할 예정이다.")
+    assert all(role != "시행·기한" for role, _ in build_rule_excerpt_rows(body))
+
+
+def test_background_under_a_long_heading_does_not_become_target_conditions():
+    body = ("Ⅱ.\n리서치의 독립성 강화\n그간 매도의견은 1% 미만으로 낮은 신뢰도가 지적되어 왔다.\n"
+            "➌\nIPO 대상 법인의 리서치 공표 의무를 3년간 매년 2회 이상으로 강화한다.")
+    rows = build_rule_excerpt_rows(body, "리서치 의무 강화")
+    assert not any(role == "대상·조건" and "낮은 신뢰도" in text for role, text in rows)
+    assert any("3년간" in text for _, text in rows)
+
+
+def test_title_anchored_compound_restoration_does_not_join_arbitrary_words():
+    body = "국민참여\n성장펀드\n의\n잔\n여물량은\n6,000억원이다."
+    line = build_key_excerpt_lines(body, "국민참여성장펀드 잔여물량")[0]
+    assert "국민참여성장펀드의" in line
+    assert "잔여물량은" in line
+    assert "6,000억원" in line
+    assert "시장 상황" in build_key_excerpt_lines("시장\n상황을 점검한다.")[0]
+
+
+def _fsc_corpus():
+    return json.loads((Path(__file__).parent / 'fixtures/excerpts/fsc_posts.json').read_text(encoding='utf-8'))
+
+
+def test_real_fsc_sales_retains_facts_and_improves_fragmented_words():
+    post = next(p for p in _fsc_corpus() if p['post_id'] == '87825')
+    rows = build_rule_excerpt_rows(post['body'], post['title'])
+    assert [role for role, _ in rows] == ['주요 현황', '세부 수치', '후속 일정']
+    text = ' '.join(s for _, s in rows)
+    for fact in ('6,000억원', '2,140억원', '35.7%', '60%', '10.7일', '10.8일'):
+        assert fact in text
+    assert '국민참여성장펀드' in text
+    assert '출시되었습니다' in text
+    assert '잔여물량 현황은' in text
+    assert '파일다운로드' not in text
+    assert all(len(s) <= 300 for _, s in rows)
+
+
+def test_real_fsc_research_retains_obligation_and_statistics_without_false_date():
+    post = next(p for p in _fsc_corpus() if p['post_id'] == '87831')
+    rows = build_rule_excerpt_rows(post['body'], post['title'])
+    text = ' '.join(s for _, s in rows)
+    for fact in ('3년간 매년 2회', '1년간 2회', '11.6조원', '2.0조원', '20.4%'):
+        assert fact in text
+    assert any(role == '대상·조건' and 'IPO' in s for role, s in rows)
+    assert all(role != '시행·기한' for role, _ in rows)
+    assert '협회규정 ➌' not in text
+    assert '그간 증권사' not in text
