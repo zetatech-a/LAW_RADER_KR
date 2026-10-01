@@ -5,6 +5,7 @@ on:
     paths:
       - 'src/snippet.py'
       - 'src/notifier.py'
+      - 'src/reply_excerpt.py'
       - 'tests/**'
       - 'requirements.txt'
       - '.github/workflows/fallback-check.yml'

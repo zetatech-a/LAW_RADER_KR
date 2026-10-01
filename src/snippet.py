@@ -577,37 +577,45 @@ def build_fallback_snippet(
 
 # 외부 모델 없이 원문 문장을 고르는 추출식 요약. 새 문장을 생성하거나 법적 효과를
 # 추론하지 않는다. 변경 내용/대상/일정을 우선하고 중복을 줄여 최대 세 줄을 표시한다.
-_KEY_ACTION = re.compile(r"개정|신설|폐지|삭제|도입|확대|축소|강화|완화|의무|금지|과징금|제재|의결|시행|적용|인상|인하|상향|하향|추진|개선")
+# 일반 발췌와 의안이 공유하는 행위어. 본문에서는 술어 형태를 함께 확인한다.
+_REGULATORY_ACTIONS = ("개정", "신설", "폐지", "삭제", "도입", "확대", "축소",
+                       "강화", "완화", "인상", "인하", "상향", "하향", "금지",
+                       "허용", "제한", "면제", "부과", "유예", "연장", "단축", "의무화")
+_ACTION_ALT = "|".join(_REGULATORY_ACTIONS)
+_EFFECTIVE_ACTION = r"시행|적용|발효|효력이\s*발생|효력을\s*가[지진]"
+_KEY_ACTION = re.compile(rf"{_ACTION_ALT}|의무|과징금|제재|의결|{_EFFECTIVE_ACTION}|추진|개선")
 _KEY_TARGET = re.compile(r"대상|금융회사|금융기관|은행|보험사|보험회사|소비자|투자자|사업자|기업|이용자|개인정보|신용정보")
-_KEY_TIMING = re.compile(r"시행|적용|예정|기한|까지|부터|의견|입법예고|행정예고")
+_KEY_TIMING = re.compile(rf"{_EFFECTIVE_ACTION}|예정|기한|까지|부터|의견|입법예고|행정예고")
 _KEY_FACT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원|년|월|일|명|개|건)")
 _KEY_AMOUNT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원)")
-_KEY_BULLET = re.compile(r"^(?:[□○ㅇ•▪▶①-⑳❶-❿➊-➓]+\s*|[-–—]\s+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)]\s+)")
+_KEY_BULLET = re.compile(r"^(?:[□○ㅇ•▪▶①-⑳❶-❿➊-➓]+\s*|[-–—]\s+(?!\s*\d)|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)]\s+)")
 _KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
 _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
 _KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:(?:목록|\(\s*\d+\s*\))(?=\s|첨부|$)|$)")
-_KEY_TERMINAL = re.compile(r'''[가-힣A-Za-z0-9%)\]」』】》]\s*[.!?…]+["'”’」』)\]】》]*(?=\s|[가-힣0-9]|$)''')
+_KEY_TERMINAL = re.compile(r'''[가-힣A-Za-z0-9%)\]」』】》]\s*[.!?…]+["'”’」』)\]】》]*(?=\s|[가-힣A-Za-z0-9]|$)''')
+_KEY_URL = re.compile(r"(?:https?://|www\.)[^\s<>]+")
+_KEY_ABBREVIATION = re.compile(r"\b(?:[A-Za-z]\.){2,}|\b(?:Dr|Mr|Mrs|Ms|Prof|No|Inc|Ltd|Co)\.", re.I)
 _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "이를", "이번", "통해", "관련", "따라", "것으로", "하도록"})
 
 # 역할 판단은 발췌 출력에만 적용한다. Gemini 입력·호출·재시도에는 사용하지 않는다.
-_RULE_CHANGE = re.compile(r"개정|신설|폐지|삭제|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지")
-_RULE_HISTORY = re.compile(r"^(?:현행(?:법|규정|제도)?(?:은|는)|기존(?:에는|의)|지난|당시|그간)")
-_RULE_NEW_CLAUSE = re.compile(r"(?:그러나|하지만|이에\s*따라|개정안(?:은|에서는)|앞으로는|이번\s*개정안은).{0,120}(?:개정|신설|폐지|삭제|도입|확대|축소|강화|완화|금지)\s*(?:하|한|함|되|됨|할|해|했)")
-_RULE_CHANGE_PREDICATE = re.compile(r"(?:개정|신설|폐지|삭제|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지)\s*(?:하|한|함|되|됨|할|해|했|를|을)")
+_RULE_CHANGE = re.compile(rf"(?:{_ACTION_ALT})(?![가-힣])")
+_RULE_HISTORY = re.compile(r"^(?:현행(?=\s|법|규정|제도|은|는)|현재\s*(?:제도|규정|법)|종전(?:에는|에|의|\s)|기존(?:에는|의|\s*(?:제도|규정|법))|지난|당시|그간)")
+_RULE_NEW_CLAUSE = re.compile(rf"(?:그러나|하지만|이에\s*따라|개정안(?:은|에서는)|앞으로는|이번\s*개정안은).{{0,120}}(?:{_ACTION_ALT})\s*(?:하|한|함|되|됨|할|해|했)")
+_RULE_CHANGE_PREDICATE = re.compile(rf"(?:{_ACTION_ALT})\s*(?:하|한|함|되|됨|할|해|했|를|을)")
 _RULE_CONDITION = re.compile(r"대상(?:은|는|으로|\s*(?:회사|법인|기업|기관|사업자))|적용\s*(?:대상|회사|기업|기관|사업자)|기준(?:은|는)|조건|요건|한도|다만|제외|예외")
 _RULE_THRESHOLD = re.compile(r"\d[\d,.]*\s*(?:억원|조원|원|%|명|건|개)?\s*(?:이상|이하|초과|미만)(?:인|의|에 해당하는)?\s*(?:회사|기업|기관|은행|사업자|소비자|투자자|이용자|경우|때)")
 _KEY_NUMERIC_CELLS = re.compile(r"(?:^|\s)[-−△]?\d[\d,.]*%?(?:\s+[-−△]?\d[\d,.]*%?){3}")
 _RULE_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일|\d+\s*영업일|\d+\s*개월|오늘|내일|내년|올해|즉시|공포한 날")
 _RULE_CALENDAR_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일")
-_RULE_SCHEDULE = re.compile(r"시행|적용|접수|신청|제출|모집|판매|공표|공포|기한|마감")
+_RULE_SCHEDULE = re.compile(rf"{_EFFECTIVE_ACTION}|접수|신청|제출|모집|판매|공표|공포|기한|마감")
 _RULE_TIME_BOUND = re.compile(
     rf"(?:{_RULE_DATE.pattern}).{{0,16}}(?:부터|까지|마감|경과)"
-    rf"|(?:{_RULE_DATE.pattern})\s*(?:[.)]\s*)*(?:에|부터|이후|후)?\s*(?:시행|적용|판매|접수|신청|제출|마감)"
+    rf"|(?:{_RULE_DATE.pattern})\s*(?:[.)]\s*)*(?:에|부터|이후|후)?\s*(?:{_EFFECTIVE_ACTION}|판매|접수|신청|제출|마감)"
     rf"|(?:시행일|기한|마감일|접수기간).{{0,12}}(?:{_RULE_DATE.pattern})"
 )
 _RULE_PAST_EVENT = re.compile(r"개최하였|개최했|개최하였다|논의하였|논의했다|발표일|배포일|등록일|게시일")
 _RULE_PAST_PREDICATE = re.compile(r"(?:됐|했|하였|되었|받았|끝났|종료됐|완료됐|재개됐|시작됐|개시됐|소진됐|출시됐)|(?:판매|재개|시작|종료|공급)\s*되\s*었")
-_RULE_FUTURE = re.compile(r"예정|계획|시행(?:한다|함|된다|됨)|(?:재개|시작|개시|판매|공급|접수|신청)\s*(?:한다|할|함|된다|됨|가능)|부터.{0,12}(?:적용|제출|접수|신청)")
+_RULE_FUTURE = re.compile(rf"예정|계획|(?:{_EFFECTIVE_ACTION})(?:한다|함|된다|됨)|(?:재개|시작|개시|판매|공급|접수|신청|제출)\s*(?:한다|할|함|된다|됨|가능)")
 _RULE_STAT_TITLE = re.compile(r"현황|동향|통계|실적|결과|판매")
 _RULE_STAT_FACT = re.compile(r"공급|판매|증가|감소|잔여|소진|총|목표|비율|수익|손실|규모")
 
@@ -621,7 +629,7 @@ _EXCERPT_HEADINGS = (
     ("주요 내용", re.compile(r"주요\s*내용|제안이유\s*및\s*주요내용|기대\s*효과")),
 )
 _EXCERPT_PARTICLE = re.compile(r"^(?:은|는|이|가|을|를|의|와|과|으로|로|에서|에게|간|부터|까지)(?:\s*[.,])?$")
-_EXCERPT_VERB_STEM = re.compile(r"(?:신설|폐지|개정|도입|확대|축소|강화|완화|인상|인하|상향|하향|금지|판매|출시|공급|모집|소진|적용|시행)$")
+_EXCERPT_VERB_STEM = re.compile(rf"(?:{_ACTION_ALT}|판매|출시|공급|모집|소진|적용|시행)$")
 _EXCERPT_VERB_SUFFIX = re.compile(r"^(?:되|되어|되었으며|되었다|된다|됩니다|됨|될|된|하|하고|하며|한다|함|하였다|합니다|되는|되고|될 예정)(?:[.,])?$")
 _EXCERPT_ENDING = re.compile(r"^(?:었습니다|었으며|었다|었고|습니다|며|이며|입니다|이다)(?:\s*[.,])?$")
 
@@ -667,7 +675,7 @@ def _excerpt_roles(title: str, candidates: list[str], sections: list[str]) -> tu
         return ("주요 현황", "세부 수치", "후속 일정")
     if any(section in ("변경 내용", "대상·조건", "시행·기한") for section in sections):
         return ("변경 내용", "대상·조건", "시행·기한")
-    if any(_RULE_CHANGE.search(s) and not _RULE_HISTORY.search(s) for s in candidates):
+    if any(_RULE_CHANGE_PREDICATE.search(s) and not _RULE_HISTORY.search(s) for s in candidates):
         return ("변경 내용", "대상·조건", "시행·기한")
     return ()
 
@@ -713,11 +721,23 @@ def _key_tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"[가-힣A-Za-z]{2,}", text) if t not in _KEY_STOPWORDS}
 
 
+def _duplicate_tokens(text: str) -> set[str]:
+    """중복 비교에서만 기관 약칭·조사·발표 어미를 정규화한다. 출력은 원문이다."""
+    text = re.sub(r"금융위(?=는|가|\s|[.,]|$)", "금융위원회", text)
+    text = re.sub(rf"({_ACTION_ALT})(?:한다고|할|한다|된다|됨|함)(?=\s|[.!?]|$)", r"\1", text)
+    text = re.sub(r"(?:밝혔다|예정이다|해당)(?=\s|[.!?]|$)", "", text)
+    return {re.sub(r"(?:에서는|에게|으로|은|는|을|를|이|가)$", "", t) for t in _key_tokens(text)}
+
+
 def _key_sentences(text: str) -> list[str]:
     """닫는 따옴표/괄호까지 문장에 포함하고 날짜·소수점·열거 표식은 보존한다."""
     sentences: list[str] = []
     start = 0
+    protected = [m.span() for pattern in (_KEY_URL, _KEY_ABBREVIATION)
+                 for m in pattern.finditer(text)]
     for match in _KEY_TERMINAL.finditer(text):
+        if any(begin < match.end() <= end for begin, end in protected):
+            continue
         sentence = text[start:match.end()].strip()
         after = text[match.end():].lstrip()
         # 숫자 뒤의 점은 소수점/날짜일 수도 있다. 다음 숫자나 날짜 조사로 이어지면
@@ -824,6 +844,10 @@ def build_rule_excerpt_rows(
         return []
 
     tokens = [_key_tokens(s) for s in candidates]
+    duplicate_tokens = [_duplicate_tokens(s) for s in candidates]
+    numbers = [[re.sub(r"\s+", "", m) for m in re.findall(r"[-−△–—]?\s*\d[\d,.]*", s)]
+               for s in candidates]
+    qualifiers = [set(re.findall(r"않|못|아니|제외|예외|다만|불가|불허", s)) for s in candidates]
     title_tokens = _key_tokens(title)
     frequency = Counter(t for words in tokens for t in words)
     features = [
@@ -859,9 +883,9 @@ def build_rule_excerpt_rows(
 
     def is_duplicate(i: int) -> bool:
         # 수치가 다른 문장은 별개 사실이므로 중복으로 버리지 않는다.
-        return any(len(tokens[i] & tokens[j]) / max(1, len(tokens[i] | tokens[j])) > .85
-                   and re.findall(r"[-−△]?\d[\d,.]*", candidates[i])
-                   == re.findall(r"[-−△]?\d[\d,.]*", candidates[j]) for j in selected)
+        return any(len(duplicate_tokens[i] & duplicate_tokens[j]) / max(1, len(duplicate_tokens[i] | duplicate_tokens[j])) > .85
+                   and numbers[i] == numbers[j] and qualifiers[i] == qualifiers[j]
+                   for j in selected)
 
     for role in roles[:max_lines]:
         eligible = [i for i, s in enumerate(candidates)
@@ -1079,7 +1103,6 @@ _ENUMERATION_LABEL = re.compile(r"^(?:[가나다라마바사아자차카타파�
 # 그래서 문장 단위로 **어느 단계에 걸리는지**를 비교한다.
 #
 # 형태소 분석이나 점수 모델을 들이지 않는다. 이 정도 우선순위면 충분하다.
-_STRONG_AMENDMENT_KEYWORDS = ("개정", "신설", "삭제", "도입", "확대", "제한")
 _MEDIUM_AMENDMENT_KEYWORDS = ("이에", "따라서", "하도록", "하려는", "주요내용", "의무")
 # 배경 설명에도 흔하지만, 아무 단서도 없는 것보다는 낫다(마지막 순위로 남긴다).
 _WEAK_AMENDMENT_KEYWORDS = ("규정", "필요")
@@ -1087,7 +1110,6 @@ _WEAK_AMENDMENT_KEYWORDS = ("규정", "필요")
 # 강한 쪽부터 본다. 같은 단계 안에서는 원문상 먼저 나온 문장을 고른다
 # (같은 단계에서 "신설 > 개정" 같은 세부 순위는 만들지 않는다).
 _AMENDMENT_TIERS = (
-    _STRONG_AMENDMENT_KEYWORDS,
     _MEDIUM_AMENDMENT_KEYWORDS,
     _WEAK_AMENDMENT_KEYWORDS,
 )
@@ -1165,6 +1187,13 @@ def _amendment_index(sentences: list[str], candidates) -> int | None:
     "먼저 걸리는 문장"이 아니다 — 그러면 앞쪽 배경 문장의 "규정"·"필요" 같은 약한
     단서가 뒤의 "신설"·"개정" 문장을 가려, 발췌에서 정작 무엇을 바꾸는지가 빠진다.
     """
+    candidates = list(candidates)
+    for i in candidates:
+        sentence = _KEY_BULLET.sub("", sentences[i], count=1)
+        if _RULE_HISTORY.search(sentence) and not _RULE_NEW_CLAUSE.search(sentence):
+            continue
+        if _RULE_CHANGE_PREDICATE.search(sentence):
+            return i
     for tier in _AMENDMENT_TIERS:
         hit = next(
             (i for i in candidates if any(word in sentences[i] for word in tier)),

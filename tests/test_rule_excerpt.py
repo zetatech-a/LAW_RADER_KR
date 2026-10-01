@@ -206,12 +206,12 @@ def test_assembly_empty_selection_keeps_bounded_fallback():
         assert "제안이유 및 주요내용 발췌" in rendered
 
 
-def test_empty_filtered_general_body_has_no_false_selection_notice():
+def test_filtered_numeric_body_uses_safe_excerpt_instead_of_disappearing():
     post = _post(body="금융회사 통계 " + " ".join(str(i) for i in range(30)))
     for rendered in (build_html({post.source_name: [post]}), build_text({post.source_name: [post]})):
         assert post.url in rendered
-        assert "원문 발췌" not in rendered
-        assert "자동으로 선별" not in rendered
+        assert post.body in rendered
+        assert "원문 발췌 · 핵심 1줄" in rendered
 
 
 @pytest.mark.parametrize("ending", ["재개됐다.", "재개되었습니다.", "재개되었다.", "시작했다.", "종료하였습니다."])

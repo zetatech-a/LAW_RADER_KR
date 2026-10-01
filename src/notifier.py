@@ -9,12 +9,14 @@ from email.utils import formataddr
 
 from .config import EmailConfig
 from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
+from .reply_excerpt import build_reply_excerpt_rows
 from .snippet import (
     BodyKind,
     build_assembly_fallback_lines,
     build_fallback_snippet,
     build_rule_excerpt_rows,
     classify_body,
+    clean_body_text,
 )
 
 log = logging.getLogger(__name__)
@@ -121,8 +123,16 @@ def _body_label(p: Post) -> str:
 
 
 def _general_excerpt(p: Post) -> list[str]:
+    if classify_body(p.body, p.title) is not BodyKind.CONTENT:
+        return []
+    rows = (build_reply_excerpt_rows(p.body) if p.source_key == "better_reply"
+            else build_rule_excerpt_rows(p.body, p.title))
+    if not rows:
+        # 분류/점수 필터가 유효 본문을 모두 거절해도 정보 자체를 지우지 않는다.
+        fallback = build_fallback_snippet(clean_body_text(p.body, p.title))
+        return [fallback] if fallback else []
     return [f"{role}: {sentence}" if role != "주요 내용" else sentence
-            for role, sentence in build_rule_excerpt_rows(p.body, p.title)]
+            for role, sentence in rows]
 
 
 def _has_summary(*groups: "dict[str, list[Post]] | None") -> bool:
@@ -249,6 +259,8 @@ def _summary_block(p: Post, accent: str) -> str:
 
 def _excerpt_block(label: str, lines: list[str], accent: str) -> str:
     """AI 카드와 같은 여백/불릿/기관색. 문장은 원문 자동선별임을 명시한다."""
+    if not lines:
+        return ""
     items = "".join(
         "<tr><td valign='top' style='padding:2px 8px 2px 0;"
         f"font-size:13px;line-height:1.6;color:{accent}'>•</td>"
