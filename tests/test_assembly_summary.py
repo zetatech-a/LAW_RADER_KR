@@ -772,7 +772,7 @@ def test_general_post_labels_are_unchanged():
     assert "제안이유" not in build_text({p.source_name: [p]})
 
     q = _general(1)       # 요약 없음 → 기존 '원문 발췌' 그대로
-    assert "[원문 발췌]" in build_text({q.source_name: [q]})
+    assert "[원문 발췌 · 핵심 1줄]" in build_text({q.source_name: [q]})
     assert "제안이유" not in build_html({q.source_name: [q]})
 
 
