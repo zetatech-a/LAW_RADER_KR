@@ -101,10 +101,16 @@ def test_portal_answer_is_preserved_and_html_text_agree():
     ("구조가 유실된 본문입니다.", "구조가 유실된 본문입니다."),
 ])
 def test_portal_partial_body_preserves_only_present_sections(body, expected):
+    from src.reply_excerpt import build_reply_excerpt_rows
+    # 전용 helper의 부분 데이터 지원은 보존한다. 자동 메일 판별은 세 섹션이
+    # 모두 있는 수집 계약만 신뢰하므로 partial에는 일반 발췌를 적용한다.
+    rows = build_reply_excerpt_rows(body)
+    if rows:
+        assert expected in [f"{label}: {text}" for label, text in rows]
     post = _post(body=body)
     post.source_key = "better_reply"
     for rendered in (build_html({post.source_name: [post]}), build_text({post.source_name: [post]})):
-        assert expected in rendered
+        assert expected.split(": ", 1)[-1] in rendered
         if "[회답]" not in body:
             assert "회답:" not in rendered
 

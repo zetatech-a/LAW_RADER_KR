@@ -125,8 +125,9 @@ def _body_label(p: Post) -> str:
 def _general_excerpt(p: Post) -> list[str]:
     if classify_body(p.body, p.title) is not BodyKind.CONTENT:
         return []
-    rows = (build_reply_excerpt_rows(p.body) if p.source_key == "better_reply"
-            else build_rule_excerpt_rows(p.body, p.title))
+    # key는 사용자 설정값이다. scraper가 보장하는 완전한 Q/A/이유 구조로 판별한다.
+    rows = (build_reply_excerpt_rows(p.body, require_complete=True)
+            or build_rule_excerpt_rows(p.body, p.title))
     if not rows:
         # 분류/점수 필터가 유효 본문을 모두 거절해도 정보 자체를 지우지 않는다.
         fallback = build_fallback_snippet(clean_body_text(p.body, p.title))

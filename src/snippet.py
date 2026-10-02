@@ -594,6 +594,7 @@ _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내
 _KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:(?:목록|\(\s*\d+\s*\))(?=\s|첨부|$)|$)")
 _KEY_TERMINAL = re.compile(r'''[가-힣A-Za-z0-9%)\]」』】》]\s*[.!?…]+["'”’」』)\]】》]*(?=\s|[가-힣A-Za-z0-9]|$)''')
 _KEY_URL = re.compile(r"(?:https?://|www\.)[^\s<>]+")
+_KEY_DOTTED_IDENTIFIER = re.compile(r"[A-Za-z0-9_@%+\-]+(?:\.[A-Za-z0-9_@%+\-]+)+")
 _KEY_ABBREVIATION = re.compile(r"\b(?:[A-Za-z]\.){2,}|\b(?:Dr|Mr|Mrs|Ms|Prof|No|Inc|Ltd|Co)\.", re.I)
 _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "이를", "이번", "통해", "관련", "따라", "것으로", "하도록"})
 
@@ -733,7 +734,8 @@ def _key_sentences(text: str) -> list[str]:
     """닫는 따옴표/괄호까지 문장에 포함하고 날짜·소수점·열거 표식은 보존한다."""
     sentences: list[str] = []
     start = 0
-    protected = [m.span() for pattern in (_KEY_URL, _KEY_ABBREVIATION)
+    # ASCII 식별자 내부의 점은 보호하되, 한국어 종결 뒤의 '.IPO'는 경계로 남긴다.
+    protected = [m.span() for pattern in (_KEY_URL, _KEY_ABBREVIATION, _KEY_DOTTED_IDENTIFIER)
                  for m in pattern.finditer(text)]
     for match in _KEY_TERMINAL.finditer(text):
         if any(begin < match.end() <= end for begin, end in protected):
