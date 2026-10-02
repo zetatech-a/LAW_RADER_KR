@@ -588,13 +588,16 @@ _KEY_TARGET = re.compile(r"대상|금융회사|금융기관|은행|보험사|보
 _KEY_TIMING = re.compile(rf"{_EFFECTIVE_ACTION}|예정|기한|까지|부터|의견|입법예고|행정예고")
 _KEY_FACT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원|년|월|일|명|개|건)")
 _KEY_AMOUNT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원)")
-_KEY_BULLET = re.compile(r"^(?:[□○ㅇ•▪▶①-⑳❶-❿➊-➓]+\s*|[-–—]\s+(?!\s*\d)|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)]\s+)")
+_KEY_ENUMERATION = re.compile(r"^(?:[①-⑳❶-❿➊-➓]+\s*|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)]\s+)")
+_KEY_BULLET = re.compile(rf"(?:{_KEY_ENUMERATION.pattern}|^[□○ㅇ•▪▶]+\s*|^[-–—]\s+(?!\s*\d))")
 _KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
 _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
 _KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:(?:목록|\(\s*\d+\s*\))(?=\s|첨부|$)|$)")
 _KEY_TERMINAL = re.compile(r'''[가-힣A-Za-z0-9%)\]」』】》]\s*[.!?…]+["'”’」』)\]】》]*(?=\s|[가-힣A-Za-z0-9]|$)''')
 _KEY_URL = re.compile(r"(?:https?://|www\.)[^\s<>]+")
-_KEY_DOTTED_IDENTIFIER = re.compile(r"[A-Za-z0-9_@%+\-]+(?:\.[A-Za-z0-9_@%+\-]+)+")
+_KEY_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}(?![A-Za-z0-9_])")
+# Bare domain은 소문자 TLD 형태만 보호해 'applies.Banks'를 합치지 않는다.
+_KEY_DOMAIN = re.compile(r"(?<![A-Za-z0-9_@.\-])(?:[A-Za-z0-9\-]+\.)+[a-z]{2,24}(?![A-Za-z0-9_\-])")
 _KEY_FILENAME = re.compile(
     rf"[가-힣A-Za-z0-9_\-]+(?:\.[가-힣A-Za-z0-9_\-]+)*\.{_FILE_EXT}(?![A-Za-z0-9_])", re.I)
 _KEY_ABBREVIATION = re.compile(r"\b(?:[A-Za-z]\.){2,}|\b(?:Dr|Mr|Mrs|Ms|Prof|No|Inc|Ltd|Co)\.", re.I)
@@ -740,7 +743,7 @@ def _key_sentences(text: str) -> list[str]:
     sentences: list[str] = []
     start = 0
     # 한글 파일명은 알려진 확장자가 있을 때만 보호해 '.IPO' 문장 경계는 남긴다.
-    protected = [m.span() for pattern in (_KEY_URL, _KEY_ABBREVIATION, _KEY_DOTTED_IDENTIFIER, _KEY_FILENAME)
+    protected = [m.span() for pattern in (_KEY_URL, _KEY_ABBREVIATION, _KEY_EMAIL, _KEY_DOMAIN, _KEY_FILENAME)
                  for m in pattern.finditer(text)]
     for match in _KEY_TERMINAL.finditer(text):
         if any(begin < match.end() <= end for begin, end in protected):
@@ -749,11 +752,10 @@ def _key_sentences(text: str) -> list[str]:
         after = text[match.end():].lstrip()
         # 숫자 뒤의 점은 소수점/날짜일 수도 있다. 다음 숫자나 날짜 조사로 이어지면
         # 경계로 쓰지 않고, 백분율·괄호·완결된 숫자 문장은 정상적으로 분리한다.
-        if re.search(r"\d\s*\.$", sentence) and (
-            after[:1].isdigit()
-            or (re.search(r"(?:\d{2,4}\s*\.\s*)?\d{1,2}\s*\.\s*\d{1,2}\s*\.$", sentence)
-                and re.match(r"(?:부터|까지|이후|이전|에|시행|적용)", after))
-        ):
+        if re.search(r"\d\s*\.$", sentence) and after[:1].isdigit():
+            continue
+        if (re.search(r'''(?:\d{2,4}\s*\.\s*)?\d{1,2}\s*\.\s*\d{1,2}\s*\.["'”’」』)\]】》]*$''', sentence)
+                and re.match(r"(?:부터|까지|이후|이전|에서|에|시행|적용)", after)):
             continue
         if not _ENUMERATION_LABEL.fullmatch(sentence):
             sentences.append(sentence)
@@ -819,7 +821,7 @@ def build_rule_excerpt_rows(
             section_start = bool(pending and pending[-1].endswith((".", "!", "?", "…")))
         if (_KEY_BULLET.match(line) or section_start) and pending:
             flush()
-        if re.match(r"^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]", line):
+        if _KEY_ENUMERATION.match(line):
             section = ""
         # 순서 표식만 벗기고 뒤의 실질 문장을 보존한다(로마 숫자 포함).
         content = _KEY_BULLET.sub("", line, count=1).strip()
@@ -1124,6 +1126,10 @@ _AMENDMENT_TIERS = (
     _WEAK_AMENDMENT_KEYWORDS,
 )
 
+# 의안에서만 문장 끝의 '상향임', '신설' 등 명사형 개정 항목을 인정한다.
+# '완화를 위한 논의가 필요함'처럼 행위어가 목적어로만 나온 배경은 해당하지 않는다.
+_ASSEMBLY_NOMINAL_AMENDMENT = re.compile(rf"(?:^|\s)(?:{_ACTION_ALT})(?:임|함)?[.!?…]?$")
+
 # 문장 분리가 통째로 실패했을 때(마침표 없는 한 덩어리) 쓰는 머리/꼬리 길이.
 # 꼬리를 더 길게 잡는 이유는 의안 본문의 결론("이에 … 하려는 것임")이 끝에 있기 때문이다.
 _GIANT_HEAD_CHARS = 350
@@ -1202,7 +1208,7 @@ def _amendment_index(sentences: list[str], candidates) -> int | None:
         sentence = _KEY_BULLET.sub("", sentences[i], count=1)
         if _RULE_HISTORY.search(sentence) and not _RULE_NEW_CLAUSE.search(sentence):
             continue
-        if _RULE_CHANGE_PREDICATE.search(sentence):
+        if _RULE_CHANGE_PREDICATE.search(sentence) or _ASSEMBLY_NOMINAL_AMENDMENT.search(sentence):
             return i
     for tier in _AMENDMENT_TIERS:
         hit = next(
