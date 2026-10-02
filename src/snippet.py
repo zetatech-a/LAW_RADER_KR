@@ -707,16 +707,18 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
             return 8
         return 4 if section == label or _RULE_CONDITION.search(sentence) or _RULE_THRESHOLD.search(sentence) else 0
     if label in ("시행·기한", "후속 일정"):
-        # 날짜만으로 시행일이라 부르지 않는다. 회의/발표일도 일정으로 바꾸지 않는다.
-        if _RULE_PAST_EVENT.search(sentence):
+        bounded_schedule = bool(_RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence)
+                                and _RULE_TIME_BOUND.search(sentence))
+        # 발표일 자체와 그 날짜를 기준으로 한 명시적 제출기한을 구분한다.
+        if _RULE_PAST_EVENT.search(sentence) and not bounded_schedule:
             return 0
         if (
             _RULE_PAST_PREDICATE.search(sentence) and not _RULE_FUTURE.search(sentence)
         ):
             return 0
-        return 6 if (_RULE_DATE.search(sentence) and (
-            (section == "시행·기한" and (_RULE_CALENDAR_DATE.search(sentence) or _RULE_TIME_BOUND.search(sentence)))
-            or (_RULE_SCHEDULE.search(sentence) and _RULE_TIME_BOUND.search(sentence))
+        return 6 if (bounded_schedule or (
+            _RULE_DATE.search(sentence) and section == "시행·기한"
+            and (_RULE_CALENDAR_DATE.search(sentence) or _RULE_TIME_BOUND.search(sentence))
         )) else 0
     if label in ("주요 현황", "세부 수치"):
         return 4 if re.search(r"\d", sentence) and _RULE_STAT_FACT.search(sentence) else 0
@@ -743,8 +745,11 @@ def _key_sentences(text: str) -> list[str]:
     sentences: list[str] = []
     start = 0
     # 한글 파일명은 알려진 확장자가 있을 때만 보호해 '.IPO' 문장 경계는 남긴다.
-    protected = [m.span() for pattern in (_KEY_URL, _KEY_ABBREVIATION, _KEY_EMAIL, _KEY_DOMAIN, _KEY_FILENAME)
+    protected = [m.span() for pattern in (_KEY_ABBREVIATION, _KEY_EMAIL, _KEY_DOMAIN, _KEY_FILENAME)
                  for m in pattern.finditer(text)]
+    # URL 뒤 종결부호·닫는 기호는 보호 범위에서만 제외한다. 원문은 바꾸지 않는다.
+    protected.extend((m.start(), m.start() + len(m[0].rstrip('''.!?…"'”’」』)]】》''')))
+                     for m in _KEY_URL.finditer(text))
     for match in _KEY_TERMINAL.finditer(text):
         if any(begin < match.end() <= end for begin, end in protected):
             continue
