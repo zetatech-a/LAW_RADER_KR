@@ -595,6 +595,8 @@ _KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:(?:목록|\(\s*\d+\s*\
 _KEY_TERMINAL = re.compile(r'''[가-힣A-Za-z0-9%)\]」』】》]\s*[.!?…]+["'”’」』)\]】》]*(?=\s|[가-힣A-Za-z0-9]|$)''')
 _KEY_URL = re.compile(r"(?:https?://|www\.)[^\s<>]+")
 _KEY_DOTTED_IDENTIFIER = re.compile(r"[A-Za-z0-9_@%+\-]+(?:\.[A-Za-z0-9_@%+\-]+)+")
+_KEY_FILENAME = re.compile(
+    rf"[가-힣A-Za-z0-9_\-]+(?:\.[가-힣A-Za-z0-9_\-]+)*\.{_FILE_EXT}(?![A-Za-z0-9_])", re.I)
 _KEY_ABBREVIATION = re.compile(r"\b(?:[A-Za-z]\.){2,}|\b(?:Dr|Mr|Mrs|Ms|Prof|No|Inc|Ltd|Co)\.", re.I)
 _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "이를", "이번", "통해", "관련", "따라", "것으로", "하도록"})
 
@@ -602,7 +604,7 @@ _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "�
 _RULE_CHANGE = re.compile(rf"(?:{_ACTION_ALT})(?![가-힣])")
 _RULE_HISTORY = re.compile(r"^(?:현행(?=\s|법|규정|제도|은|는)|현재\s*(?:제도|규정|법)|종전(?:에는|에|의|\s)|기존(?:에는|의|\s*(?:제도|규정|법))|지난|당시|그간)")
 _RULE_NEW_CLAUSE = re.compile(rf"(?:그러나|하지만|이에\s*따라|개정안(?:은|에서는)|앞으로는|이번\s*개정안은).{{0,120}}(?:{_ACTION_ALT})\s*(?:하|한|함|되|됨|할|해|했)")
-_RULE_CHANGE_PREDICATE = re.compile(rf"(?:{_ACTION_ALT})\s*(?:하|한|함|되|됨|할|해|했|를|을)")
+_RULE_CHANGE_PREDICATE = re.compile(rf"(?:{_ACTION_ALT})\s*(?:하|한|함|되|됨|할|해|했)")
 _RULE_CONDITION = re.compile(r"대상(?:은|는|으로|\s*(?:회사|법인|기업|기관|사업자))|적용\s*(?:대상|회사|기업|기관|사업자)|기준(?:은|는)|조건|요건|한도|다만|제외|예외")
 _RULE_THRESHOLD = re.compile(r"\d[\d,.]*\s*(?:억원|조원|원|%|명|건|개)?\s*(?:이상|이하|초과|미만)(?:인|의|에 해당하는)?\s*(?:회사|기업|기관|은행|사업자|소비자|투자자|이용자|경우|때)")
 _KEY_NUMERIC_CELLS = re.compile(r"(?:^|\s)[-−△]?\d[\d,.]*%?(?:\s+[-−△]?\d[\d,.]*%?){3}")
@@ -723,19 +725,22 @@ def _key_tokens(text: str) -> set[str]:
 
 
 def _duplicate_tokens(text: str) -> set[str]:
-    """중복 비교에서만 기관 약칭·조사·발표 어미를 정규화한다. 출력은 원문이다."""
+    """중복 비교에서만 약칭·어미를 정규화하고 주체/대상 조사 표식을 남긴다."""
     text = re.sub(r"금융위(?=는|가|\s|[.,]|$)", "금융위원회", text)
     text = re.sub(rf"({_ACTION_ALT})(?:한다고|할|한다|된다|됨|함)(?=\s|[.!?]|$)", r"\1", text)
     text = re.sub(r"(?:밝혔다|예정이다|해당)(?=\s|[.!?]|$)", "", text)
-    return {re.sub(r"(?:에서는|에게|으로|은|는|을|를|이|가)$", "", t) for t in _key_tokens(text)}
+    roles = {"은": ":subject", "는": ":subject", "이": ":subject", "가": ":subject",
+             "을": ":object", "를": ":object"}
+    return {re.sub(r"(?:에서는|에게|으로|은|는|을|를|이|가)$",
+                   lambda m: roles.get(m[0], ""), t) for t in _key_tokens(text)}
 
 
 def _key_sentences(text: str) -> list[str]:
     """닫는 따옴표/괄호까지 문장에 포함하고 날짜·소수점·열거 표식은 보존한다."""
     sentences: list[str] = []
     start = 0
-    # ASCII 식별자 내부의 점은 보호하되, 한국어 종결 뒤의 '.IPO'는 경계로 남긴다.
-    protected = [m.span() for pattern in (_KEY_URL, _KEY_ABBREVIATION, _KEY_DOTTED_IDENTIFIER)
+    # 한글 파일명은 알려진 확장자가 있을 때만 보호해 '.IPO' 문장 경계는 남긴다.
+    protected = [m.span() for pattern in (_KEY_URL, _KEY_ABBREVIATION, _KEY_DOTTED_IDENTIFIER, _KEY_FILENAME)
                  for m in pattern.finditer(text)]
     for match in _KEY_TERMINAL.finditer(text):
         if any(begin < match.end() <= end for begin, end in protected):
@@ -792,7 +797,7 @@ def build_rule_excerpt_rows(
             pending.clear()
 
     for line in lines:
-        if _KEY_ATTACHMENT_LIST.match(line) and pending:
+        if _KEY_ATTACHMENT_LIST.match(line) and (pending or paragraphs):
             break
         # 무종결 소제목 뒤에서 배경 문단이 시작하는 경우 둘을 한 문장으로 합치지 않는다.
         if _RULE_HISTORY.match(line) and pending:
@@ -847,6 +852,8 @@ def build_rule_excerpt_rows(
 
     tokens = [_key_tokens(s) for s in candidates]
     duplicate_tokens = [_duplicate_tokens(s) for s in candidates]
+    duplicate_roles = [{t for t in words if t.endswith((":subject", ":object"))}
+                       for words in duplicate_tokens]
     numbers = [[re.sub(r"\s+", "", m) for m in re.findall(r"[-−△–—]?\s*\d[\d,.]*", s)]
                for s in candidates]
     qualifiers = [set(re.findall(r"않|못|아니|제외|예외|다만|불가|불허", s)) for s in candidates]
@@ -884,9 +891,10 @@ def build_rule_excerpt_rows(
     roles = _excerpt_roles(title, candidates, sections)
 
     def is_duplicate(i: int) -> bool:
-        # 수치가 다른 문장은 별개 사실이므로 중복으로 버리지 않는다.
+        # 수치나 명시적 주체/대상이 다른 문장은 중복으로 버리지 않는다.
         return any(len(duplicate_tokens[i] & duplicate_tokens[j]) / max(1, len(duplicate_tokens[i] | duplicate_tokens[j])) > .85
                    and numbers[i] == numbers[j] and qualifiers[i] == qualifiers[j]
+                   and duplicate_roles[i] == duplicate_roles[j]
                    for j in selected)
 
     for role in roles[:max_lines]:
