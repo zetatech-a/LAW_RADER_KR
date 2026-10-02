@@ -588,7 +588,7 @@ _KEY_TARGET = re.compile(r"대상|금융회사|금융기관|은행|보험사|보
 _KEY_TIMING = re.compile(rf"{_EFFECTIVE_ACTION}|예정|기한|까지|부터|의견|입법예고|행정예고")
 _KEY_FACT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원|년|월|일|명|개|건)")
 _KEY_AMOUNT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원)")
-_KEY_ENUMERATION = re.compile(r"^(?:[①-⑳❶-❿➊-➓]+\s*|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)]\s+)")
+_KEY_ENUMERATION = re.compile(r"^(?:[①-⑳❶-❿➊-➓]+\s*|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)](?:\s+|(?=[가-힣A-Za-z])))")
 _KEY_BULLET = re.compile(rf"(?:{_KEY_ENUMERATION.pattern}|^[□○ㅇ•▪▶]+\s*|^[-–—]\s+(?!\s*\d))")
 _KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
 _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
@@ -677,11 +677,13 @@ def _excerpt_roles(title: str, candidates: list[str], sections: list[str]) -> tu
     """문서 유형별 질문. 유형이 불명확하면 일반 중요도 선별로 돌아간다."""
     if _RULE_CHANGE.search(title):
         return ("변경 내용", "대상·조건", "시행·기한")
+    if any(_RULE_CHANGE_PREDICATE.search(s) and not _RULE_HISTORY.search(s)
+           and (not _RULE_PAST_PREDICATE.search(s) or _RULE_FUTURE.search(s))
+           for s in candidates):
+        return ("변경 내용", "대상·조건", "시행·기한")
     if _RULE_STAT_TITLE.search(title) and any(_KEY_FACT.search(s) for s in candidates):
         return ("주요 현황", "세부 수치", "후속 일정")
     if any(section in ("변경 내용", "대상·조건", "시행·기한") for section in sections):
-        return ("변경 내용", "대상·조건", "시행·기한")
-    if any(_RULE_CHANGE_PREDICATE.search(s) and not _RULE_HISTORY.search(s) for s in candidates):
         return ("변경 내용", "대상·조건", "시행·기한")
     return ()
 
@@ -1107,7 +1109,8 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[^\W\d_][.!?…])\s+")
 #
 # 목록을 한글 한 글자 전체로 넓히지 않는다 — "그러하다.", "…한 바.", "…할 수.", 처럼
 # 실제 한 글자로 끝나는 문장을 표식으로 오인해 다음 문장과 합쳐 버리기 때문이다.
-_ENUMERATION_LABEL = re.compile(r"^(?:[가나다라마바사아자차카타파하])\.$")
+# Arabic 표식도 내용과 함께 넘겨야 generic splitter에서 '2.'만 한 줄이 되지 않는다.
+_ENUMERATION_LABEL = re.compile(r"^(?:[가나다라마바사아자차카타파하]|\d{1,2})\.$")
 
 # 입법행위를 나타낼 가능성이 높은 표현. 의안 본문에서 '현행 제도 설명'과 '무엇을
 # 바꾸는가'를 가르는 최소한의 단서만 둔다 — 목록을 키우면 첫 문장에서 바로 걸려
