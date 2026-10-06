@@ -607,8 +607,10 @@ _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "�
 _RULE_CHANGE = re.compile(rf"(?:{_ACTION_ALT})(?![가-힣])")
 _RULE_HISTORY = re.compile(r"^(?:현행(?=\s|법|규정|제도|은|는)|현재\s*(?:제도|규정|법)|종전(?:에는|에|의|\s)|기존(?:에는|의|\s*(?:제도|규정|법))|지난|당시|그간)")
 _RULE_NEW_CLAUSE = re.compile(rf"(?:그러나|하지만|이에\s*따라|개정안(?:은|에서는)|앞으로는|이번\s*개정안은).{{0,120}}(?:{_ACTION_ALT})\s*(?:하|한|함|되|됨|할|해|했)")
-_RULE_CHANGE_PREDICATE = re.compile(rf"(?:{_ACTION_ALT})\s*(?:하|한|함|되|됨|할|해|했)")
+_RULE_CHANGE_PREDICATE = re.compile(
+    rf"(?:{_ACTION_ALT})(?!\s*하(?:기\s*위[한해]|고자))\s*(?:하|한|함|되|됨|할|해|했)")
 _RULE_CONDITION = re.compile(r"대상(?:은|는|으로|\s*(?:회사|법인|기업|기관|사업자))|적용\s*(?:대상|회사|기업|기관|사업자)|기준(?:은|는)|조건|요건|한도|다만|제외|예외")
+_RULE_PASSIVE_TARGET = re.compile(rf"(?:{_KEY_TARGET.pattern})에(?:게)?\s*적용(?:된다|됩니다|됨)")
 _RULE_THRESHOLD = re.compile(r"\d[\d,.]*\s*(?:억원|조원|원|%|명|건|개)?\s*(?:이상|이하|초과|미만)(?:인|의|에 해당하는)?\s*(?:회사|기업|기관|은행|사업자|소비자|투자자|이용자|경우|때)")
 _KEY_NUMERIC_CELLS = re.compile(r"(?:^|\s)[-−△]?\d[\d,.]*%?(?:\s+[-−△]?\d[\d,.]*%?){3}")
 _RULE_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일|\d+\s*영업일|\d+\s*개월|오늘|내일|내년|올해|즉시|공포한 날")
@@ -707,6 +709,8 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
         # 예외는 변경 문장과 함께 읽어야 하므로 별도 조건 문장으로 우선한다.
         if re.match(r"^(?:다만|단,|예외)", sentence):
             return 8
+        if _RULE_PASSIVE_TARGET.search(sentence):
+            return 6
         return 4 if section == label or _RULE_CONDITION.search(sentence) or _RULE_THRESHOLD.search(sentence) else 0
     if label in ("시행·기한", "후속 일정"):
         bounded_schedule = bool(_RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence)
@@ -731,15 +735,16 @@ def _key_tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"[가-힣A-Za-z]{2,}", text) if t not in _KEY_STOPWORDS}
 
 
-def _duplicate_tokens(text: str) -> set[str]:
-    """중복 비교에서만 약칭·어미를 정규화하고 주체/대상 조사 표식을 남긴다."""
+def _duplicate_signature(text: str) -> tuple[str, ...]:
+    """기존 중복 정규화를 순서대로 보존한다. 원문 출력이나 문법 해석은 바꾸지 않는다."""
     text = re.sub(r"금융위(?=는|가|\s|[.,]|$)", "금융위원회", text)
     text = re.sub(rf"({_ACTION_ALT})(?:한다고|할|한다|된다|됨|함)(?=\s|[.!?]|$)", r"\1", text)
     text = re.sub(r"(?:밝혔다|예정이다|해당)(?=\s|[.!?]|$)", "", text)
     roles = {"은": ":subject", "는": ":subject", "이": ":subject", "가": ":subject",
              "을": ":object", "를": ":object"}
-    return {re.sub(r"(?:에서는|에게|으로|은|는|을|를|이|가)$",
-                   lambda m: roles.get(m[0], ""), t) for t in _key_tokens(text)}
+    return tuple(re.sub(r"(?:에서는|에게|으로|은|는|을|를|이|가)$",
+                        lambda m: roles.get(m[0], ""), t)
+                 for t in re.findall(r"[가-힣A-Za-z]{2,}", text) if t not in _KEY_STOPWORDS)
 
 
 def _key_sentences(text: str) -> list[str]:
@@ -860,7 +865,8 @@ def build_rule_excerpt_rows(
         return []
 
     tokens = [_key_tokens(s) for s in candidates]
-    duplicate_tokens = [_duplicate_tokens(s) for s in candidates]
+    duplicate_signatures = [_duplicate_signature(s) for s in candidates]
+    duplicate_tokens = [set(signature) for signature in duplicate_signatures]
     duplicate_roles = [{t for t in words if t.endswith((":subject", ":object"))}
                        for words in duplicate_tokens]
     numbers = [[re.sub(r"\s+", "", m) for m in re.findall(r"[-−△–—]?\s*\d[\d,.]*", s)]
@@ -904,6 +910,8 @@ def build_rule_excerpt_rows(
         return any(len(duplicate_tokens[i] & duplicate_tokens[j]) / max(1, len(duplicate_tokens[i] | duplicate_tokens[j])) > .85
                    and numbers[i] == numbers[j] and qualifiers[i] == qualifiers[j]
                    and duplicate_roles[i] == duplicate_roles[j]
+                   # 순서까지 일치할 때만 제거한다. 반대 정책을 버리는 것보다 보수적이다.
+                   and duplicate_signatures[i] == duplicate_signatures[j]
                    for j in selected)
 
     for role in roles[:max_lines]:
