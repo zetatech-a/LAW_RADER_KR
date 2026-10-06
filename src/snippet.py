@@ -588,7 +588,7 @@ _KEY_TARGET = re.compile(r"대상|금융회사|금융기관|은행|보험사|보
 _KEY_TIMING = re.compile(rf"{_EFFECTIVE_ACTION}|예정|기한|까지|부터|의견|입법예고|행정예고")
 _KEY_FACT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원|년|월|일|명|개|건)")
 _KEY_AMOUNT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원)")
-_KEY_ENUMERATION = re.compile(r"^(?:[①-⑳❶-❿➊-➓]+\s*|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)]\s+|\d{1,2}[.)](?:\s+|(?=[가-힣A-Za-z])))")
+_KEY_ENUMERATION = re.compile(r"^(?:[①-⑳❶-❿➊-➓]+\s*|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)](?:\s+|(?=[가-힣A-Za-z0-9]))|\d{1,2}[.)](?:\s+|(?=[가-힣A-Za-z])))")
 _KEY_BULLET = re.compile(rf"(?:{_KEY_ENUMERATION.pattern}|^[□○ㅇ•▪▶]+\s*|^[-–—]\s+(?!\s*\d))")
 _KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
 _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
@@ -690,10 +690,15 @@ def _excerpt_roles(title: str, candidates: list[str], sections: list[str]) -> tu
     return ()
 
 
+def _history_view(sentence: str) -> str:
+    """현행법 검사에서만 제한된 예외 접두어를 벗긴다. 출력 원문은 보존한다."""
+    return re.sub(r"^(?:다만|단)(?:\s*,\s*|\s+)", "", sentence, count=1)
+
+
 def _role_strength(label: str, sentence: str, section: str = "") -> int:
     if sentence.startswith(("*", "※")) or re.search(r"배경을 설명|감사 인사|간담회를 개최", sentence):
         return 0
-    if label in ("변경 내용", "대상·조건") and _RULE_HISTORY.search(sentence) and not _RULE_NEW_CLAUSE.search(sentence):
+    if label in ("변경 내용", "대상·조건") and _RULE_HISTORY.search(_history_view(sentence)) and not _RULE_NEW_CLAUSE.search(sentence):
         return 0
     if label == "변경 내용":
         if section == "배경" and not _RULE_NEW_CLAUSE.search(sentence):
