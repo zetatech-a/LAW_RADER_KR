@@ -611,6 +611,7 @@ _RULE_CHANGE_PREDICATE = re.compile(
     rf"(?:{_ACTION_ALT})(?!\s*하(?:기\s*위[한해]|고자))\s*(?:하|한|함|되|됨|할|해|했)")
 _RULE_REVIEW_PROPOSAL = re.compile(
     rf"(?:{_ACTION_ALT})\s*하는\s+(?:방안|계획)을\s*(?:검토|논의|연구)한다[.!?…]*$")
+_RULE_ONGOING_STATE = re.compile(rf"(?:{_ACTION_ALT})\s*되어\s*있(?:다|으나)")
 _RULE_CONDITION = re.compile(r"대상(?:은|는|으로|\s*(?:회사|법인|기업|기관|사업자))|적용\s*(?:대상|회사|기업|기관|사업자)|기준(?:은|는)|조건|요건|한도|다만|제외|예외")
 _RULE_PASSIVE_TARGET = re.compile(rf"(?:{_KEY_TARGET.pattern})에(?:게)?\s*적용(?:된다|됩니다|됨)")
 _RULE_TARGET_PREDICATE = re.compile(
@@ -622,7 +623,7 @@ _RULE_CALENDAR_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\
 _RULE_SCHEDULE = re.compile(rf"{_EFFECTIVE_ACTION}|접수|신청|제출|모집|판매|공표|공포|기한|마감")
 _RULE_TIME_BOUND = re.compile(
     rf"(?:{_RULE_DATE.pattern}).{{0,16}}(?:부터|까지|마감|경과)"
-    rf"|(?:{_RULE_DATE.pattern})\s*(?:[.)]\s*)*(?:에|부터|이후|후)?\s*(?:{_EFFECTIVE_ACTION}|판매|접수|신청|제출|마감)"
+    rf"|(?:{_RULE_DATE.pattern})\s*(?:[.)]\s*)*(?:에|부터|이후|후)?\s*(?:{_EFFECTIVE_ACTION}|접수|신청|제출|마감)"
     rf"|(?:시행일|기한|마감일|접수기간).{{0,12}}(?:{_RULE_DATE.pattern})"
 )
 _RULE_PAST_EVENT = re.compile(r"개최하였|개최했|개최하였다|논의하였|논의했다|발표일|배포일|등록일|게시일")
@@ -680,8 +681,10 @@ def _join_excerpt_parts(parts: list[str], title: str = "") -> str:
 
 
 def _is_explicit_change(sentence: str) -> bool:
-    """검토만 하는 제안 구절을 제외하되 같은 문장의 별도 실제 변경은 보존한다."""
-    return bool(_RULE_CHANGE_PREDICATE.search(_RULE_REVIEW_PROPOSAL.sub(" ", sentence)))
+    """제안·현재 상태 구절만 제외하고 같은 문장의 별도 실제 변경은 보존한다."""
+    view = _RULE_ONGOING_STATE.sub(" ", _RULE_REVIEW_PROPOSAL.sub(" ", sentence))
+    return bool(_RULE_CHANGE_PREDICATE.search(view)
+                or re.search(rf"(?:{_ACTION_ALT})\s*된다(?![가-힣])", view))
 
 
 def _excerpt_roles(title: str, candidates: list[str], sections: list[str]) -> tuple[str, ...]:
@@ -711,7 +714,7 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
         return 0
     if label == "변경 내용":
         explicit_change = _is_explicit_change(sentence)
-        if _RULE_REVIEW_PROPOSAL.search(sentence) and not explicit_change:
+        if (_RULE_REVIEW_PROPOSAL.search(sentence) or _RULE_ONGOING_STATE.search(sentence)) and not explicit_change:
             return 0
         if section == "배경" and not _RULE_NEW_CLAUSE.search(sentence):
             return 0
@@ -731,7 +734,8 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
         return 4 if section == label or _RULE_CONDITION.search(sentence) or _RULE_THRESHOLD.search(sentence) else 0
     if label in ("시행·기한", "후속 일정"):
         bounded_schedule = bool(_RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence)
-                                and _RULE_TIME_BOUND.search(sentence))
+                                and (_RULE_TIME_BOUND.search(sentence)
+                                     or ("판매" in sentence and _RULE_FUTURE.search(sentence))))
         # 발표일 자체와 그 날짜를 기준으로 한 명시적 제출기한을 구분한다.
         if _RULE_PAST_EVENT.search(sentence) and not bounded_schedule:
             return 0
