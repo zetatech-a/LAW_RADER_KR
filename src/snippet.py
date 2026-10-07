@@ -610,8 +610,10 @@ _RULE_NEW_CLAUSE = re.compile(rf"(?:그러나|하지만|이에\s*따라|개정�
 _RULE_CHANGE_PREDICATE = re.compile(
     rf"(?:{_ACTION_ALT})(?!\s*하(?:기\s*위[한해]|고자))\s*(?:하|한|함|되|됨|할|해|했)")
 _RULE_REVIEW_PROPOSAL = re.compile(
-    rf"(?:{_ACTION_ALT})\s*하는\s+(?:방안|계획)을\s*(?:검토|논의|연구)한다[.!?…]*$")
-_RULE_ONGOING_STATE = re.compile(rf"(?:{_ACTION_ALT})\s*되어\s*있(?:다|으나)")
+    rf"(?:{_ACTION_ALT})\s*하는\s+(?:방안|계획)을\s*(?:검토|논의|연구)한다[.!?…]*$"
+    r"|^예외\s+(?:(?:적용|인정)\s+여부를|확대\s+방안을)\s*(?:검토|논의)한다[.!?…]*$")
+_RULE_ONGOING_STATE = re.compile(
+    rf"(?:{_ACTION_ALT})\s*(?:되어\s*있(?:다|으나)|하고\s*있(?:다|는|으나))")
 _RULE_CONDITION = re.compile(r"대상(?:은|는|으로|\s*(?:회사|법인|기업|기관|사업자))|적용\s*(?:대상|회사|기업|기관|사업자)|기준(?:은|는)|조건|요건|한도|다만|제외|예외")
 _RULE_PASSIVE_TARGET = re.compile(rf"(?:{_KEY_TARGET.pattern})에(?:게)?\s*적용(?:된다|됩니다|됨)")
 _RULE_TARGET_PREDICATE = re.compile(
@@ -726,6 +728,8 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
             return 2 if re.search(r"논의해갈|점검하고|논의할 계획|논의를 지속", sentence) else 6
         return 4 if _RULE_CHANGE.search(sentence) else 0
     if label == "대상·조건":
+        if _RULE_REVIEW_PROPOSAL.fullmatch(sentence):
+            return 0
         # 예외는 변경 문장과 함께 읽어야 하므로 별도 조건 문장으로 우선한다.
         if re.match(r"^(?:다만|단,|예외)", sentence):
             return 8
@@ -735,7 +739,7 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
     if label in ("시행·기한", "후속 일정"):
         bounded_schedule = bool(_RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence)
                                 and (_RULE_TIME_BOUND.search(sentence)
-                                     or ("판매" in sentence and _RULE_FUTURE.search(sentence))))
+                                     or (re.search(r"판매|모집|공표", sentence) and _RULE_FUTURE.search(sentence))))
         # 발표일 자체와 그 날짜를 기준으로 한 명시적 제출기한을 구분한다.
         if _RULE_PAST_EVENT.search(sentence) and not bounded_schedule:
             return 0
