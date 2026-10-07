@@ -114,11 +114,11 @@ def _summary_label(p: Post) -> str:
     return label
 
 
-def _body_label(p: Post) -> str:
+def _body_label(p: Post, line_count: int | None = None) -> str:
     """AI 요약이 없을 때 쓰는 발췌 블록 제목."""
     if p.source_key == ASSEMBLY_SOURCE_KEY:
         return _ASSEMBLY_BODY_LABEL
-    n = len(_general_excerpt(p))
+    n = len(_general_excerpt(p)) if line_count is None else line_count
     return f"{_BODY_LABEL} · 핵심 {n}줄" if n else _BODY_LABEL
 
 
@@ -243,7 +243,7 @@ def _summary_block(p: Post, accent: str) -> str:
         lines = _general_excerpt(p)
         if not lines:
             return ""
-        return _excerpt_block(_body_label(p), lines, accent)
+        return _excerpt_block(_body_label(p, len(lines)), lines, accent)
 
     # 원문이 아직 공개되지 않은 의안. 빈 카드로 두면 수집이 깨진 것처럼 보인다.
     if _is_pending(p):
@@ -474,7 +474,7 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
                     excerpt = _general_excerpt(p)
                     prefix = "      · "
                 if excerpt:
-                    lines.append(f"    [{_body_label(p)}]")
+                    lines.append(f"    [{_body_label(p, len(excerpt))}]")
                     lines.extend(f"{prefix}{line}" for line in excerpt)
                     lines.append("      원문 문장을 자동으로 선별했습니다.")
             elif _is_pending(p):

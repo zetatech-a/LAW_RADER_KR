@@ -615,6 +615,8 @@ _RULE_REVIEW_PROPOSAL = re.compile(
     r"|^예외\s+(?:(?:적용|인정)\s+여부를|확대\s+방안을)\s*(?:검토|논의)한다[.!?…]*$")
 _RULE_ONGOING_STATE = re.compile(
     rf"(?:{_ACTION_ALT})\s*(?:되어\s*있(?:다|으나)|하고\s*있(?:다|는|으나))")
+_RULE_NEGATED_CHANGE = re.compile(rf"(?:{_ACTION_ALT})\s*(?:하|되)지\s*않")
+_RULE_NEGATED_EFFECTIVE = re.compile(rf"(?:{_EFFECTIVE_ACTION})\s*(?:하|되)지\s*않")
 _RULE_CONDITION = re.compile(r"대상(?:은|는|으로|\s*(?:회사|법인|기업|기관|사업자))|적용\s*(?:대상|회사|기업|기관|사업자)|기준(?:은|는)|조건|요건|한도|다만|제외|예외")
 _RULE_PASSIVE_TARGET = re.compile(rf"(?:{_KEY_TARGET.pattern})에(?:게)?\s*적용(?:된다|됩니다|됨)")
 _RULE_TARGET_PREDICATE = re.compile(
@@ -691,8 +693,9 @@ def _join_excerpt_parts(parts: list[str], title: str = "") -> str:
 
 
 def _is_explicit_change(sentence: str) -> bool:
-    """제안·현재 상태 구절만 제외하고 같은 문장의 별도 실제 변경은 보존한다."""
+    """제안·현재 상태·부정 구절만 제외하고 같은 문장의 실제 변경은 보존한다."""
     view = _RULE_ONGOING_STATE.sub(" ", _RULE_REVIEW_PROPOSAL.sub(" ", sentence))
+    view = _RULE_NEGATED_CHANGE.sub(" ", view)
     return bool(_RULE_CHANGE_PREDICATE.search(view)
                 or re.search(rf"(?:{_ACTION_ALT})\s*된다(?![가-힣])", view))
 
@@ -725,7 +728,8 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
         return 0
     if label == "변경 내용":
         explicit_change = _is_explicit_change(sentence)
-        if (_RULE_REVIEW_PROPOSAL.search(sentence) or _RULE_ONGOING_STATE.search(sentence)) and not explicit_change:
+        if (_RULE_REVIEW_PROPOSAL.search(sentence) or _RULE_ONGOING_STATE.search(sentence)
+                or _RULE_NEGATED_CHANGE.search(sentence)) and not explicit_change:
             return 0
         if section == "배경" and not _RULE_NEW_CLAUSE.search(sentence):
             return 0
@@ -746,6 +750,10 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
             return 6
         return 4 if section == label or _RULE_CONDITION.search(sentence) or _RULE_THRESHOLD.search(sentence) else 0
     if label in ("시행·기한", "후속 일정"):
+        # 판정용 임시 문자열만 바꾼다. 부정된 시행일은 heading/날짜만으로 복구하지 않는다.
+        sentence, negated = _RULE_NEGATED_EFFECTIVE.subn(" ", sentence)
+        if negated and not _RULE_FUTURE.search(sentence):
+            return 0
         bounded_schedule = bool(_RULE_MONTH_DAY_BOUND.search(sentence) or (
                                 _RULE_DATE.search(sentence) and _is_explicit_change(sentence)
                                 and _RULE_FUTURE.search(sentence)) or (
