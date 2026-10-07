@@ -621,7 +621,10 @@ _RULE_CONDITION = re.compile(r"대상(?:은|는|으로|\s*(?:회사|법인|기�
 _RULE_PASSIVE_TARGET = re.compile(rf"(?:{_KEY_TARGET.pattern})에(?:게)?\s*적용(?:된다|됩니다|됨)")
 _RULE_TARGET_PREDICATE = re.compile(
     rf"(?<![가-힣])(?:{_KEY_TARGET.pattern})(?:[이가은는만도])?\s+대상(?:이다|입니다|임)[.!?…]*$")
-_RULE_THRESHOLD = re.compile(r"\d[\d,.]*\s*(?:억원|조원|원|%|명|건|개)?\s*(?:이상|이하|초과|미만)(?:인|의|에 해당하는)?\s*(?:회사|기업|기관|은행|사업자|소비자|투자자|이용자|경우|때)")
+_RULE_THRESHOLD = re.compile(
+    r"\d[\d,.]*\s*(?:억원|조원|원|%|명|건|개)?(?:을|를)?\s*"
+    r"(?:초과하는|(?:이상|이하|초과|미만)(?:인|의|에 해당하는)?)\s*"
+    r"(?:회사|기업|기관|은행|사업자|소비자|투자자|이용자|경우|때)")
 _KEY_NUMERIC_CELLS = re.compile(r"(?:^|\s)[-−△]?\d[\d,.]*%?(?:\s+[-−△]?\d[\d,.]*%?){3}")
 _RULE_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일|\d+\s*영업일|\d+\s*개월|오늘|내일|내년|올해|즉시|공포한 날")
 _RULE_CALENDAR_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일")
