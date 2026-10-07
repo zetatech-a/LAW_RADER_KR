@@ -495,10 +495,10 @@ def strip_edge_noise(
     start = 0
     while start < len(lines):
         line = lines[start]
-        # '붙임' 은 메타 라벨이 아니므로(noise 아님) 파일명 줄이 뒤따를 때만 목록으로 본다.
+        # 별도 첨부 목록 표식도 실제 파일명 줄이 뒤따를 때만 건너뛴다.
         if (
-            for_classification
-            and _ENCLOSURE_LABEL_ONLY.match(line)
+            ((for_classification and _ENCLOSURE_LABEL_ONLY.match(line))
+             or _KEY_ATTACHMENT_LIST.fullmatch(line))
             and start + 1 < len(lines)
             and _BARE_FILENAME.match(lines[start + 1])
         ):
@@ -630,7 +630,8 @@ _RULE_TIME_BOUND = re.compile(
 )
 _RULE_PAST_EVENT = re.compile(r"개최하였|개최했|개최하였다|논의하였|논의했다|발표일|배포일|등록일|게시일")
 _RULE_PAST_PREDICATE = re.compile(r"(?:됐|했|하였|되었|받았|끝났|종료됐|완료됐|재개됐|시작됐|개시됐|소진됐|출시됐)|(?:판매|재개|시작|종료|공급)\s*되\s*었")
-_RULE_FUTURE = re.compile(rf"예정|계획|(?:{_EFFECTIVE_ACTION})(?:한다|함|된다|됨)|(?:재개|시작|개시|판매|공급|접수|신청|제출)\s*(?:한다|할|함|된다|됨|가능)")
+_RULE_FORMER_PLAN = re.compile(r"(?:예정|계획)이었")
+_RULE_FUTURE = re.compile(rf"(?:예정|계획)(?!이었)|(?:{_EFFECTIVE_ACTION})(?:한다|함|된다|됨)|(?:재개|시작|개시|판매|공급|접수|신청|제출)\s*(?:한다|할|함|된다|됨|가능)")
 _RULE_STAT_TITLE = re.compile(r"현황|동향|통계|실적|결과|판매")
 _RULE_STAT_FACT = re.compile(r"공급|판매|증가|감소|잔여|소진|총|목표|비율|수익|손실|규모")
 
@@ -693,8 +694,9 @@ def _excerpt_roles(title: str, candidates: list[str], sections: list[str]) -> tu
     """문서 유형별 질문. 유형이 불명확하면 일반 중요도 선별로 돌아간다."""
     if _RULE_CHANGE.search(title):
         return ("변경 내용", "대상·조건", "시행·기한")
-    if any(_is_explicit_change(s) and not _RULE_HISTORY.search(s)
-           and (not _RULE_PAST_PREDICATE.search(s) or _RULE_FUTURE.search(s))
+    if any(_is_explicit_change(s) and not _RULE_HISTORY.search(_history_view(s))
+           and (not _RULE_STAT_TITLE.search(title)
+                or not _RULE_PAST_PREDICATE.search(s) or _RULE_FUTURE.search(s))
            for s in candidates):
         return ("변경 내용", "대상·조건", "시행·기한")
     if _RULE_STAT_TITLE.search(title) and any(_KEY_FACT.search(s) for s in candidates):
@@ -744,7 +746,8 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
         if _RULE_PAST_EVENT.search(sentence) and not bounded_schedule:
             return 0
         if (
-            _RULE_PAST_PREDICATE.search(sentence) and not _RULE_FUTURE.search(sentence)
+            (_RULE_PAST_PREDICATE.search(sentence) or _RULE_FORMER_PLAN.search(sentence))
+            and not _RULE_FUTURE.search(sentence)
         ):
             return 0
         return 6 if (bounded_schedule or (
@@ -858,7 +861,7 @@ def build_rule_excerpt_rows(
             section_start = bool(pending and pending[-1].endswith((".", "!", "?", "…")))
         if (_KEY_BULLET.match(line) or section_start) and pending:
             flush()
-        if _KEY_ENUMERATION.match(line):
+        if _KEY_ENUMERATION.match(line) and section == "배경":
             section = ""
         # 순서 표식만 벗기고 뒤의 실질 문장을 보존한다(로마 숫자 포함).
         content = _KEY_BULLET.sub("", line, count=1).strip()
