@@ -622,6 +622,12 @@ _RULE_THRESHOLD = re.compile(r"\d[\d,.]*\s*(?:억원|조원|원|%|명|건|개)?\
 _KEY_NUMERIC_CELLS = re.compile(r"(?:^|\s)[-−△]?\d[\d,.]*%?(?:\s+[-−△]?\d[\d,.]*%?){3}")
 _RULE_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일|\d+\s*영업일|\d+\s*개월|오늘|내일|내년|올해|즉시|공포한 날")
 _RULE_CALENDAR_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일")
+# 연도 없는 숫자쌍은 전역 날짜 규칙 대신 명시적 일정 문맥에서만 사용한다.
+_RULE_MONTH_DAY = re.compile(r"(?<![\d./])\d{1,2}\s*[./]\s*\d{1,2}(?!\d)\.?")
+_RULE_MONTH_DAY_BOUND = re.compile(
+    rf"(?:{_RULE_MONTH_DAY.pattern})\s*(?:부터|까지|이후|이전|에|{_EFFECTIVE_ACTION})"
+    rf"|시행일(?:은|는|:|：)?\s*(?:{_RULE_MONTH_DAY.pattern})"
+)
 _RULE_SCHEDULE = re.compile(rf"{_EFFECTIVE_ACTION}|접수|신청|제출|모집|판매|공표|공포|기한|마감")
 _RULE_TIME_BOUND = re.compile(
     rf"(?:{_RULE_DATE.pattern}).{{0,16}}(?:부터|까지|이내|마감|경과)"
@@ -739,9 +745,10 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
             return 6
         return 4 if section == label or _RULE_CONDITION.search(sentence) or _RULE_THRESHOLD.search(sentence) else 0
     if label in ("시행·기한", "후속 일정"):
-        bounded_schedule = bool(_RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence)
+        bounded_schedule = bool(_RULE_MONTH_DAY_BOUND.search(sentence) or (
+                                _RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence)
                                 and (_RULE_TIME_BOUND.search(sentence)
-                                     or (re.search(r"판매|모집|공표", sentence) and _RULE_FUTURE.search(sentence))))
+                                     or (re.search(r"판매|모집|공표", sentence) and _RULE_FUTURE.search(sentence)))))
         # 발표일 자체와 그 날짜를 기준으로 한 명시적 제출기한을 구분한다.
         if _RULE_PAST_EVENT.search(sentence) and not bounded_schedule:
             return 0
@@ -750,7 +757,7 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
             and not _RULE_FUTURE.search(sentence)
         ):
             return 0
-        return 6 if (bounded_schedule or (
+        return 6 if (bounded_schedule or (section == "시행·기한" and _RULE_MONTH_DAY.fullmatch(sentence)) or (
             _RULE_DATE.search(sentence) and section == "시행·기한"
             and (_RULE_CALENDAR_DATE.search(sentence) or _RULE_TIME_BOUND.search(sentence))
         )) else 0
@@ -876,7 +883,7 @@ def build_rule_excerpt_rows(
             sentence = _KEY_BULLET.sub("", sentence, count=1).strip()
             if (not sentence or _KEY_HEADING.fullmatch(sentence)
                     or is_duplicate_title(sentence, title)
-                    or is_boilerplate(sentence) or is_structural_noise(sentence)
+                    or is_structural_noise(sentence)
                     or is_attachment_reference_only(sentence)):
                 continue
             # 긴 숫자 표는 별도 표 보기에서 확인할 정보다. 다수 셀을 합친 문자열이
