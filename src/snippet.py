@@ -605,6 +605,7 @@ _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "�
 
 # 역할 판단은 발췌 출력에만 적용한다. Gemini 입력·호출·재시도에는 사용하지 않는다.
 _RULE_CHANGE = re.compile(rf"(?:{_ACTION_ALT})(?![가-힣])")
+_RULE_CHANGE_TITLE = re.compile(rf"(?:{_ACTION_ALT})(?:안)?(?![가-힣])")
 _RULE_HISTORY = re.compile(r"^(?:현행(?=\s|법|규정|제도|은|는)|현재\s*(?:제도|규정|법)|종전(?:에는|에|의|\s)|기존(?:에는|의|\s*(?:제도|규정|법))|(?:과거|예전)(?:에는|(?=\s|$))|지난|당시|그간)")
 _RULE_NEW_CLAUSE = re.compile(rf"(?:그러나|하지만|이에\s*따라|개정안(?:은|에서는)|앞으로는|이번\s*개정안은).{{0,120}}(?:{_ACTION_ALT})\s*(?:하|한|함|되|됨|할|해|했)")
 _RULE_CHANGE_PREDICATE = re.compile(
@@ -698,7 +699,7 @@ def _is_explicit_change(sentence: str) -> bool:
 
 def _excerpt_roles(title: str, candidates: list[str], sections: list[str]) -> tuple[str, ...]:
     """문서 유형별 질문. 유형이 불명확하면 일반 중요도 선별로 돌아간다."""
-    if _RULE_CHANGE.search(title):
+    if _RULE_CHANGE_TITLE.search(title):
         return ("변경 내용", "대상·조건", "시행·기한")
     if any(_is_explicit_change(s) and not _RULE_HISTORY.search(_history_view(s))
            and (not _RULE_STAT_TITLE.search(title)
@@ -746,6 +747,8 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
         return 4 if section == label or _RULE_CONDITION.search(sentence) or _RULE_THRESHOLD.search(sentence) else 0
     if label in ("시행·기한", "후속 일정"):
         bounded_schedule = bool(_RULE_MONTH_DAY_BOUND.search(sentence) or (
+                                _RULE_DATE.search(sentence) and _is_explicit_change(sentence)
+                                and _RULE_FUTURE.search(sentence)) or (
                                 _RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence)
                                 and (_RULE_TIME_BOUND.search(sentence)
                                      or (re.search(r"판매|모집|공표", sentence) and _RULE_FUTURE.search(sentence)))))
@@ -956,8 +959,8 @@ def build_rule_excerpt_rows(
     for role in roles[:max_lines]:
         eligible = [i for i, s in enumerate(candidates)
                     if i not in selected and not is_duplicate(i) and _role_strength(role, s, sections[i])]
-        if role in ("대상·조건", "주요 현황", "세부 수치"):
-            # 구체적인 시행 일정은 일정 역할에 남긴다. 예외 문장은 조건에서 유지한다.
+        if role in ("변경 내용", "대상·조건", "주요 현황", "세부 수치"):
+            # 별도 변경/대상이 있으면 구체적인 일정은 일정 역할에 남긴다.
             non_schedule = [i for i in eligible if not _role_strength("시행·기한", candidates[i], sections[i])]
             eligible = non_schedule if role in ("주요 현황", "세부 수치") else non_schedule or eligible
         if not eligible:
@@ -1259,12 +1262,20 @@ def _amendment_index(sentences: list[str], candidates) -> int | None:
     단서가 뒤의 "신설"·"개정" 문장을 가려, 발췌에서 정작 무엇을 바꾸는지가 빠진다.
     """
     candidates = list(candidates)
+    broad_change = None
     for i in candidates:
         sentence = _KEY_BULLET.sub("", sentences[i], count=1)
         if _RULE_HISTORY.search(sentence) and not _RULE_NEW_CLAUSE.search(sentence):
             continue
-        if _RULE_CHANGE_PREDICATE.search(sentence) or _ASSEMBLY_NOMINAL_AMENDMENT.search(sentence):
+        change = _RULE_CHANGE_PREDICATE.search(sentence)
+        if (_ASSEMBLY_NOMINAL_AMENDMENT.search(sentence)
+                or (change and any(word in sentence for word in _MEDIUM_AMENDMENT_KEYWORDS))):
             return i
+        # 명시적 개정 의도가 없는 행위는 뒤의 더 강한 후보까지 확인한 뒤 선택한다.
+        if change and broad_change is None:
+            broad_change = i
+    if broad_change is not None:
+        return broad_change
     for tier in _AMENDMENT_TIERS:
         hit = next(
             (i for i in candidates if any(word in sentences[i] for word in tier)),
