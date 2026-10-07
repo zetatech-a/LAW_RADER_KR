@@ -578,7 +578,7 @@ def build_fallback_snippet(
 # 외부 모델 없이 원문 문장을 고르는 추출식 요약. 새 문장을 생성하거나 법적 효과를
 # 추론하지 않는다. 변경 내용/대상/일정을 우선하고 중복을 줄여 최대 세 줄을 표시한다.
 # 일반 발췌와 의안이 공유하는 행위어. 본문에서는 술어 형태를 함께 확인한다.
-_REGULATORY_ACTIONS = ("개정", "신설", "폐지", "삭제", "도입", "확대", "축소",
+_REGULATORY_ACTIONS = ("개정", "변경", "신설", "폐지", "삭제", "도입", "확대", "축소",
                        "강화", "완화", "인상", "인하", "상향", "하향", "금지",
                        "허용", "제한", "면제", "부과", "유예", "연장", "단축", "의무화")
 _ACTION_ALT = "|".join(_REGULATORY_ACTIONS)
@@ -605,7 +605,7 @@ _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "�
 
 # 역할 판단은 발췌 출력에만 적용한다. Gemini 입력·호출·재시도에는 사용하지 않는다.
 _RULE_CHANGE = re.compile(rf"(?:{_ACTION_ALT})(?![가-힣])")
-_RULE_HISTORY = re.compile(r"^(?:현행(?=\s|법|규정|제도|은|는)|현재\s*(?:제도|규정|법)|종전(?:에는|에|의|\s)|기존(?:에는|의|\s*(?:제도|규정|법))|지난|당시|그간)")
+_RULE_HISTORY = re.compile(r"^(?:현행(?=\s|법|규정|제도|은|는)|현재\s*(?:제도|규정|법)|종전(?:에는|에|의|\s)|기존(?:에는|의|\s*(?:제도|규정|법))|(?:과거|예전)(?:에는|(?=\s|$))|지난|당시|그간)")
 _RULE_NEW_CLAUSE = re.compile(rf"(?:그러나|하지만|이에\s*따라|개정안(?:은|에서는)|앞으로는|이번\s*개정안은).{{0,120}}(?:{_ACTION_ALT})\s*(?:하|한|함|되|됨|할|해|했)")
 _RULE_CHANGE_PREDICATE = re.compile(
     rf"(?:{_ACTION_ALT})(?!\s*하(?:기\s*위[한해]|고자))\s*(?:하|한|함|되|됨|할|해|했)")
@@ -622,7 +622,7 @@ _RULE_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*�
 _RULE_CALENDAR_DATE = re.compile(r"\d{2,4}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\d{4}\s*년|\d{1,2}\s*월|\d{1,2}\s*일")
 _RULE_SCHEDULE = re.compile(rf"{_EFFECTIVE_ACTION}|접수|신청|제출|모집|판매|공표|공포|기한|마감")
 _RULE_TIME_BOUND = re.compile(
-    rf"(?:{_RULE_DATE.pattern}).{{0,16}}(?:부터|까지|마감|경과)"
+    rf"(?:{_RULE_DATE.pattern}).{{0,16}}(?:부터|까지|이내|마감|경과)"
     rf"|(?:{_RULE_DATE.pattern})\s*(?:[.)]\s*)*(?:에|부터|이후|후)?\s*(?:{_EFFECTIVE_ACTION}|접수|신청|제출|마감)"
     rf"|(?:시행일|기한|마감일|접수기간).{{0,12}}(?:{_RULE_DATE.pattern})"
 )
@@ -882,6 +882,10 @@ def build_rule_excerpt_rows(
             if sentence not in candidates:
                 candidates.append(sentence)
                 sections.append(context)
+            elif context in ("변경 내용", "대상·조건", "시행·기한", "주요 현황"):
+                index = candidates.index(sentence)
+                if sections[index] in ("", "배경"):
+                    sections[index] = context
     if not candidates:
         return []
 
