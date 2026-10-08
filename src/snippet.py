@@ -720,8 +720,12 @@ def _excerpt_roles(title: str, candidates: list[str], sections: list[str]) -> tu
 
 
 def _history_view(sentence: str) -> str:
-    """현행법 검사에서만 제한된 예외 접두어를 벗긴다. 출력 원문은 보존한다."""
-    return re.sub(r"^(?:다만|단)(?:\s*,\s*|\s+)", "", sentence, count=1)
+    """History 검사에서만 예외 접두어·실제 변경의 명시적 목적어를 벗긴다."""
+    view = re.sub(r"^(?:다만|단)(?:\s*,\s*|\s+)", "", sentence, count=1)
+    existing_object = re.match(r"^기존\s+규정을\s+", view)
+    if existing_object and _is_explicit_change(view):
+        return view[existing_object.end():]
+    return view
 
 
 def _role_strength(label: str, sentence: str, section: str = "") -> int:
@@ -885,7 +889,8 @@ def build_rule_excerpt_rows(
         if _KEY_ENUMERATION.match(line) and section == "배경":
             section = ""
         # 순서 표식만 벗기고 뒤의 실질 문장을 보존한다(로마 숫자 포함).
-        content = _KEY_BULLET.sub("", line, count=1).strip()
+        content = (line if _RULE_MONTH_DAY_BOUND.match(line)
+                   else _KEY_BULLET.sub("", line, count=1)).strip()
         if content:
             pending.append(content)
     flush()
@@ -894,7 +899,8 @@ def build_rule_excerpt_rows(
     sections: list[str] = []
     for context, paragraph in paragraphs:
         for sentence in _key_sentences(paragraph):
-            sentence = _KEY_BULLET.sub("", sentence, count=1).strip()
+            sentence = (sentence if _RULE_MONTH_DAY_BOUND.match(sentence)
+                        else _KEY_BULLET.sub("", sentence, count=1)).strip()
             if (not sentence or _KEY_HEADING.fullmatch(sentence)
                     or is_duplicate_title(sentence, title)
                     or is_structural_noise(sentence)
