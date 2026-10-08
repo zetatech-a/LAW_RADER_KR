@@ -796,7 +796,7 @@ def _duplicate_signature(text: str) -> tuple[str, ...]:
     roles = {"은": ":subject", "는": ":subject", "이": ":subject", "가": ":subject",
              "을": ":object", "를": ":object"}
     return tuple(re.sub(r"(?:에서는|에게|으로|은|는|을|를|이|가)$",
-                        lambda m: roles.get(m[0], ""), t)
+                        lambda m: roles.get(m[0], m[0]), t)
                  for t in re.findall(r"[가-힣A-Za-z]{2,}", text) if t not in _KEY_STOPWORDS)
 
 
@@ -878,6 +878,7 @@ def build_rule_excerpt_rows(
             not pending or pending[-1].endswith((".", "!", "?", "…"))
         ):
             flush()
+            section = ""
             continue
         section_start = bool(_KEY_SECTION_START.match(line))
         if re.fullmatch(r"\*+", line):
