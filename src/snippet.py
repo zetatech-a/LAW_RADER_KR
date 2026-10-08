@@ -752,9 +752,13 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
     if label == "대상·조건":
         if _RULE_REVIEW_PROPOSAL.fullmatch(sentence):
             return 0
-        # 예외는 변경 문장과 함께 읽어야 하므로 별도 조건 문장으로 우선한다.
-        if re.match(r"^(?:다만|단,|예외)", sentence):
-            return 8
+        # 접두어를 제외한 본문에 기존 조건 증거가 있을 때만 예외로 우선한다.
+        exception = re.match(r"^(?:다만|단,|예외)", sentence)
+        if exception:
+            sentence = sentence[exception.end():].lstrip(" ,")
+            if (_RULE_CONDITION.search(sentence) or _KEY_TARGET.search(sentence)
+                    or _RULE_THRESHOLD.search(sentence)):
+                return 8
         if _RULE_PASSIVE_TARGET.search(sentence) or _RULE_TARGET_PREDICATE.search(sentence):
             return 6
         return 4 if section == label or _RULE_CONDITION.search(sentence) or _RULE_THRESHOLD.search(sentence) else 0
@@ -763,7 +767,9 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
         sentence, negated = _RULE_NEGATED_EFFECTIVE.subn(" ", sentence)
         if negated and not _RULE_FUTURE.search(sentence):
             return 0
-        bounded_schedule = bool(_RULE_MONTH_DAY_BOUND.search(sentence) or (
+        month_day = _RULE_MONTH_DAY_BOUND.search(sentence)
+        bounded_schedule = bool((month_day and (
+                                not month_day[0].endswith("에") or _RULE_SCHEDULE.search(sentence))) or (
                                 _RULE_DATE.search(sentence) and _is_explicit_change(sentence)
                                 and _RULE_FUTURE.search(sentence)) or (
                                 _RULE_DATE.search(sentence) and _RULE_SCHEDULE.search(sentence)
@@ -795,7 +801,7 @@ def _key_tokens(text: str) -> set[str]:
 def _duplicate_signature(text: str) -> tuple[str, ...]:
     """기존 중복 정규화를 순서대로 보존한다. 원문 출력이나 문법 해석은 바꾸지 않는다."""
     text = re.sub(r"금융위(?=는|가|\s|[.,]|$)", "금융위원회", text)
-    text = re.sub(rf"({_ACTION_ALT})(?:한다고|할|한다|된다|됨|함)(?=\s|[.!?]|$)", r"\1", text)
+    text = re.sub(rf"({_ACTION_ALT})(?:한다고|할(?!\s+수\s+있다)|한다|된다|됨|함)(?=\s|[.!?]|$)", r"\1", text)
     text = re.sub(r"(?:밝혔다|예정이다|해당)(?=\s|[.!?]|$)", "", text)
     roles = {"은": ":subject", "는": ":subject", "이": ":subject", "가": ":subject",
              "을": ":object", "를": ":object"}
