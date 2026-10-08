@@ -1284,7 +1284,7 @@ def _amendment_index(sentences: list[str], candidates) -> int | None:
         sentence = _KEY_BULLET.sub("", sentences[i], count=1)
         if _RULE_HISTORY.search(sentence) and not _RULE_NEW_CLAUSE.search(sentence):
             continue
-        change = _RULE_CHANGE_PREDICATE.search(sentence)
+        change = _is_explicit_change(sentence)
         if (_ASSEMBLY_NOMINAL_AMENDMENT.search(sentence)
                 or (change and any(word in sentence for word in _MEDIUM_AMENDMENT_KEYWORDS))):
             return i
