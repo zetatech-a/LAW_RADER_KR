@@ -840,6 +840,21 @@ def _key_sentences(text: str) -> list[str]:
     return sentences
 
 
+def _bounded_excerpt_row(text: str, limit: int) -> str:
+    """원문 앞·뒤를 보존하되 어절과 연속된 숫자/부호 묶음은 쪼개지 않는다."""
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return "…"[:max(0, limit)]
+    # 공백으로 나뉜 음수 부호·날짜도 하나의 출력 단위로 취급한다.
+    units = list(re.finditer(r"(?:\S*[-−△–—]\s+)?\S*\d\S*(?:\s+\S*\d\S*)*|\S+", text))
+    room = limit - len(" … ")
+    head_end = max((m.end() for m in units if m.end() <= room // 2), default=0)
+    tail_start = min((m.start() for m in units if len(text) - m.start() <= room - head_end),
+                     default=len(text))
+    return (text[:head_end] + " … " + text[tail_start:]).strip()
+
+
 def build_rule_excerpt_rows(
     body: str, title: str = "", *, max_lines: int = 3, max_line_chars: int = 300,
 ) -> list[tuple[str, str]]:
@@ -1019,9 +1034,7 @@ def build_rule_excerpt_rows(
         selected.append(best)
         covered.update(features[best])
     ordered = selected if labels else sorted(selected)
-    return [(labels.get(i, "주요 내용"),
-             candidates[i] if len(candidates[i]) <= max_line_chars
-             else _cut_at_word(candidates[i], max_line_chars - 2) + " …")
+    return [(labels.get(i, "주요 내용"), _bounded_excerpt_row(candidates[i], max_line_chars))
             for i in ordered]
 
 
