@@ -775,6 +775,8 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
             and not _RULE_FUTURE.search(sentence)
         ):
             return 0
+        if section == "시행·기한" and _RULE_DATE.fullmatch(sentence):
+            return 8
         return 6 if (bounded_schedule or (section == "시행·기한" and _RULE_MONTH_DAY.fullmatch(sentence)) or (
             _RULE_DATE.search(sentence) and section == "시행·기한"
             and (_RULE_CALENDAR_DATE.search(sentence) or _RULE_TIME_BOUND.search(sentence))
@@ -894,6 +896,10 @@ def build_rule_excerpt_rows(
                    else _KEY_BULLET.sub("", line, count=1)).strip()
         if content:
             pending.append(content)
+            # 명시적 일정의 단독 상대 시점을 다음 통계/설명 줄과 합치지 않는다.
+            if (section == "시행·기한" and _RULE_DATE.fullmatch(content)
+                    and not _RULE_CALENDAR_DATE.search(content)):
+                flush()
     flush()
 
     candidates: list[str] = []
