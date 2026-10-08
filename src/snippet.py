@@ -729,7 +729,9 @@ def _history_view(sentence: str) -> str:
 
 
 def _role_strength(label: str, sentence: str, section: str = "") -> int:
-    if sentence.startswith(("*", "※")) or re.search(r"배경을 설명|감사 인사|간담회를 개최", sentence):
+    # 역할 판정에서만 주석 표식을 벗긴다. 후보와 출력 원문은 보존한다.
+    sentence = sentence.removeprefix("※").lstrip()
+    if sentence.startswith("*") or re.search(r"배경을 설명|감사 인사|간담회를 개최", sentence):
         return 0
     if label in ("변경 내용", "대상·조건") and _RULE_HISTORY.search(_history_view(sentence)) and not _RULE_NEW_CLAUSE.search(sentence):
         return 0
