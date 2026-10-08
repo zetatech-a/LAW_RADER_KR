@@ -1006,6 +1006,10 @@ def build_rule_excerpt_rows(
     for role in roles[:max_lines]:
         eligible = [i for i, s in enumerate(candidates)
                     if i not in selected and not is_duplicate(i) and _role_strength(role, s, sections[i])]
+        if role == "변경 내용":
+            amendments = [i for i in eligible if _is_explicit_change(candidates[i])
+                          or _RULE_CHANGE.search(candidates[i])]
+            eligible = amendments or eligible
         if role in ("변경 내용", "대상·조건", "주요 현황", "세부 수치"):
             # 별도 변경/대상이 있으면 구체적인 일정은 일정 역할에 남긴다.
             non_schedule = [i for i in eligible if not _role_strength("시행·기한", candidates[i], sections[i])]
