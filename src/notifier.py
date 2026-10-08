@@ -9,11 +9,14 @@ from email.utils import formataddr
 
 from .config import EmailConfig
 from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
+from .reply_excerpt import build_reply_excerpt_rows
 from .snippet import (
     BodyKind,
     build_assembly_fallback_lines,
     build_fallback_snippet,
+    build_rule_excerpt_rows,
     classify_body,
+    clean_body_text,
 )
 
 log = logging.getLogger(__name__)
@@ -111,11 +114,26 @@ def _summary_label(p: Post) -> str:
     return label
 
 
-def _body_label(p: Post) -> str:
+def _body_label(p: Post, line_count: int | None = None) -> str:
     """AI 요약이 없을 때 쓰는 발췌 블록 제목."""
     if p.source_key == ASSEMBLY_SOURCE_KEY:
         return _ASSEMBLY_BODY_LABEL
-    return _BODY_LABEL
+    n = len(_general_excerpt(p)) if line_count is None else line_count
+    return f"{_BODY_LABEL} · 핵심 {n}줄" if n else _BODY_LABEL
+
+
+def _general_excerpt(p: Post) -> list[str]:
+    if classify_body(p.body, p.title) is not BodyKind.CONTENT:
+        return []
+    # key는 사용자 설정값이다. scraper가 보장하는 완전한 Q/A/이유 구조로 판별한다.
+    rows = (build_reply_excerpt_rows(p.body, require_complete=True)
+            or build_rule_excerpt_rows(p.body, p.title))
+    if not rows:
+        # 분류/점수 필터가 유효 본문을 모두 거절해도 정보 자체를 지우지 않는다.
+        fallback = build_fallback_snippet(clean_body_text(p.body, p.title))
+        return [fallback] if fallback else []
+    return [f"{role}: {sentence}" if role != "주요 내용" else sentence
+            for role, sentence in rows]
 
 
 def _has_summary(*groups: "dict[str, list[Post]] | None") -> bool:
@@ -207,19 +225,10 @@ def _summary_block(p: Post, accent: str) -> str:
 
     if p.body:
         # 의안은 발췌의 출처(제안이유 및 주요내용)를 밝히고, 220자 한 줄 대신 원문에서
-        # 고른 여러 구간을 싣는다. 그 외 소스는 기존과 같이 라벨 없이 한 줄 발췌만.
+        # 고른 여러 구간을 싣는다. 일반 글은 역할별 핵심 원문을 선별한다.
         if p.source_key == ASSEMBLY_SOURCE_KEY:
             lines = _assembly_excerpt(p)
-            body_html = "".join(
-                "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;"
-                f"color:#475569'>{_esc(line)}</div>"
-                for line in lines
-            )
-            return (
-                f"<div style='margin:10px 0 0;font-size:10px;letter-spacing:.8px;"
-                f"font-weight:700;color:{accent}'>{_esc(_body_label(p))}</div>"
-                f"{body_html}"
-            )
+            return _excerpt_block(_body_label(p), lines, accent)
         # 본문이 첨부 참조 안내뿐이면 그 문장을 발췌로 싣지 않고 짧은 안내로 바꾼다.
         # 첨부 칩은 _card 가 기존대로 이어서 붙인다.
         if _is_attachment_reference_only(p):
@@ -231,10 +240,10 @@ def _summary_block(p: Post, accent: str) -> str:
                 "<div style='font-size:13px;line-height:1.6;color:#475569'>"
                 f"{_esc(_attachment_only_text(p))}</div></div>"
             )
-        return (
-            "<div style='margin:8px 0 0;font-size:13px;line-height:1.6;color:#475569'>"
-            f"{_esc(build_fallback_snippet(p.body, p.title))}</div>"
-        )
+        lines = _general_excerpt(p)
+        if not lines:
+            return ""
+        return _excerpt_block(_body_label(p, len(lines)), lines, accent)
 
     # 원문이 아직 공개되지 않은 의안. 빈 카드로 두면 수집이 깨진 것처럼 보인다.
     if _is_pending(p):
@@ -247,6 +256,28 @@ def _summary_block(p: Post, accent: str) -> str:
             f"{_esc(_PENDING_TEXT)}</div></div>"
         )
     return ""
+
+
+def _excerpt_block(label: str, lines: list[str], accent: str) -> str:
+    """AI 카드와 같은 여백/불릿/기관색. 문장은 원문 자동선별임을 명시한다."""
+    if not lines:
+        return ""
+    items = "".join(
+        "<tr><td valign='top' style='padding:2px 8px 2px 0;"
+        f"font-size:13px;line-height:1.6;color:{accent}'>•</td>"
+        "<td style='padding:2px 0;font-size:13px;line-height:1.6;color:#334155'>"
+        f"{_esc(line)}</td></tr>" for line in lines
+    )
+    return (
+        "<div style='margin:10px 0 0;padding:10px 12px;background:#f8fafc;"
+        "border:1px solid #e2e8f0;border-radius:6px'>"
+        f"<div style='margin:0 0 6px;font-size:10px;letter-spacing:.8px;"
+        f"font-weight:700;color:{accent}'>{_esc(label)}</div>"
+        f"<table role='presentation' cellpadding='0' cellspacing='0' "
+        f"style='border-collapse:collapse'>{items}</table>"
+        "<div style='margin-top:6px;font-size:11px;color:#64748b'>"
+        "원문 문장을 자동으로 선별했습니다.</div></div>"
+    )
 
 
 def _card(p: Post, accent: str) -> str:
@@ -436,11 +467,16 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
                 lines.append(f"    [{_ATTACHMENT_ONLY_LABEL}]")
                 lines.append(f"      {_attachment_only_text(p)}")
             elif p.body:
-                lines.append(f"    [{_body_label(p)}]")
                 if p.source_key == ASSEMBLY_SOURCE_KEY:
-                    lines.extend(f"      {line}" for line in _assembly_excerpt(p))
+                    excerpt = _assembly_excerpt(p)
+                    prefix = "      "
                 else:
-                    lines.append(f"      {build_fallback_snippet(p.body, p.title)}")
+                    excerpt = _general_excerpt(p)
+                    prefix = "      · "
+                if excerpt:
+                    lines.append(f"    [{_body_label(p, len(excerpt))}]")
+                    lines.extend(f"{prefix}{line}" for line in excerpt)
+                    lines.append("      원문 문장을 자동으로 선별했습니다.")
             elif _is_pending(p):
                 lines.append(f"    [{_PENDING_LABEL}]")
                 lines.append(f"      {_PENDING_TEXT}")
