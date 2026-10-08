@@ -1,6 +1,7 @@
 {
   "fsc_press": {
     "seen": [
+      "path:87900",
       "path:87899",
       "path:87894",
       "path:87893",
@@ -228,6 +229,7 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:238317",
       "nttId:238310",
       "nttId:238152",
       "nttId:238150",
