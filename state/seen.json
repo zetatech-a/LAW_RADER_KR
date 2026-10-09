@@ -814,6 +814,33 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_D962F6CEEFD84FF7BEEF8CC05CADEC",
+      "PRC_0A9C572C3B7144EAB31F16219144DE",
+      "PRC_C299F74B1F974C58A43523F9E2EDEF",
+      "PRC_0E0F2D6DFBDB4C74ADA77818A9793D",
+      "PRC_48C733CCC45E41D28EF0CEAA4EF093",
+      "PRC_523CC8EC416442298232DD77AE0981",
+      "PRC_EBAEC6C8640043C7B72787B9A4D380",
+      "PRC_27AEB90F9B52424E8E2B850348CCF4",
+      "PRC_A4F2A190731A4242B03FFA6D780629",
+      "PRC_35896B49E5234802B603FE37446F8A",
+      "PRC_F56C896FE32A4B13AF193353677B3A",
+      "PRC_0EC1EE7524C647E9A11E8453B93397",
+      "PRC_U2S6T0P9P0N9O1M4L2L8T2T1S5T9R7",
+      "PRC_4F42D5FA4D9246419E26D14E099D78",
+      "PRC_7AA09AA0B02A496491EEA442D645E0",
+      "PRC_F69420BC517444C4AFC8C2157EDEC8",
+      "PRC_369E5E0AB39D4FA086B60C62AF93F4",
+      "PRC_295E51FFC4FF43FF9D75B517406715",
+      "PRC_EB51DC7B6953412B8D25F1FA89F823",
+      "PRC_D2FB0B94EE114676BFF0389E9B3CB5",
+      "PRC_F5DACEBA450C4358B801176C6B8B9D",
+      "PRC_86BDE11FDECA44E281120717E97A79",
+      "PRC_49AA020A42C24ADBA2B8744F28EAAF",
+      "PRC_3E15A693C3E54F9DB64B1FD057772E",
+      "PRC_DC5268631F1A4C38892F82AB28B1BF",
+      "PRC_703E122BC6B04B73A90CD18FA7C1C7",
+      "PRC_72F0EDBB545849F680F075823820EE",
       "PRC_295A413FEF444F18B1DAC55D62C776",
       "PRC_EB48D57D53854742A8F9EB24CA4B69",
       "PRC_4C254BC1719D438A9C75B00706ED87",
@@ -2754,38 +2781,39 @@
     "pending_detail": {
       "PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1": {
         "first_seen_at": "2026-08-28T00:26:57Z",
-        "attempts": 409,
+        "attempts": 410,
         "title": "군급식기본법 일부개정법률안 (유용원의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1",
         "date": "2026-08-27",
-        "status": "error",
-        "note": "ConnectTimeout: HTTPSConnectionPool(host='likms.assembly.go.kr', port=443): Max retries exceeded with url: /bill/bi/billDetailPage.do?billId=PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1 (Caused by ConnectTimeou",
-        "last_attempt_at": "2026-10-08T08:55:44Z"
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-10-09T00:11:18Z"
       },
       "ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1": {
         "first_seen_at": "2026-09-04T00:29:50Z",
-        "attempts": 340,
+        "attempts": 341,
         "title": "영유아특별회계법 일부개정법률안 (정부)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1",
         "date": "2026-09-03",
-        "status": "error",
-        "note": "ConnectTimeout: HTTPSConnectionPool(host='likms.assembly.go.kr', port=443): Max retries exceeded with url: /bill/bi/billDetailPage.do?billId=ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1 (Caused by ConnectTimeou",
-        "last_attempt_at": "2026-10-08T08:55:44Z"
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-10-09T00:11:18Z"
       },
       "PRC_D2D6L0J8K2I8J1H3I4Q3Q0O4N2O3M9": {
         "first_seen_at": "2026-09-17T00:10:23Z",
-        "attempts": 217,
+        "attempts": 218,
         "title": "선거관리위원회법 일부개정법률안 (김용만의원 등 14인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_D2D6L0J8K2I8J1H3I4Q3Q0O4N2O3M9",
         "date": "2026-09-16",
-        "status": "error",
-        "note": "ConnectTimeout: HTTPSConnectionPool(host='likms.assembly.go.kr', port=443): Max retries exceeded with url: /bill/bi/billDetailPage.do?billId=PRC_D2D6L0J8K2I8J1H3I4Q3Q0O4N2O3M9 (Caused by ConnectTimeou",
-        "last_attempt_at": "2026-10-08T08:55:44Z"
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-10-09T00:11:18Z"
       }
     }
   },
   "pipc_notice": {
     "seen": [
+      "nttId:12565",
       "nttId:12564",
       "nttId:12518",
       "nttId:12522",
