@@ -641,7 +641,7 @@ _RULE_MONTH_DAY_BOUND = re.compile(
 _RULE_SCHEDULE = re.compile(rf"{_EFFECTIVE_ACTION}|접수|신청|제출|모집|판매|공표|공포|기한|마감")
 _RULE_TIME_BOUND = re.compile(
     rf"(?:{_RULE_DATE.pattern}).{{0,16}}(?:부터|까지|이내|마감|경과)"
-    rf"|(?:{_RULE_DATE.pattern})\s*(?:[.)]\s*)*(?:에|부터|이후|후|자로)?\s*(?:{_EFFECTIVE_ACTION}|접수|신청|제출|마감)"
+    rf"|(?:{_RULE_DATE.pattern})\s*(?:[.)]\s*)*(?:에|부터|이전에|이후(?:에)?|후|자로)?\s*(?:{_EFFECTIVE_ACTION}|접수|신청|제출|마감)"
     rf"|(?:시행일|기한|마감일|접수기간).{{0,12}}(?:{_RULE_DATE.pattern})"
 )
 _RULE_PAST_EVENT = re.compile(r"개최하였|개최했|개최하였다|논의하였|논의했다|발표일|배포일|등록일|게시일")
