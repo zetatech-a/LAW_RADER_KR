@@ -613,6 +613,10 @@ _RULE_CHANGE_PREDICATE = re.compile(
 _RULE_REVIEW_PROPOSAL = re.compile(
     rf"(?:{_ACTION_ALT})\s*하는\s+(?:방안|계획)을\s*(?:검토|논의|연구)한다[.!?…]*$"
     r"|^예외\s+(?:(?:적용|인정)\s+여부를|확대\s+방안을)\s*(?:검토|논의)한다[.!?…]*$")
+_RULE_NONOPERATIVE_CHANGE = re.compile(rf"(?:{_ACTION_ALT})\s*할\s+(?:필요가|수)\s*있다")
+_RULE_TENTATIVE_EFFECTIVE = re.compile(
+    rf"(?:{_EFFECTIVE_ACTION})\s*(?:할\s+(?:필요가|수)\s*있다"
+    r"|(?:여부를|하는\s+방안을)\s*검토한다)")
 _RULE_ONGOING_STATE = re.compile(
     rf"(?:{_ACTION_ALT})\s*(?:되어\s*있(?:다|으나)|하고\s*있(?:다|는|으나))")
 _RULE_NEGATED_CHANGE = re.compile(rf"(?:{_ACTION_ALT})\s*(?:하|되)지\s*않")
@@ -699,6 +703,7 @@ def _is_explicit_change(sentence: str) -> bool:
     """제안·현재 상태·부정 구절만 제외하고 같은 문장의 실제 변경은 보존한다."""
     view = _RULE_ONGOING_STATE.sub(" ", _RULE_REVIEW_PROPOSAL.sub(" ", sentence))
     view = _RULE_NEGATED_CHANGE.sub(" ", view)
+    view = _RULE_NONOPERATIVE_CHANGE.sub(" ", view)
     return bool(_RULE_CHANGE_PREDICATE.search(view)
                 or re.search(rf"(?:{_ACTION_ALT})\s*된다(?![가-힣])", view))
 
@@ -738,7 +743,8 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
     if label == "변경 내용":
         explicit_change = _is_explicit_change(sentence)
         if (_RULE_REVIEW_PROPOSAL.search(sentence) or _RULE_ONGOING_STATE.search(sentence)
-                or _RULE_NEGATED_CHANGE.search(sentence)) and not explicit_change:
+                or _RULE_NEGATED_CHANGE.search(sentence)
+                or _RULE_NONOPERATIVE_CHANGE.search(sentence)) and not explicit_change:
             return 0
         if section == "배경" and not _RULE_NEW_CLAUSE.search(sentence):
             return 0
@@ -763,6 +769,10 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
             return 6
         return 4 if section == label or _RULE_CONDITION.search(sentence) or _RULE_THRESHOLD.search(sentence) else 0
     if label in ("시행·기한", "후속 일정"):
+        # 미확정 시행 구절만 가린 뒤 같은 문장의 별도 일정 근거는 보존한다.
+        sentence, tentative = _RULE_TENTATIVE_EFFECTIVE.subn(" ", sentence)
+        if tentative and not _RULE_SCHEDULE.search(sentence):
+            return 0
         # 판정용 임시 문자열만 바꾼다. 부정된 시행일은 heading/날짜만으로 복구하지 않는다.
         sentence, negated = _RULE_NEGATED_EFFECTIVE.subn(" ", sentence)
         if negated and not _RULE_FUTURE.search(sentence):
@@ -888,9 +898,15 @@ def build_rule_excerpt_rows(
             paragraphs.append((section, _join_excerpt_parts(pending, title)))
             pending.clear()
 
-    for line in lines:
-        if _KEY_ATTACHMENT_LIST.match(line) and (pending or paragraphs):
-            break
+    for line_index, line in enumerate(lines):
+        if _KEY_ATTACHMENT_LIST.fullmatch(line.rstrip(":：")) and (pending or paragraphs):
+            following = line_index + 1
+            while following < len(lines) and _KEY_ATTACHMENT_LIST.fullmatch(lines[following].rstrip(":：")):
+                following += 1
+            if following < len(lines) and _BARE_FILENAME.match(lines[following]):
+                break
+            flush()
+            continue
         # 무종결 소제목 뒤에서 배경 문단이 시작하는 경우 둘을 한 문장으로 합치지 않는다.
         if _RULE_HISTORY.match(line) and pending:
             flush()
