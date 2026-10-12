@@ -771,8 +771,8 @@ def test_general_post_labels_are_unchanged():
     assert "[AI 3줄 요약]" in build_text({p.source_name: [p]})
     assert "제안이유" not in build_text({p.source_name: [p]})
 
-    q = _general(1)       # 요약 없음 → 기존 '원문 발췌' 그대로
-    assert "[원문 발췌 · 핵심 1줄]" in build_text({q.source_name: [q]})
+    q = _general(1)       # 요약 없음 → 짧은 본문은 전문 발췌(문장 선별 표기 없음)
+    assert "[원문 발췌]" in build_text({q.source_name: [q]})
     assert "제안이유" not in build_html({q.source_name: [q]})
 
 

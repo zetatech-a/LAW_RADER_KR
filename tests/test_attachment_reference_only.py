@@ -297,8 +297,8 @@ def test_details_output_still_takes_precedence():
     assert "본문 안내" not in build_text({SOURCE: [attach_only]})
 
 
-def test_general_fallback_rendering_selects_key_sentences():
-    """20 — 정상 본문은 API 없이 핵심 원문 문장을 카드로 표시한다."""
+def test_general_fallback_rendering_keeps_short_body_sentences():
+    """20 — 정상 본문은 API 없이 원문 문장을 카드로 표시한다(짧은 본문은 선별 없이 전문)."""
     post = _post(body=NORMAL_BODY)
     snippet = build_fallback_snippet(post.body, post.title)
     html_out = build_html({SOURCE: [post]})
@@ -307,7 +307,7 @@ def test_general_fallback_rendering_selects_key_sentences():
     from src.snippet import build_key_excerpt_lines
     selected = build_key_excerpt_lines(post.body, post.title)
     assert all(line in html_out for line in selected)
-    assert "원문 발췌 · 핵심 3줄" in html_out
+    assert "원문 발췌" in html_out and "문장 선별" not in html_out
     assert "본문 안내" not in html_out
     assert all(line in text_out for line in selected)
 

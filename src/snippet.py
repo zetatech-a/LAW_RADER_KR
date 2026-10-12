@@ -21,12 +21,19 @@ from __future__ import annotations
 import html as html_lib
 import re
 from collections import Counter
+from collections.abc import Iterable
 from enum import Enum
 
 from bs4 import BeautifulSoup
 
 # 메일 카드에 싣는 발췌 길이(기존 동작과 동일한 기본값).
 SNIPPET_LIMIT = 220
+# 정제 후 이 길이 이하인 일반 게시물은 문장을 고르지 않고 원문 전체를 싣는다.
+FULL_EXCERPT_CHARS = 600
+# 선별 정규식의 비용 상한. 숫자로 시작하는 숫자·쉼표·마침표 연속열이나 공백 없는 토큰이
+# 이 길이를 넘으면 선별을 거치지 않는다. 숫자열은 길이의 제곱으로 비용이 늘어 기준이 더 짧다.
+EXCERPT_MAX_NUMBER_CHARS = 100
+EXCERPT_MAX_TOKEN_CHARS = 1000
 
 
 # ── 1) HTML 제거 ────────────────────────────────────────────────────────────
@@ -590,6 +597,8 @@ _KEY_FACT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원|년|월|일|명|개|건)")
 _KEY_AMOUNT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원)")
 _KEY_ENUMERATION = re.compile(r"^(?:[①-⑳❶-❿➊-➓]+\s*|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)](?:\s+|(?=[가-힣A-Za-z0-9]))|\d{1,2}[.)](?:\s+|(?=[가-힣A-Za-z])))")
 _KEY_BULLET = re.compile(rf"(?:{_KEY_ENUMERATION.pattern}|^[□○ㅇ•▪▶]+\s*|^[-–—]\s+(?!\s*\d))")
+# 짧은 본문 전문 표시용: 위 표식 중 기호 불릿만. 번호·글자 표식은 "10. 15." 같은 날짜와 겹쳐 남긴다.
+_SYMBOL_BULLET = re.compile(r"^[□○ㅇ•▪▶]+\s*|^[-–—]\s+(?!\s*\d)")
 _KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
 _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
 _KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:(?:목록|\(\s*\d+\s*\))(?=\s|첨부|$)|$)")
@@ -678,14 +687,16 @@ def _join_excerpt_parts(parts: list[str], title: str = "") -> str:
     """출력 전용: 별도 줄의 조사·활용 어미와 명백한 숫자 조각만 이어 붙인다."""
     text = ""
     for part in parts:
+        # 끝 고정 검사는 마지막 몇 글자만 본다. 결과는 같고 줄이 많은 표에서 이차 비용이 없다.
+        tail = text[-8:]
         join = bool(text and (
-            (_EXCERPT_PARTICLE.fullmatch(part) and re.search(r"[가-힣)\]]$", text))
+            (_EXCERPT_PARTICLE.fullmatch(part) and re.search(r"[가-힣)\]]$", tail))
             or (re.match(r"^(?:은|는|을|를|의|으로|로|에서)(?=\s|[\[(])", part)
-                and re.search(r"[가-힣)\]]$", text))
-            or (_EXCERPT_VERB_STEM.search(text) and _EXCERPT_VERB_SUFFIX.fullmatch(part))
+                and re.search(r"[가-힣)\]]$", tail))
+            or (_EXCERPT_VERB_STEM.search(tail) and _EXCERPT_VERB_SUFFIX.fullmatch(part))
             or (text.endswith(("되", "하", "이")) and _EXCERPT_ENDING.fullmatch(part))
-            or (re.search(r"[가-힣0-9%)\]]$", text) and re.fullmatch(r"(?:이다|이며|입니다)(?:\s*[.,])?", part))
-            or (re.search(r"\d,$", text) and re.match(r"\d{3}(?:\D|$)", part))
+            or (re.search(r"[가-힣0-9%)\]]$", tail) and re.fullmatch(r"(?:이다|이며|입니다)(?:\s*[.,])?", part))
+            or (re.search(r"\d,$", tail) and re.match(r"\d{3}(?:\D|$)", part))
         ))
         text += ("" if join or not text else " ") + part
     # 숫자 사이 공백·부호는 그대로 둔다. 괄호와 문장부호의 형식 공백만 정리한다.
@@ -836,12 +847,14 @@ def _key_sentences(text: str) -> list[str]:
         if any(begin < match.end() <= end for begin, end in protected):
             continue
         sentence = text[start:match.end()].strip()
-        after = text[match.end():].lstrip()
+        # 경계 판단은 문장 끝·다음 글자 근처만 본다. 소수점이 많은 표도 선형 시간이다.
+        tail = sentence[-64:]
+        after = text[match.end():match.end() + 64].lstrip()
         # 숫자 뒤의 점은 소수점/날짜일 수도 있다. 다음 숫자나 날짜 조사로 이어지면
         # 경계로 쓰지 않고, 백분율·괄호·완결된 숫자 문장은 정상적으로 분리한다.
-        if re.search(r"\d\s*\.$", sentence) and after[:1].isdigit():
+        if re.search(r"\d\s*\.$", tail) and after[:1].isdigit():
             continue
-        if (re.search(r'''(?:\d{2,4}\s*\.\s*)?\d{1,2}\s*\.\s*\d{1,2}\s*\.["'”’」』)\]】》]*$''', sentence)
+        if (re.search(r'''(?:\d{2,4}\s*\.\s*)?\d{1,2}\s*\.\s*\d{1,2}\s*\.["'”’」』)\]】》]*$''', tail)
                 and re.match(r"(?:부터|까지|이후|이전|에서|에|시행|적용)", after)):
             continue
         if not _ENUMERATION_LABEL.fullmatch(sentence):
@@ -867,17 +880,35 @@ def _bounded_excerpt_row(text: str, limit: int) -> str:
     return (text[:head_end] + " … " + text[tail_start:]).strip()
 
 
-def build_rule_excerpt_rows(
-    body: str, title: str = "", *, max_lines: int = 3, max_line_chars: int = 300,
-) -> list[tuple[str, str]]:
-    """원문 문장을 역할별로 최대 3개 선별한다. 없는 역할은 만들어 채우지 않는다.
+_NUMBER_RUN = re.compile(r"\d[\d,.]*")
 
-    제목 관련성·정책 변화·수치·대상·일정 + 문장 간 정보 다양성으로 순위를 정한다.
-    확실한 역할이 있으면 질문 순서, 일반 중요도 선별이면 원문 순서로 표시한다.
-    날짜/소수점/음수는 문장 경계나 목록기호로 해석하지 않는다.
+
+def has_oversized_token(text: str | Iterable[str]) -> bool:
+    """선별 정규식의 비용 상한을 넘는 무공백 토큰이 있는가.
+
+    일부 선별 정규식은 공백 없이 긴 숫자열에서 비용이 길이의 제곱으로 늘어난다.
+    그 정규식을 실행하기 전에 쓰는 선형 검사이며, 해당하면 호출자는 비용이 제한된
+    발췌로 우회한다. 긴 URL처럼 숫자열이 짧은 토큰은 EXCERPT_MAX_TOKEN_CHARS까지 허용한다.
     """
-    if max_lines <= 0 or max_line_chars <= 0:
-        return []
+    for chunk in [text] if isinstance(text, str) else text:
+        for token in chunk.split():
+            if len(token) > EXCERPT_MAX_NUMBER_CHARS and (
+                len(token) > EXCERPT_MAX_TOKEN_CHARS
+                or any(len(run) > EXCERPT_MAX_NUMBER_CHARS for run in _NUMBER_RUN.findall(token))
+            ):
+                return True
+    return False
+
+
+def _excerpt_paragraphs(
+    body: str, title: str = "", *, verbatim: bool = False,
+) -> list[tuple[str, str]]:
+    """제목 중복·가장자리 메타데이터·첨부 목록을 걷어내고 span 조각을 문단으로 잇는다.
+
+    verbatim=True는 짧은 본문의 전문 표시용이다. 소제목을 역할 문맥으로 소비하지 않고
+    원문 텍스트로 남기며, 기호 불릿만 벗기고 번호·글자 표식은 남긴다. 기본값은 장문
+    선별의 기존 동작 그대로다.
+    """
     lines = strip_edge_noise(normalize_lines(body), title)
     # 제목도 span마다 줄이 갈릴 수 있다. 앞쪽 여러 줄의 합이 제목과 정확히
     # 같은 경우만 제거해 본문 첫 문장에 중복 제목이 붙지 않게 한다.
@@ -916,13 +947,15 @@ def build_rule_excerpt_rows(
         if heading:
             flush()
             section = heading
-            continue
-        if _KEY_HEADING.fullmatch(line) and (
+            if not verbatim:
+                continue
+        elif _KEY_HEADING.fullmatch(line) and (
             not pending or pending[-1].endswith((".", "!", "?", "…"))
         ):
             flush()
             section = ""
-            continue
+            if not verbatim:
+                continue
         section_start = bool(_KEY_SECTION_START.match(line))
         if re.fullmatch(r"\*+", line):
             # HTML의 별표 참조가 별도 줄로 나올 수 있다. 문장 중간 참조를 경계로
@@ -934,7 +967,7 @@ def build_rule_excerpt_rows(
             section = ""
         # 순서 표식만 벗기고 뒤의 실질 문장을 보존한다(로마 숫자 포함).
         content = (line if _RULE_MONTH_DAY_BOUND.match(line)
-                   else _KEY_BULLET.sub("", line, count=1)).strip()
+                   else (_SYMBOL_BULLET if verbatim else _KEY_BULLET).sub("", line, count=1)).strip()
         if content:
             pending.append(content)
             # 명시적 일정의 단독 상대 시점을 다음 통계/설명 줄과 합치지 않는다.
@@ -942,6 +975,48 @@ def build_rule_excerpt_rows(
                     and not _RULE_CALENDAR_DATE.search(content)):
                 flush()
     flush()
+    return paragraphs
+
+
+def build_full_excerpt_lines(
+    body: str, title: str = "", *, max_chars: int = FULL_EXCERPT_CHARS,
+) -> list[str] | None:
+    """짧은 본문의 원문 보존 발췌. 문장 선별·역할 라벨 없이 원문 순서로 모두 낸다.
+
+    길이는 제목 중복·가장자리 메타데이터·첨부 목록만 걷어낸 단계에서 잰다. 후보
+    필터나 선별 전이므로 부정·예외·숫자·날짜 문장이 길이 판단에서 빠지지 않는다.
+    max_chars를 넘으면 None이다. 호출자는 본문을 잘라 넣지 않고 장문 선별을 쓴다.
+    """
+    paragraphs = _excerpt_paragraphs(body, title, verbatim=True)
+    if sum(len(text) for _, text in paragraphs) + max(0, len(paragraphs) - 1) > max_chars:
+        return None
+    lines = []
+    for _, paragraph in paragraphs:
+        for sentence in _key_sentences(paragraph):
+            # 기호 불릿만 벗긴다. 제목 중복·구조 메타데이터 외의 문장은 버리지 않는다.
+            sentence = _SYMBOL_BULLET.sub("", sentence, count=1).strip()
+            if sentence and not is_duplicate_title(sentence, title) and not is_structural_noise(sentence):
+                lines.append(sentence)
+    return lines
+
+
+def build_rule_excerpt_rows(
+    body: str, title: str = "", *, max_lines: int = 3, max_line_chars: int = 300,
+    document_order: bool = False,
+) -> list[tuple[str, str]]:
+    """원문 문장을 역할별로 최대 3개 선별한다. 없는 역할은 만들어 채우지 않는다.
+
+    제목 관련성·정책 변화·수치·대상·일정 + 문장 간 정보 다양성으로 순위를 정한다.
+    확실한 역할이 있으면 질문 순서, 일반 중요도 선별이면 원문 순서로 표시한다.
+    document_order=True이면 역할과 관계없이 선택한 문장을 원문 순서로 낸다.
+    날짜/소수점/음수는 문장 경계나 목록기호로 해석하지 않는다. 공백 없는 긴 토큰이
+    있으면 선별 정규식을 실행하지 않고 []를 돌려 호출자의 안전 발췌로 넘긴다.
+    """
+    if max_lines <= 0 or max_line_chars <= 0:
+        return []
+    paragraphs = _excerpt_paragraphs(body, title)
+    if has_oversized_token(text for _, text in paragraphs):
+        return []
 
     candidates: list[str] = []
     sections: list[str] = []
@@ -1055,7 +1130,7 @@ def build_rule_excerpt_rows(
             break
         selected.append(best)
         covered.update(features[best])
-    ordered = selected if labels else sorted(selected)
+    ordered = selected if labels and not document_order else sorted(selected)
     return [(labels.get(i, "주요 내용"), _bounded_excerpt_row(candidates[i], max_line_chars))
             for i in ordered]
 

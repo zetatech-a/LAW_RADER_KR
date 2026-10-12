@@ -47,8 +47,9 @@ def test_excerpt_shared_html_text_design_and_labels():
     post = _post(body=BODY, title="소비자 보호 보고 의무 신설")
     grouped = {post.source_name: [post]}
     for rendered in (build_html(grouped), build_text(grouped)):
-        assert "원문 발췌 · 핵심 3줄" in rendered
-        assert "원문 문장을 자동으로 선별했습니다." in rendered
+        # 짧은 본문은 선별하지 않으므로 문장 수·자동 선별 안내 없이 전문을 싣는다.
+        assert "원문 발췌" in rendered and "문장 선별" not in rendered
+        assert "원문 문장을 자동으로 선별했습니다." not in rendered
         assert "AI 3줄 요약" not in rendered
         for line in build_key_excerpt_lines(BODY, post.title):
             assert line in rendered
@@ -159,11 +160,12 @@ def test_missing_schedule_and_subject_are_not_invented():
     assert build_rule_excerpt_rows("서식이 공개되었습니다.") == [("주요 내용", "서식이 공개되었습니다.")]
 
 
-def test_role_labels_are_shared_and_ai_card_is_unchanged():
+def test_role_labels_are_not_rendered_and_ai_card_is_unchanged():
     post = _post(body=BODY, title="보고 의무 신설")
     for rendered in (build_html({post.source_name: [post]}), build_text({post.source_name: [post]})):
+        # 내부 역할 판정은 순위에만 쓰고 메일에는 추정 역할 라벨을 싣지 않는다.
         for label in ("변경 내용:", "대상·조건:", "시행·기한:"):
-            assert label in rendered
+            assert label not in rendered
     post.summary = ["AI 첫 번째", "AI 두 번째", "AI 세 번째"]
     for rendered in (build_html({post.source_name: [post]}), build_text({post.source_name: [post]})):
         assert "AI 3줄 요약" in rendered
@@ -211,7 +213,7 @@ def test_filtered_numeric_body_uses_safe_excerpt_instead_of_disappearing():
     for rendered in (build_html({post.source_name: [post]}), build_text({post.source_name: [post]})):
         assert post.url in rendered
         assert post.body in rendered
-        assert "원문 발췌 · 핵심 1줄" in rendered
+        assert "원문 발췌" in rendered and "문장 선별" not in rendered  # 짧은 본문은 전문
 
 
 @pytest.mark.parametrize("ending", ["재개됐다.", "재개되었습니다.", "재개되었다.", "시작했다.", "종료하였습니다."])

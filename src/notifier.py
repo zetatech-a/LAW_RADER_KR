@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 import smtplib
+import traceback
+from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import formataddr
 
@@ -11,12 +14,17 @@ from .config import EmailConfig
 from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
 from .reply_excerpt import build_reply_excerpt_rows
 from .snippet import (
+    SNIPPET_LIMIT,
     BodyKind,
     build_assembly_fallback_lines,
     build_fallback_snippet,
+    build_full_excerpt_lines,
     build_rule_excerpt_rows,
     classify_body,
     clean_body_text,
+    has_oversized_token,
+    normalize_lines,
+    truncate_snippet,
 )
 
 log = logging.getLogger(__name__)
@@ -61,6 +69,9 @@ _AI_NOTICE = (
 _ASSEMBLY_SUMMARY_PREFIX = "제안이유 및 주요내용 · "
 _ASSEMBLY_BODY_LABEL = "제안이유 및 주요내용 발췌"
 _BODY_LABEL = "원문 발췌"
+# 원문 일부 문장만 고른 발췌(의안 발췌·일반 장문 선별)에만 붙인다. 짧은 본문 전문,
+# 포털 회답 구조, 안전 발췌에는 붙이지 않는다.
+_SELECTION_NOTICE = "원문 문장을 자동으로 선별했습니다."
 
 # 등록 대기(PENDING): 원문이 아직 공개되지 않은 상태. 수집 실패와 다르므로 문구도
 # 다르다 — 수신자가 '시스템 고장'이 아니라 '아직 안 올라옴'임을 알 수 있어야 한다.
@@ -87,11 +98,30 @@ _ATTACHMENT_ONLY_TEXT = "웹 본문에 상세 내용이 없어 첨부파일을 �
 _ATTACHMENT_ONLY_NO_FILES_TEXT = "웹 본문에는 첨부자료 참조 안내만 있습니다."
 
 
+def _log_excerpt_failure(p: Post, stage: str, exc: BaseException) -> None:
+    """발췌 실패를 본문 없이 기록한다(게시물 식별자·예외 종류·발생 위치만)."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    where = f"{os.path.basename(frames[-1].filename)}:{frames[-1].lineno}" if frames else "?"
+    log.warning(
+        "원문 발췌 %s 실패 — 안전 발췌로 대체: post=%s error=%s at %s",
+        stage, p.uid, type(exc).__name__, where,
+    )
+
+
+def _general_body_kind(p: Post) -> BodyKind:
+    """본문 성격 판정. 판정이 실패하면 내용 있는 본문으로 보고 안전 발췌에 맡긴다."""
+    try:
+        return classify_body(p.body, p.title)
+    except Exception as exc:  # noqa: BLE001 — 한 글의 판정 오류가 메일 전체를 막지 않게 한다
+        _log_excerpt_failure(p, "본문 판정", exc)
+        return BodyKind.CONTENT
+
+
 def _is_attachment_reference_only(p: Post) -> bool:
     """일반 게시물 본문이 첨부 참조 안내뿐인가(의안은 판정하지 않는다)."""
     return (
         p.source_key != ASSEMBLY_SOURCE_KEY
-        and classify_body(p.body, p.title) is BodyKind.ATTACHMENT_REFERENCE_ONLY
+        and _general_body_kind(p) is BodyKind.ATTACHMENT_REFERENCE_ONLY
     )
 
 
@@ -114,26 +144,61 @@ def _summary_label(p: Post) -> str:
     return label
 
 
-def _body_label(p: Post, line_count: int | None = None) -> str:
-    """AI 요약이 없을 때 쓰는 발췌 블록 제목."""
+@dataclass(frozen=True)
+class _GeneralExcerpt:
+    """일반 게시물 발췌. selected는 장문에서 일부 문장만 자동 선별했다는 뜻이다."""
+
+    lines: list[str] = field(default_factory=list)
+    selected: bool = False
+
+
+def _body_label(p: Post, excerpt: _GeneralExcerpt | None = None) -> str:
+    """AI 요약이 없을 때 쓰는 발췌 블록 제목. 실제로 선별했을 때만 문장 수를 적는다."""
     if p.source_key == ASSEMBLY_SOURCE_KEY:
         return _ASSEMBLY_BODY_LABEL
-    n = len(_general_excerpt(p)) if line_count is None else line_count
-    return f"{_BODY_LABEL} · 핵심 {n}줄" if n else _BODY_LABEL
+    excerpt = _general_excerpt(p) if excerpt is None else excerpt
+    if excerpt.selected and excerpt.lines:
+        return f"{_BODY_LABEL} · {len(excerpt.lines)}문장 선별"
+    return _BODY_LABEL
 
 
-def _general_excerpt(p: Post) -> list[str]:
-    if classify_body(p.body, p.title) is not BodyKind.CONTENT:
-        return []
-    # key는 사용자 설정값이다. scraper가 보장하는 완전한 Q/A/이유 구조로 판별한다.
-    rows = (build_reply_excerpt_rows(p.body, require_complete=True)
-            or build_rule_excerpt_rows(p.body, p.title))
-    if not rows:
-        # 분류/점수 필터가 유효 본문을 모두 거절해도 정보 자체를 지우지 않는다.
+def _general_excerpt(p: Post) -> _GeneralExcerpt:
+    """일반 게시물의 원문 발췌. 어떤 실패도 밖으로 내지 않는다(다이제스트 발송 보호).
+
+    포털 회답 구조 → 짧은 본문 전문(정제 후 600자 이하) → 장문 문장 선별 → 안전 발췌
+    순서다. 선별한 문장에는 추정 역할 라벨을 붙이지 않고 원문 순서로 싣는다. 선별
+    정규식의 비용 상한을 넘는 입력은 처음부터 안전 발췌로 우회한다.
+    """
+    if _general_body_kind(p) is not BodyKind.CONTENT:
+        return _GeneralExcerpt()
+    try:
+        if not has_oversized_token(normalize_lines(p.body)):
+            # key는 사용자 설정값이다. scraper가 보장하는 완전한 Q/A/이유 구조로 판별한다.
+            rows = build_reply_excerpt_rows(p.body, require_complete=True)
+            if rows:
+                return _GeneralExcerpt([f"{role}: {sentence}" for role, sentence in rows])
+            full = build_full_excerpt_lines(p.body, p.title)
+            if full:
+                return _GeneralExcerpt(full)
+            if full is None:
+                rows = build_rule_excerpt_rows(p.body, p.title, document_order=True)
+                if rows:
+                    return _GeneralExcerpt([sentence for _, sentence in rows], selected=True)
+    except Exception as exc:  # noqa: BLE001 — 한 글의 발췌 오류가 메일 전체를 막지 않게 한다
+        _log_excerpt_failure(p, "선별", exc)
+    # 분류/점수 필터가 유효 본문을 모두 거절해도 정보 자체를 지우지 않는다.
+    return _GeneralExcerpt(_safe_excerpt_lines(p))
+
+
+def _safe_excerpt_lines(p: Post) -> list[str]:
+    """기존 220자 안전 발췌. 그마저 실패하면 원문 앞부분의 공백만 정리해 자른다."""
+    try:
         fallback = build_fallback_snippet(clean_body_text(p.body, p.title))
-        return [fallback] if fallback else []
-    return [f"{role}: {sentence}" if role != "주요 내용" else sentence
-            for role, sentence in rows]
+    except Exception as exc:  # noqa: BLE001
+        _log_excerpt_failure(p, "안전 발췌", exc)
+        # 정규식·HTML 처리 없이 입력 길이부터 제한한다. 원문 글자는 바꾸지 않는다.
+        fallback = truncate_snippet(str(p.body or "")[: SNIPPET_LIMIT * 8])
+    return [fallback] if fallback else []
 
 
 def _has_summary(*groups: "dict[str, list[Post]] | None") -> bool:
@@ -240,10 +305,11 @@ def _summary_block(p: Post, accent: str) -> str:
                 "<div style='font-size:13px;line-height:1.6;color:#475569'>"
                 f"{_esc(_attachment_only_text(p))}</div></div>"
             )
-        lines = _general_excerpt(p)
-        if not lines:
+        excerpt = _general_excerpt(p)
+        if not excerpt.lines:
             return ""
-        return _excerpt_block(_body_label(p, len(lines)), lines, accent)
+        return _excerpt_block(
+            _body_label(p, excerpt), excerpt.lines, accent, notice=excerpt.selected)
 
     # 원문이 아직 공개되지 않은 의안. 빈 카드로 두면 수집이 깨진 것처럼 보인다.
     if _is_pending(p):
@@ -258,8 +324,8 @@ def _summary_block(p: Post, accent: str) -> str:
     return ""
 
 
-def _excerpt_block(label: str, lines: list[str], accent: str) -> str:
-    """AI 카드와 같은 여백/불릿/기관색. 문장은 원문 자동선별임을 명시한다."""
+def _excerpt_block(label: str, lines: list[str], accent: str, *, notice: bool = True) -> str:
+    """AI 카드와 같은 여백/불릿/기관색. 일부 문장만 고른 발췌에만 자동 선별을 알린다."""
     if not lines:
         return ""
     items = "".join(
@@ -275,8 +341,9 @@ def _excerpt_block(label: str, lines: list[str], accent: str) -> str:
         f"font-weight:700;color:{accent}'>{_esc(label)}</div>"
         f"<table role='presentation' cellpadding='0' cellspacing='0' "
         f"style='border-collapse:collapse'>{items}</table>"
-        "<div style='margin-top:6px;font-size:11px;color:#64748b'>"
-        "원문 문장을 자동으로 선별했습니다.</div></div>"
+        + ("<div style='margin-top:6px;font-size:11px;color:#64748b'>"
+           f"{_SELECTION_NOTICE}</div>" if notice else "")
+        + "</div>"
     )
 
 
@@ -468,15 +535,21 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
                 lines.append(f"      {_attachment_only_text(p)}")
             elif p.body:
                 if p.source_key == ASSEMBLY_SOURCE_KEY:
-                    excerpt = _assembly_excerpt(p)
+                    excerpt_rows = _assembly_excerpt(p)
+                    body_label = _body_label(p)
                     prefix = "      "
+                    notice = True
                 else:
                     excerpt = _general_excerpt(p)
+                    excerpt_rows = excerpt.lines
+                    body_label = _body_label(p, excerpt)
                     prefix = "      · "
-                if excerpt:
-                    lines.append(f"    [{_body_label(p, len(excerpt))}]")
-                    lines.extend(f"{prefix}{line}" for line in excerpt)
-                    lines.append("      원문 문장을 자동으로 선별했습니다.")
+                    notice = excerpt.selected
+                if excerpt_rows:
+                    lines.append(f"    [{body_label}]")
+                    lines.extend(f"{prefix}{line}" for line in excerpt_rows)
+                    if notice:
+                        lines.append(f"      {_SELECTION_NOTICE}")
             elif _is_pending(p):
                 lines.append(f"    [{_PENDING_LABEL}]")
                 lines.append(f"      {_PENDING_TEXT}")

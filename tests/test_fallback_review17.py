@@ -93,17 +93,17 @@ def test_renderer_extracts_once_and_keeps_identical_output(monkeypatch, renderer
 
     def extract(p):
         calls.append(p)
-        return rows
+        return notifier._GeneralExcerpt(rows, selected=True)
 
     monkeypatch.setattr(notifier, "_general_excerpt", extract)
     grouped = {post.source_name: [post]}
     actual = renderer(grouped)
     extraction_count = len(calls)
 
-    # 이전 라벨 구현을 사용한 렌더링과 문자열 전체를 비교한다.
+    # 같은 발췌로 다시 계산한 라벨을 사용한 렌더링과 문자열 전체를 비교한다.
     def legacy_label(p, *args):
-        n = len(notifier._general_excerpt(p))
-        return f"원문 발췌 · 핵심 {n}줄" if n else "원문 발췌"
+        n = len(notifier._general_excerpt(p).lines)
+        return f"원문 발췌 · {n}문장 선별" if n else "원문 발췌"
 
     monkeypatch.setattr(notifier, "_body_label", legacy_label)
     assert actual == renderer(grouped)
@@ -113,13 +113,17 @@ def test_renderer_extracts_once_and_keeps_identical_output(monkeypatch, renderer
 @pytest.mark.parametrize("count", [0, 1, 2, 3])
 def test_supplied_count_keeps_general_label_without_extraction(monkeypatch, count):
     def unexpected_extraction(p):
-        pytest.fail("An already supplied row count must not trigger extraction")
+        pytest.fail("An already supplied excerpt must not trigger extraction")
 
     monkeypatch.setattr(notifier, "_general_excerpt", unexpected_extraction)
-    expected = f"원문 발췌 · 핵심 {count}줄" if count else "원문 발췌"
-    assert notifier._body_label(_post(), count) == expected
-    assert notifier._body_label(_post("assembly_bill"), count) == "제안이유 및 주요내용 발췌"
+    rows = [f"원문 {i + 1}" for i in range(count)]
+    # 문장 수는 실제로 선별한 장문 발췌에만 적는다. 전문·안전 발췌는 '원문 발췌'다.
+    expected = f"원문 발췌 · {count}문장 선별" if count else "원문 발췌"
+    assert notifier._body_label(_post(), notifier._GeneralExcerpt(rows, selected=True)) == expected
+    assert notifier._body_label(_post(), notifier._GeneralExcerpt(rows)) == "원문 발췌"
+    assert notifier._body_label(_post("assembly_bill"), notifier._GeneralExcerpt(rows)) == "제안이유 및 주요내용 발췌"
 
 
 def test_legacy_body_label_call_remains_compatible():
-    assert notifier._body_label(_post()) == "원문 발췌 · 핵심 3줄"
+    # 짧은 본문(정제 후 600자 이하)은 선별 없이 전문을 싣는다.
+    assert notifier._body_label(_post()) == "원문 발췌"
