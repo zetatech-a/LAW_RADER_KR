@@ -128,6 +128,10 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 
 큐는 **자동으로 만료·삭제되지 않습니다.** 시도 횟수나 경과 일수를 이유로 조용히 지우면 그것이 곧 알림 누락이기 때문입니다. 7일 넘게 남은 항목은 경고 로그로 드러내되 삭제하지 않습니다(만료 정책은 별도 작업).
 
+**영구 제외(`excluded_detail_ids`).** 운영자가 상세 재조회를 끝내기로 한 의안은 `assembly_bill.excluded_detail_ids`(선택 키, 없으면 빈 목록)에 둡니다. 등록은 `State.exclude_detail(source_key, ids)` 로만 하며, 제외 등록과 `pending_detail` 제거가 한 번에 일어납니다. 여기 있는 ID 는 재조회 대상에서 빠지고, `queue_detail()` 로 다시 큐에 들어가지 않으며, 목록 수집의 '이미 아는 ID' 에 포함되어 `seen` 에 없더라도 신규로 재알림되지 않습니다. 자동 만료·건수 상한은 없습니다. `seen` 은 건드리지 않습니다.
+
+**`seen` 보관 상한.** 의안(`assembly_bill`)의 `seen` 은 상한 없이 누적합니다 — 계류 기간이 긴 의안이 상한에서 밀려나면 신규로 오인되어 최초 알림이 중복되기 때문입니다. 다른 소스는 기존대로 5,000건(`MAX_PER_SOURCE`)입니다.
+
 의안이 `enabled: false` 이거나 `--only` 에 `assembly_bill` 이 없으면 **큐도 처리하지 않습니다** — 사용자가 실행 대상에서 제외한 사이트를 배경에서 몰래 두드리면 안 됩니다. 마찬가지로 SMTP 설정 누락·로그인 실패로 발송이 불가능하면 재조회 자체를 건너뜁니다(복구한 본문을 전달할 방법이 없는데 사이트만 두드릴 이유가 없고, 본문을 state 에 쌓아 두는 우회도 하지 않습니다).
 
 > **과거 항목은 자동 backfill 하지 않습니다.** 이 기능이 배포되기 전에 `PENDING`/`ERROR` 상태로 `seen` 처리된 의안은 기존 state 에 실패 정보가 없습니다. 모든 과거 `seen` 의안을 다시 긁어 큐를 추측 생성하면 대량 중복 후속 알림이 발생하므로 하지 않습니다. **persistent 재조회는 배포 이후 새로 발생하는 `PENDING`/`ERROR`/`UNKNOWN` 부터 보호합니다.** 과거 누락의 backfill 은 별도의 명시적 작업입니다.

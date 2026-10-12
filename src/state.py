@@ -3,8 +3,9 @@
 state/seen.json 구조:
 {
   "<source_key>": {
-    "seen": ["id1", "id2", ...],   # 최근 것부터, MAX_PER_SOURCE 개까지 유지
+    "seen": ["id1", "id2", ...],   # 최근 것부터. 소스별 보관 상한은 seen_limit() 참조
     "baselined": true,              # 최초 1회 기준선 수립 완료 여부
+    "excluded_detail_ids": ["id"],  # (선택) 상세 재조회 영구 제외 목록 — 상한·만료 없음
     "pending_detail": {             # (선택) 상세를 아직 확보하지 못한 항목의 재조회 큐
       "<post_id>": {
         "title": "...", "url": "...", "date": "...",
@@ -30,6 +31,14 @@ pending_detail 은 **선택 키**다. 이 키가 없는 기존 seen.json 도 mig
 읽히며 빈 큐로 취급된다. 항목에 우리가 모르는 필드가 있어도 지우지 않고 보존한다
 (앞으로 늘어날 진단 필드를 이전 버전이 지워버리는 사고를 막는다).
 
+excluded_detail_ids 도 **선택 키**다(없으면 빈 목록). 운영자가 "더 이상 상세를
+재조회하지 않는다"고 명시한 의안 ID 를 담으며 자동 만료·상한이 없다. 여기 있는 ID 는
+  - pending_detail 스냅샷에 나타나지 않고(재조회 대상 선정에서 빠짐),
+  - queue_detail() 로 다시 큐에 들어가지 않으며,
+  - main 의 신규 판정에서 '이미 아는 ID' 로 취급된다(seen 에서 빠져도 재알림되지 않음).
+등록은 exclude_detail() 하나로만 한다 — 제외 등록과 큐 제거를 한 번에 처리해
+'제외됐는데 큐에는 남은' 불일치 상태를 만들지 않기 위함이다.
+
 큐에는 상세 재조회에 필요한 최소 스냅샷(title/url/date)만 담는다. 본문·첨부·요약은
 넣지 않는다 — state 파일은 매 실행 커밋되는 저장소 파일이고, 알림에 필요한 것은
 '다시 조회할 주소'와 '복구 알림에 쓸 원래 제목/날짜'뿐이다.
@@ -41,11 +50,26 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .models import ASSEMBLY_SOURCE_KEY
+
 # 소스별 seen ID 보관 상한(짧은 문자열이라 용량 부담은 작다).
 MAX_PER_SOURCE = 5000
 
+# seen 을 상한 없이 누적하는 소스. 의안은 계류 기간이 길어 오래된 BILL_ID 가 목록에
+# 다시 나타날 수 있고, 상한에서 밀려나면 '신규'로 오인되어 최초 알림이 중복되고 상세
+# 재조회 큐가 다시 생긴다. 그래서 의안만 상한을 두지 않는다(다른 소스는 그대로 5000).
+UNCAPPED_SEEN_SOURCES = frozenset({ASSEMBLY_SOURCE_KEY})
+
 # 상세 재조회 큐가 들어가는 source entry 키.
 PENDING_DETAIL_KEY = "pending_detail"
+
+# 상세 재조회 영구 제외 목록이 들어가는 source entry 키.
+EXCLUDED_DETAIL_KEY = "excluded_detail_ids"
+
+
+def seen_limit(source_key: str) -> int | None:
+    """소스의 seen 보관 상한. None 이면 상한 없음."""
+    return None if source_key in UNCAPPED_SEEN_SOURCES else MAX_PER_SOURCE
 
 
 def utcnow_iso() -> str:
@@ -108,9 +132,10 @@ class State:
         existing = entry.get("seen")
         if not isinstance(existing, list):
             existing = []
-        # 새 id 를 앞쪽에 추가하고 중복 제거, 상한 유지
+        # 새 id 를 앞쪽에 추가하고 중복 제거, 소스별 상한 유지(상한 없는 소스는 전부 보존)
         merged = list(dict.fromkeys(list(post_ids) + existing))
-        entry["seen"] = merged[:MAX_PER_SOURCE]
+        limit = seen_limit(source_key)
+        entry["seen"] = merged if limit is None else merged[:limit]
         if baselined:
             entry["baselined"] = True
 
@@ -124,11 +149,36 @@ class State:
         raw = self._entry_ro(source_key).get(PENDING_DETAIL_KEY)
         if not isinstance(raw, dict):
             return {}
+        # 영구 제외 ID 는 파일에 큐 항목이 남아 있어도(수동 편집 등) 재조회 대상이 아니다.
+        excluded = self.excluded_detail_ids(source_key)
         return {
             k: dict(v)
             for k, v in raw.items()
-            if isinstance(k, str) and k and isinstance(v, dict)
+            if isinstance(k, str) and k and isinstance(v, dict) and k not in excluded
         }
+
+    def excluded_detail_ids(self, source_key: str) -> set[str]:
+        """상세 재조회 영구 제외 ID. 키가 없거나 형태가 깨졌으면 빈 집합."""
+        raw = self._entry_ro(source_key).get(EXCLUDED_DETAIL_KEY)
+        if not isinstance(raw, list):
+            return set()
+        return {v for v in raw if isinstance(v, str) and v}
+
+    def exclude_detail(self, source_key: str, post_ids: list[str]) -> None:
+        """post_ids 를 상세 재조회에서 영구 제외한다(제외 등록 + 큐 제거를 한 번에).
+
+        seen 은 건드리지 않는다 — '알렸다'는 사실은 그대로이고, 상세를 더 찾지 않을
+        뿐이다. 기존 목록 순서를 유지한 채 새 ID 를 뒤에 덧붙이며 상한·만료는 없다.
+        """
+        entry = self._entry(source_key)
+        existing = entry.get(EXCLUDED_DETAIL_KEY)
+        if not isinstance(existing, list):
+            existing = []
+        entry[EXCLUDED_DETAIL_KEY] = list(
+            dict.fromkeys(existing + [i for i in post_ids if isinstance(i, str) and i])
+        )
+        for post_id in post_ids:
+            self.unqueue_detail(source_key, post_id)
 
     def queue_detail(
         self,
@@ -151,7 +201,11 @@ class State:
         시도했고(그 결과가 PENDING/ERROR/UNKNOWN 이라 큐에 들어온 것) last_attempt_at
         도 그 시도 시각이다. 0 으로 두면 방금 두드린 사이트를 다음 실행에서 곧바로
         다시 두드리게 된다.
+
+        영구 제외 ID 는 등록하지 않는다(exclude_detail 참조).
         """
+        if post_id in self.excluded_detail_ids(source_key):
+            return
         ts = now or utcnow_iso()
         queue = self._queue(source_key)
         entry = queue.get(post_id)
