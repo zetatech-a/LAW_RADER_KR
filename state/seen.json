@@ -2780,7 +2780,12 @@
       "PRC_W2X6V0T7U0S1T1B3B2A7A1Z3X6X1G4",
       "PRC_M2N6U0V7U0R7A1A4Y1Z5Y4W4W8E1F1"
     ],
-    "baselined": true
+    "baselined": true,
+    "excluded_detail_ids": [
+      "PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1",
+      "ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1",
+      "PRC_D2D6L0J8K2I8J1H3I4Q3Q0O4N2O3M9"
+    ]
   },
   "pipc_notice": {
     "seen": [

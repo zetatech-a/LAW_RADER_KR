@@ -967,8 +967,8 @@ def test_partial_list_failure_still_returns_zero(tmp_path, monkeypatch):
 # ==========================================================================
 # B. 큐에 있는 BILL_ID 는 신규로 다시 분류되면 안 된다 (PR #25 Codex P2)
 #
-# seen 은 MAX_PER_SOURCE(5000) 상한이 있고 pending_detail 은 자동 만료하지 않는다.
-# 오래 대기한 의안이 상한에서 밀려나면 목록에 남아 있는 한 신규로 오인된다.
+# pending_detail 은 자동 만료하지 않는다. 큐 항목이 (상한이 있던 시기의 state·수동 편집
+# 등으로) seen 에 없으면 목록에 남아 있는 한 신규로 오인된다.
 # ==========================================================================
 def test_B1_queue_keys_are_included_in_known_ids(tmp_path, monkeypatch):
     path = tmp_path / "seen.json"
@@ -993,7 +993,7 @@ def test_B1_queue_keys_are_included_in_known_ids(tmp_path, monkeypatch):
 
 
 def test_B2_queued_id_survives_seen_cap_eviction(tmp_path, monkeypatch):
-    """seen 상한에서 밀려난 큐 항목도 Assembly 신규 판정에서는 '이미 아는' 것이다."""
+    """의안 seen 은 상한이 없어 오래된 큐 항목이 밀려나지 않고, 신규로 재분류되지 않는다."""
     from src.state import MAX_PER_SOURCE
 
     path = tmp_path / "seen.json"
@@ -1001,13 +1001,13 @@ def test_B2_queued_id_survives_seen_cap_eviction(tmp_path, monkeypatch):
     b = _bill("PRC_OLD")
     st.queue_detail(ASSEMBLY_SOURCE_KEY, "PRC_OLD", title=b.title, url=b.url,
                     date=b.date, status="pending", now=OLD)
-    # PRC_OLD 를 먼저 seen 에 넣은 뒤, 상한을 채우고도 남는 신규를 앞에 쌓아 밀어낸다.
+    # PRC_OLD 를 먼저 seen 에 넣은 뒤, 예전 상한을 넘는 신규를 앞에 쌓는다.
     st.mark_seen(ASSEMBLY_SOURCE_KEY, ["PRC_OLD"], baselined=True)
     st.mark_seen(ASSEMBLY_SOURCE_KEY, [f"NEW_{i:05d}" for i in range(MAX_PER_SOURCE)])
     st.save()
 
     reloaded = State(path)
-    assert "PRC_OLD" not in reloaded.seen_ids(ASSEMBLY_SOURCE_KEY)   # 실제로 밀려났다
+    assert "PRC_OLD" in reloaded.seen_ids(ASSEMBLY_SOURCE_KEY)       # 밀려나지 않는다
     assert "PRC_OLD" in reloaded.pending_detail(ASSEMBLY_SOURCE_KEY)
 
     ctx = _run(
@@ -1021,14 +1021,21 @@ def test_B2_queued_id_survives_seen_cap_eviction(tmp_path, monkeypatch):
     assert ctx.digests == []                  # 최초 알림이 중복되지 않는다
 
 
-def test_B2_seen_cap_is_unchanged(tmp_path):
-    """상한 자체를 제거·확대해서 문제를 덮지 않았는지 못박는다."""
-    from src.state import MAX_PER_SOURCE
+def test_B2_seen_cap_policy(tmp_path):
+    """다른 소스의 상한(5000)은 그대로이고, 의안만 상한 없이 누적한다.
+
+    상한 숫자를 키워서(예: 50000) 문제를 덮지 않았는지도 함께 못박는다.
+    """
+    from src.state import MAX_PER_SOURCE, seen_limit
 
     assert MAX_PER_SOURCE == 5000
+    assert seen_limit(PRESS_KEY) == MAX_PER_SOURCE
+    assert seen_limit(ASSEMBLY_SOURCE_KEY) is None
     st = State(tmp_path / "seen.json")
+    st.mark_seen(PRESS_KEY, [f"ID_{i}" for i in range(MAX_PER_SOURCE + 10)])
+    assert len(st.seen_ids(PRESS_KEY)) == MAX_PER_SOURCE
     st.mark_seen(ASSEMBLY_SOURCE_KEY, [f"ID_{i}" for i in range(MAX_PER_SOURCE + 10)])
-    assert len(st.seen_ids(ASSEMBLY_SOURCE_KEY)) == MAX_PER_SOURCE
+    assert len(st.seen_ids(ASSEMBLY_SOURCE_KEY)) == MAX_PER_SOURCE + 10
 
 
 def test_B3_recovery_refreshes_seen_before_unqueue(tmp_path, monkeypatch):

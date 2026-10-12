@@ -478,9 +478,9 @@ def run(argv=None) -> int:
     _record_retry_metadata(state, retry)
     # 복구되어 이번 다이제스트에 실린 항목만 큐에서 지운다.
     #
-    # **seen 갱신이 큐 제거보다 먼저다.** 큐에서만 빠지고 seen 에도 없으면(오래 대기하다
-    # seen 상한 MAX_PER_SOURCE 에서 밀려난 경우) 그 의안이 목록에 남아 있는 한 다음
-    # 실행에서 '신규'로 다시 잡혀 최초 알림이 중복된다. mark_seen 은 기존 중복 제거·
+    # **seen 갱신이 큐 제거보다 먼저다.** 큐에서만 빠지고 seen 에도 없으면(의안 seen 에
+    # 상한이 있던 시기에 밀려났거나 state 가 수동 편집된 경우) 그 의안이 목록에 남아
+    # 있는 한 다음 실행에서 '신규'로 다시 잡혀 최초 알림이 중복된다. mark_seen 은 기존 중복 제거·
     # 상한 규칙을 그대로 쓰며, 재등록이므로 목록 앞쪽으로 올라간다.
     recovered_ids = [p.post_id for p in retry.recovered]
     if recovered_ids:
@@ -556,17 +556,23 @@ def _known_ids(state: State, source_key: str, assembly_queue: list) -> set[str]:
     """목록 수집에 넘길 '이미 아는' ID 집합.
 
     의안만 재조회 큐의 BILL_ID 를 함께 넘긴다. 큐에 있다는 것은 **최초 알림을 이미
-    보냈다**는 뜻이므로 신규가 아니다. 그런데 seen 은 MAX_PER_SOURCE(5000) 상한이 있고
-    큐는 의도적으로 자동 만료하지 않으므로, 오래 대기한 의안이 상한에서 밀려난 뒤에도
-    계류의안 목록에 남아 있으면 신규로 오인되어 최초 알림이 중복된다(같은 실행에서
-    큐가 만든 상세 업데이트와 겹칠 수도 있다).
+    보냈다**는 뜻이므로 신규가 아니다. 의안 seen 은 이제 상한 없이 누적되지만, 상한이
+    있던 시기의 state 나 수동 편집으로 seen 에서 빠진 큐 항목이 계류의안 목록에 남아
+    있으면 신규로 오인되어 최초 알림이 중복된다(같은 실행에서 큐가 만든 상세 업데이트와
+    겹칠 수도 있다).
+
+    상세 재조회 영구 제외 ID(excluded_detail_ids)도 함께 넘긴다. 운영자가 재조회를
+    끝내기로 한 의안이 어떤 이유로든 seen 에 없더라도 신규로 재알림되거나
+    _queue_new_pending() 을 거쳐 큐에 다시 들어가는 일을 막는다.
 
     다른 소스의 신규 판정 의미는 건드리지 않는다. State.seen_ids() 자체가 모든 소스에서
     큐를 암묵적으로 합치게 만들지도 않는다 — 큐는 의안 전용 개념이다.
     """
     known = state.seen_ids(source_key)
-    if source_key == ASSEMBLY_SOURCE_KEY and assembly_queue:
-        known = known | {item.bill_id for item in assembly_queue}
+    if source_key == ASSEMBLY_SOURCE_KEY:
+        known = known | state.excluded_detail_ids(source_key)
+        if assembly_queue:
+            known = known | {item.bill_id for item in assembly_queue}
     return known
 
 
