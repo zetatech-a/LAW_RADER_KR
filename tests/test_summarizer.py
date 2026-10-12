@@ -1499,7 +1499,7 @@ def test_email_falls_back_to_body_without_summary():
 
     text = build_text(grouped)
     assert "원문 본문 발췌가 여기 나온다" in text
-    assert "[원문 발췌]" in text
+    assert "[원문 발췌]" in text  # 짧은 본문은 선별 없이 전문을 싣는다
     assert "생성형 AI" not in text   # 요약이 없으면 텍스트 파트에도 유의사항이 없다
 
 

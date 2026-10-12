@@ -1,0 +1,26 @@
+name: Verify fallback excerpts
+
+on:
+  pull_request:
+    paths:
+      - 'src/snippet.py'
+      - 'src/notifier.py'
+      - 'src/reply_excerpt.py'
+      - 'tests/**'
+      - 'requirements.txt'
+      - '.github/workflows/fallback-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q
