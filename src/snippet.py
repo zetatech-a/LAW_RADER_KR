@@ -583,7 +583,7 @@ _REGULATORY_ACTIONS = ("개정", "변경", "신설", "폐지", "삭제", "도입
                        "허용", "제한", "면제", "부과", "유예", "연장", "단축", "의무화")
 _ACTION_ALT = "|".join(_REGULATORY_ACTIONS)
 _EFFECTIVE_ACTION = r"시행|적용|발효|효력이\s*발생|효력을\s*가[지진]"
-_KEY_ACTION = re.compile(rf"{_ACTION_ALT}|의무|과징금|제재|의결|{_EFFECTIVE_ACTION}|추진|개선")
+_KEY_ACTION = re.compile(rf"(?:{_ACTION_ALT})(?<!무제한)|의무|과징금|제재|의결|{_EFFECTIVE_ACTION}|추진|개선")
 _KEY_TARGET = re.compile(r"대상|금융회사|금융기관|은행|보험사|보험회사|소비자|투자자|사업자|기업|이용자|개인정보|신용정보")
 _KEY_TIMING = re.compile(rf"{_EFFECTIVE_ACTION}|예정|기한|까지|부터|의견|입법예고|행정예고")
 _KEY_FACT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원|년|월|일|명|개|건)")
@@ -604,8 +604,8 @@ _KEY_ABBREVIATION = re.compile(r"\b(?:[A-Za-z]\.){2,}|\b(?:Dr|Mr|Mrs|Ms|Prof|No|
 _KEY_STOPWORDS = frozenset({"있다", "있는", "있음", "위해", "대한", "이를", "이번", "통해", "관련", "따라", "것으로", "하도록"})
 
 # 역할 판단은 발췌 출력에만 적용한다. Gemini 입력·호출·재시도에는 사용하지 않는다.
-_RULE_CHANGE = re.compile(rf"(?:{_ACTION_ALT})(?![가-힣])")
-_RULE_CHANGE_TITLE = re.compile(rf"(?:{_ACTION_ALT})(?:안)?(?![가-힣])")
+_RULE_CHANGE = re.compile(rf"(?:{_ACTION_ALT})(?<!무제한)(?![가-힣])")
+_RULE_CHANGE_TITLE = re.compile(rf"(?:{_ACTION_ALT})(?<!무제한)(?:안)?(?![가-힣])")
 _RULE_HISTORY = re.compile(r"^(?:현행(?=\s|법|규정|제도|은|는)|현재\s*(?:제도|규정|법)|종전(?:에는|에|의|\s)|기존(?:에는|의|\s*(?:제도|규정|법))|(?:과거|예전)(?:에는|(?=\s|$))|지난|당시|그간)")
 _RULE_NEW_CLAUSE = re.compile(rf"(?:그러나|하지만|이에\s*따라|개정안(?:은|에서는)|앞으로는|이번\s*개정안은).{{0,120}}(?:{_ACTION_ALT})\s*(?:하|한|함|되|됨|할|해|했)")
 _RULE_CHANGE_PREDICATE = re.compile(
@@ -626,7 +626,7 @@ _RULE_PASSIVE_TARGET = re.compile(rf"(?:{_KEY_TARGET.pattern})에(?:게)?\s*적�
 _RULE_TARGET_PREDICATE = re.compile(
     rf"(?<![가-힣])(?:{_KEY_TARGET.pattern})(?:[이가은는만도])?\s+대상(?:이다|입니다|임)[.!?…]*$")
 _RULE_THRESHOLD = re.compile(
-    r"\d[\d,.]*\s*(?:억원|조원|원|%|명|건|개)?(?:을|를)?\s*"
+    r"\d[\d,.]*\s*(?:억원|조원|천만원|만원|원|%|명|건|개)?(?:을|를)?\s*"
     r"(?:초과하는|(?:이상|이하|초과|미만)(?:인|의|에 해당하는)?)\s*"
     r"(?:회사|기업|기관|은행|사업자|소비자|투자자|이용자|경우|때)")
 _KEY_NUMERIC_CELLS = re.compile(r"(?:^|\s)[-−△]?\d[\d,.]*%?(?:\s+[-−△]?\d[\d,.]*%?){3}")
@@ -641,7 +641,7 @@ _RULE_MONTH_DAY_BOUND = re.compile(
 _RULE_SCHEDULE = re.compile(rf"{_EFFECTIVE_ACTION}|접수|신청|제출|모집|판매|공표|공포|기한|마감")
 _RULE_TIME_BOUND = re.compile(
     rf"(?:{_RULE_DATE.pattern}).{{0,16}}(?:부터|까지|이내|마감|경과)"
-    rf"|(?:{_RULE_DATE.pattern})\s*(?:[.)]\s*)*(?:에|부터|이후|후)?\s*(?:{_EFFECTIVE_ACTION}|접수|신청|제출|마감)"
+    rf"|(?:{_RULE_DATE.pattern})\s*(?:[.)]\s*)*(?:에|부터|이후|후|자로)?\s*(?:{_EFFECTIVE_ACTION}|접수|신청|제출|마감)"
     rf"|(?:시행일|기한|마감일|접수기간).{{0,12}}(?:{_RULE_DATE.pattern})"
 )
 _RULE_PAST_EVENT = re.compile(r"개최하였|개최했|개최하였다|논의하였|논의했다|발표일|배포일|등록일|게시일")
@@ -765,9 +765,11 @@ def _role_strength(label: str, sentence: str, section: str = "") -> int:
             if (_RULE_CONDITION.search(sentence) or _KEY_TARGET.search(sentence)
                     or _RULE_THRESHOLD.search(sentence)):
                 return 8
+        if _RULE_THRESHOLD.search(sentence):
+            return 8
         if _RULE_PASSIVE_TARGET.search(sentence) or _RULE_TARGET_PREDICATE.search(sentence):
             return 6
-        return 4 if section == label or _RULE_CONDITION.search(sentence) or _RULE_THRESHOLD.search(sentence) else 0
+        return 4 if section == label or _RULE_CONDITION.search(sentence) else 0
     if label in ("시행·기한", "후속 일정"):
         # 미확정 시행 구절만 가린 뒤 같은 문장의 별도 일정 근거는 보존한다.
         sentence, tentative = _RULE_TENTATIVE_EFFECTIVE.subn(" ", sentence)
