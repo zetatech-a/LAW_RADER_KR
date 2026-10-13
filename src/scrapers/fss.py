@@ -20,8 +20,9 @@ from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from ..fetcher import AttachmentTooLarge
-from ..models import Attachment, Post
+from ..models import FSS_RULE_SOURCE_KEY, Attachment, Post
 from .base import BaseScraper, clean_text
+from .fss_rule import extract_rule_sections, is_complete
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +63,14 @@ _SANCTION_LABELS = (_SANCTION_INSTITUTION, _SANCTION_DATE, _SANCTION_DEPT)
 # 값 문자열 하나에서 날짜를 읽는다(20260723 / 2026-07-23 / 2026.07.23 / 2026년 7월 23일).
 _VALUE_DATE = re.compile(r"(20\d{2})\D{0,2}(\d{1,2})\D{0,2}(\d{1,2})")
 _WS_ALL = re.compile(r"\s+")
+
+# --- 세칙 제·개정 예고: 원문 4개 항목 ---
+# 2026-10-12 #4405 실발송에서 이 게시판 상세는 공통 본문 selector 로 읽은 본문이 비어
+# (본문 판정 empty) 메일에 제목·첨부만 실렸다. 개편 페이지는 div.contents 로 감싸여
+# _BODY_SELECTORS 가 하나도 맞지 않는다(#content 는 주석으로만 남음). 이 게시판의 핵심은 규정 개정 내용 원문이므로
+# 상세의 지정 4개 항목만 원문 그대로 뽑는다(src/scrapers/fss_rule.py). AI 요약은 쓰지
+# 않고, 추출에 실패해도 일반 본문 추출·요약으로 되돌아가지 않는다(메일에 실패 안내).
+_RULE_KEY = FSS_RULE_SOURCE_KEY
 
 
 def _norm_label(s: str) -> str:
@@ -261,7 +270,9 @@ class FssBoardScraper(BaseScraper):
             # 실패하면 details 는 비고 아래의 기존 본문 추출로 되돌아간다.
             if post.source_key == _SANCTION_KEY:
                 post.details = self._sanction_details(soup, post)
-            if not post.details:
+            if post.source_key == _RULE_KEY:
+                post.details = self._rule_details(soup, post, html)
+            elif not post.details:
                 is_press = post.source_key == _PRESS_KEY
                 post.body = _body_text(
                     soup, _PRESS_BODY_SELECTORS if is_press else _BODY_SELECTORS
@@ -319,6 +330,40 @@ class FssBoardScraper(BaseScraper):
             (_SANCTION_DATE, date),
             (_SANCTION_DEPT, dept),
         ]
+
+    def _rule_details(self, soup: BeautifulSoup, post: Post, html: str) -> list[tuple[str, str]]:
+        """세칙 예고 상세에서 원문 4개 항목. 누락·실패는 로그와 debug 덤프로 남긴다."""
+        stop = {a.filename for a in post.attachments}
+        for fa in soup.find_all("a", href=True):
+            if any(h in fa["href"].lower() for h in _FILE_HINT):
+                stop.add(self._filename(fa, urljoin(post.url, fa["href"])))
+        result = extract_rule_sections(soup, stop_lines=tuple(sorted(n for n in stop if n)))
+        if not result.sections:
+            log.warning(
+                "[%s] 세칙 예고 원문 항목 추출 실패(%s) — 메일에 추출 실패 안내를 싣습니다"
+                "(AI 요약 대체 없음): post_id=%s url=%s",
+                self.key, result.reason, post.post_id, post.url,
+            )
+        elif result.missing:
+            log.warning(
+                "[%s] 세칙 예고 원문 항목 일부 누락(%s) — 추출한 항목만 싣고 누락을 표시합니다: "
+                "post_id=%s url=%s",
+                self.key, ", ".join(result.missing), post.post_id, post.url,
+            )
+        if result.missing:
+            # 셀렉터 없이 제목 문구로 찾는 방식이라, 실패하면 실제 마크업이 유일한 단서다.
+            self._dump_debug("detail_" + re.sub(r"[^\w.-]", "_", post.post_id), html)
+        return result.sections
+
+    def enrich_succeeded(self, post: Post) -> bool:
+        """세칙 예고는 원문 4개 항목을 모두 확보해야 성공이다.
+
+        기본 판정(본문·구조화 항목·첨부 중 하나)으로는 첨부만 있어도 성공으로 세어,
+        본문이 통째로 빈 #4405 가 '상세 수집 성공 1건'으로 기록됐다.
+        """
+        if post.source_key == _RULE_KEY:
+            return is_complete(post.details)
+        return super().enrich_succeeded(post)
 
     def _download_one(self, post: Post, att: Attachment) -> None:
         if att.data is not None:

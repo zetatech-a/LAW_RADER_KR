@@ -9,6 +9,18 @@ from typing import Optional
 # 여러 모듈이 같은 문자열을 각자 적어 두지 않도록 한 곳에 둔다(config.yaml 의 key 와 동일).
 ASSEMBLY_SOURCE_KEY = "assembly_bill"
 
+# 금감원 '세칙 제·개정 예고' 소스의 key(config.yaml 의 key 와 동일). 이 소스는 상세 페이지의
+# 원문 4개 항목을 그대로 싣고 AI 요약을 쓰지 않는다 — 스크래퍼·요약·메일이 이 값으로 갈린다.
+FSS_RULE_SOURCE_KEY = "fss_rule_amendment"
+# 그 4개 항목의 메일 표시 제목(원문의 2·3·5·6 번호는 싣지 않는다). post.details 의 라벨이
+# 곧 이 값이고, 이 순서가 메일 표시 순서다. 값(원문)은 손대지 않는다.
+FSS_RULE_SECTION_TITLES = (
+    "규정의 제개정 취지",
+    "규정의 제개정 내용",
+    "의견제출시한 (도착기준)",
+    "접수부서 및 담당자 연락처",
+)
+
 
 class ProposalContentStatus(str, Enum):
     """의안 '제안이유 및 주요내용'의 상태.

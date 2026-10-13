@@ -11,7 +11,13 @@ from email.message import EmailMessage
 from email.utils import formataddr
 
 from .config import EmailConfig
-from .models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus
+from .models import (
+    ASSEMBLY_SOURCE_KEY,
+    FSS_RULE_SECTION_TITLES,
+    FSS_RULE_SOURCE_KEY,
+    Post,
+    ProposalContentStatus,
+)
 from .reply_excerpt import build_reply_excerpt_rows
 from .snippet import (
     SNIPPET_LIMIT,
@@ -258,6 +264,71 @@ def _details_block(p: Post) -> str:
     )
 
 
+# 금감원 세칙 제·개정 예고 — 상세의 원문 4개 항목(AI 요약 아님). 제목은 표시용으로 고정
+# 하고(원문 번호 2·3·5·6 은 싣지 않는다) 값은 원문 그대로 줄 단위로 싣는다.
+_RULE_FAILED_TEXT = "상세 내용 추출 실패 — 원문 페이지에서 확인해 주세요."
+_RULE_MISSING_TEXT = "원문에서 이 항목을 추출하지 못했습니다 — 원문 페이지에서 확인해 주세요."
+# 다른 블록과 같은 연한 배경·테두리·모서리. 긴 연락처·이메일도 카드 밖으로 넘치지 않게
+# 줄바꿈을 허용하되, 한글은 어절 단위로 끊는다.
+_RULE_BOX = (
+    "padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;"
+    "font-size:13px;line-height:1.6;word-break:keep-all;overflow-wrap:break-word;"
+    "word-wrap:break-word"
+)
+
+
+def _rule_sections(p: Post) -> list[tuple[str, str | None]] | None:
+    """세칙 예고의 (표시 제목, 원문 — 없으면 None) 4개. 하나도 없으면 None(전체 실패)."""
+    found = {label: value for label, value in p.details if value}
+    if not found:
+        return None
+    return [(title, found.get(title)) for title in FSS_RULE_SECTION_TITLES]
+
+
+def _rule_block(p: Post, accent: str) -> str:
+    """기관색 • 제목 + 연한 박스 원문. 누락 항목은 그 자리에 누락 안내를 싣는다."""
+    sections = _rule_sections(p)
+    if sections is None:
+        return (
+            f"<div class='lr-rule-failed' style='margin:10px 0 0;{_RULE_BOX};color:#475569'>"
+            f"{_esc(_RULE_FAILED_TEXT)}</div>"
+        )
+    parts = []
+    for n, (title, value) in enumerate(sections):
+        parts.append(
+            f"<div class='lr-rule-title' style='margin:{10 if n == 0 else 16}px 0 6px;"
+            f"font-size:13px;font-weight:700;line-height:1.5;color:{accent}'>"
+            "<span style='padding-right:6px'>•</span>"
+            f"{_esc(title)}</div>"
+        )
+        if value is None:
+            parts.append(
+                f"<div class='lr-rule-missing' style='{_RULE_BOX};color:#64748b'>"
+                f"{_esc(_RULE_MISSING_TEXT)}</div>"
+            )
+        else:
+            text = "<br>".join(_esc(line) for line in value.split("\n"))
+            parts.append(
+                f"<div class='lr-rule-body' style='{_RULE_BOX};color:#334155'>{text}</div>"
+            )
+    return "".join(parts)
+
+
+def _rule_text_lines(p: Post) -> list[str]:
+    """text/plain 파트의 같은 내용. 색 대신 • 와 들여쓰기로 제목과 본문을 가른다."""
+    sections = _rule_sections(p)
+    if sections is None:
+        return [f"    {_RULE_FAILED_TEXT}"]
+    lines = []
+    for title, value in sections:
+        lines.append(f"    • {title}")
+        if value is None:
+            lines.append(f"      {_RULE_MISSING_TEXT}")
+        else:
+            lines.extend(f"      {line}" if line else "" for line in value.split("\n"))
+    return lines
+
+
 def _summary_block(p: Post, accent: str) -> str:
     """본문 영역. 구조화 항목 → LLM 요약 → 원문 발췌 순으로 보여준다.
 
@@ -265,7 +336,10 @@ def _summary_block(p: Post, accent: str) -> str:
     AI 유의사항 대상도 아니므로 가장 먼저 쓴다.
     요약은 LLM 장애·한도 초과로 비어 있을 수 있으므로 원문 발췌 폴백을 남겨 둔다.
     폴백은 제목 중복과 반복 안내문을 걷어낸 뒤 발췌한다(src/snippet.py).
+    세칙 제·개정 예고는 원문 4개 항목 전용 블록만 쓴다(요약·발췌로 대체하지 않는다).
     """
+    if p.source_key == FSS_RULE_SOURCE_KEY:
+        return _rule_block(p, accent)
     if p.details:
         return _details_block(p)
 
@@ -519,7 +593,9 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
         lines.append(f"\n[{source_name}] ({len(posts)}건)")
         for p in posts:
             lines.append(f"  - {p.title}  {p.date}".rstrip())
-            if p.details:
+            if p.source_key == FSS_RULE_SOURCE_KEY:
+                lines.extend(_rule_text_lines(p))
+            elif p.details:
                 # 원문 그대로의 항목 — AI 요약과 구분되도록 다른 표제를 쓴다.
                 lines.append(f"    [{_DETAILS_LABEL}]")
                 for label, value in p.details:

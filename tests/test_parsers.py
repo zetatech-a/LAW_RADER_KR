@@ -829,18 +829,22 @@ def test_other_fss_sources_keep_wide_content_fallback():
 
 
 def test_other_fss_sources_can_also_read_new_markup():
-    """다른 게시판이 같은 개편 구조를 쓰더라도 #content 폴백으로 본문은 살아 있다."""
+    """다른 게시판이 같은 개편 구조를 쓰더라도 #content 폴백으로 본문은 살아 있다.
+
+    세칙 제·개정 예고는 원문 4개 항목 전용 추출을 쓰므로(tests/test_fss_rule_amendment.py)
+    여기서는 공통 본문 추출을 쓰는 다른 게시판으로 확인한다.
+    """
     sc = _fss_scraper(
-        "fss_rule_amendment",
-        "https://www.fss.or.kr/fss/job/lrgRegItnPrvntc/list.do?menuNo=200489",
+        "fss_admin_guidance",
+        "https://www.fss.or.kr/fss/job/admnPrvntc/list.do?menuNo=200491",
         _DetailFetcher(PRESS_DETAIL_NEW, blob=b"%HWP dummy"),
     )
     post = Post(
-        source_key="fss_rule_amendment",
-        source_name="금감원 · 세칙 예고",
-        post_id="lrgSlno:9",
-        title="세칙 예고",
-        url="https://www.fss.or.kr/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=9",
+        source_key="fss_admin_guidance",
+        source_name="금감원 · 행정지도 예고",
+        post_id="seqno:9",
+        title="행정지도 예고",
+        url="https://www.fss.or.kr/fss/job/admnPrvntc/view.do?seqno=9",
     )
     sc.enrich(post)
     assert "손실흡수능력" in post.body
