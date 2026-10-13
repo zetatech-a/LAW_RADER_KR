@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<!--
+  손으로 만든 구조 fixture(SYNTHETIC). 실제 응답을 캡처한 것이 아니다.
+  같은 6개 항목을 th(제목)/td(값) 표로 내보내는 변형이다. 확인하려는 것:
+  - th 안에서 <br> 로 갈라진 제목(5번 '(도착기준)', 6번 나열)
+  - 가운뎃점 변형(제∙개정 / 제개정)과 번호-제목 사이 공백
+  - 3번 하위 목록이 <ol> 이라 번호가 텍스트에 없는 경우(브라우저가 그리는 번호 보존)
+  - 4번 값이 빈 칸인 경우, 표 마지막의 '첨부파일' 행
+  연락처는 모두 가짜(example.com / 02-0000-xxxx)다.
+-->
+<html lang="ko">
+<head><meta charset="utf-8"><title>세칙 제·개정 예고</title></head>
+<body>
+<div id="content">
+  <div class="board-view">
+    <table class="tbl-view">
+      <caption>세칙 제·개정 예고 상세</caption>
+      <tbody>
+        <tr><th scope="row">제목</th><td>[합성 예시] 전자금융감독규정시행세칙 일부개정 예고</td></tr>
+        <tr><th scope="row">1. 규정의 명칭</th><td>전자금융감독규정시행세칙</td></tr>
+        <tr><th scope="row">2. 규정의 제∙개정 취지</th>
+          <td><p>전자금융업자의 이용자 보호를 강화하고</p><p>보고서 서식을 정비</p></td></tr>
+        <tr><th scope="row">3.  규정의 제개정 내용</th>
+          <td>
+            <ol>
+              <li>선불충전금 별도관리 기준 구체화(안 제4조)</li>
+              <li>보고서 제출기한 정비(안 제5조)</li>
+              <li>공시 서식 정비(안 별지<strong>3</strong>)</li>
+            </ol>
+          </td></tr>
+        <tr><th scope="row">4. 기타 필요사항</th><td></td></tr>
+        <tr><th scope="row">5. 의견제출시한<br>(도착기준)</th><td>2026. 12. 1.</td></tr>
+        <tr><th scope="row">6. 접수부서, 담당자,<br>전화번호, 팩스번호</th>
+          <td>디지털금융감독국 전자금융팀<br>담당 : 박예시 팀장 (02-0000-0101, park@example.com)<br>FAX : 02-0000-0199</td></tr>
+        <tr><th scope="row">첨부파일</th>
+          <td><a href="/fss/cmmn/file/fileDown.do?atchFileId=FILE_SYNTH_T&amp;fileSn=0"><span class="name">개정안.hwp</span></a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+</body>
+</html>
