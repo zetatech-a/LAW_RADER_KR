@@ -596,9 +596,13 @@ _KEY_TIMING = re.compile(rf"{_EFFECTIVE_ACTION}|예정|기한|까지|부터|의�
 _KEY_FACT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원|년|월|일|명|개|건)")
 _KEY_AMOUNT = re.compile(r"\d[\d,.]*\s*(?:%|억|조|원)")
 _KEY_ENUMERATION = re.compile(r"^(?:[①-⑳❶-❿➊-➓]+\s*|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+[.)]\s*|[가나다라마바사아자차카타파하][.)](?:\s+|(?=[가-힣A-Za-z0-9]))|\d{1,2}[.)](?:\s+|(?=[가-힣A-Za-z])))")
-_KEY_BULLET = re.compile(rf"(?:{_KEY_ENUMERATION.pattern}|^[□○ㅇ•▪▶]+\s*|^[-–—]\s+(?!\s*\d))")
-# 짧은 본문 전문 표시용: 위 표식 중 기호 불릿만. 번호·글자 표식은 "10. 15." 같은 날짜와 겹쳐 남긴다.
-_SYMBOL_BULLET = re.compile(r"^[□○ㅇ•▪▶]+\s*|^[-–—]\s+(?!\s*\d)")
+# 짧은 본문 전문 표시용: 아래 표식 중 기호 불릿만. 번호·글자 표식은 "10. 15." 같은 날짜와 겹쳐 남긴다.
+# '• □ ○'처럼 띄어 쓴 여러 기호도 한 번에 벗긴다. 같은 기호가 붙어 반복되면('○○은행')
+# 익명 표기이므로 그 앞에서 멈춘다.
+_SYMBOL_BULLET = re.compile(
+    r"^(?:(?P<bullet>[□■○●◯❍◎ㅇ•◦▪▫▶▷◆◇☐])(?!(?P=bullet))\s*)+|^[-–—]\s+(?!\s*\d)"
+)
+_KEY_BULLET = re.compile(rf"(?:{_KEY_ENUMERATION.pattern}|{_SYMBOL_BULLET.pattern})")
 _KEY_SECTION_START = re.compile(r"^(?:\*|(?:첫째|둘째|셋째|넷째|다섯째|[ⅠⅡⅢⅣⅤ])(?:\s|[,，.]|$))")
 _KEY_HEADING = re.compile(r"^(?:제안이유(?:\s*및\s*주요내용)?|주요내용|추진배경|기대효과|향후계획|참고|붙임)\s*$")
 _KEY_ATTACHMENT_LIST = re.compile(r"^첨부\s*파일\s*(?:(?:목록|\(\s*\d+\s*\))(?=\s|첨부|$)|$)")
