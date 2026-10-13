@@ -144,6 +144,10 @@ def verify_source(scraper, list_limit, do_enrich, assembly_sample=_ASSEMBLY_SAMP
             report["enrich"] = (
                 f"본문 {body_len}자 / 첨부 {n_att}개(다운로드 {n_dl}개){detail_note}"
             )
+            # 구조화 항목은 원문 그대로 옮긴 값이라, 개수만으로는 맞게 뽑았는지 알 수 없다
+            # (세칙 예고 4개 항목 등). 라이브 검증 로그에서 값까지 확인할 수 있게 남긴다.
+            report["sample_url"] = first.url
+            report["details"] = list(first.details)
             # 성공 판정은 main.py 와 같은 기준을 쓴다(스크래퍼가 계약을 선언했으면
             # 그 판정). 두 곳이 어긋나면 운영 통계와 라이브 검증 결과가 달라진다.
             success_hook = getattr(scraper, "enrich_succeeded", None)
@@ -430,6 +434,12 @@ def main(argv=None):
             print(f"  페이지네이션: {report['pagination']}")
         if "enrich" in report:
             print(f"  상세/첨부: {report['enrich']}")
+        if report.get("sample_url"):
+            print(f"  상세 표본: {report['sample_url']}")
+        for label, value in report.get("details", ()):
+            print(f"    ● {label}")
+            for line in (value or "").split("\n"):
+                print(f"        {line}" if line else "")
 
     # --- 요약 ---
     print("\n" + "=" * 70)
