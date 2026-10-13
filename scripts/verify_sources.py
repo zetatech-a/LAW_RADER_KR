@@ -437,7 +437,7 @@ def main(argv=None):
         if report.get("sample_url"):
             print(f"  상세 표본: {report['sample_url']}")
         for label, value in report.get("details", ()):
-            print(f"    ● {label}")
+            print(f"    • {label}")
             for line in (value or "").split("\n"):
                 print(f"        {line}" if line else "")
 

@@ -286,7 +286,7 @@ def _rule_sections(p: Post) -> list[tuple[str, str | None]] | None:
 
 
 def _rule_block(p: Post, accent: str) -> str:
-    """기관색 ● 제목 + 연한 박스 원문. 누락 항목은 그 자리에 누락 안내를 싣는다."""
+    """기관색 • 제목 + 연한 박스 원문. 누락 항목은 그 자리에 누락 안내를 싣는다."""
     sections = _rule_sections(p)
     if sections is None:
         return (
@@ -298,7 +298,7 @@ def _rule_block(p: Post, accent: str) -> str:
         parts.append(
             f"<div class='lr-rule-title' style='margin:{10 if n == 0 else 16}px 0 6px;"
             f"font-size:13px;font-weight:700;line-height:1.5;color:{accent}'>"
-            "<span style='font-size:10px;vertical-align:1px;padding-right:6px'>●</span>"
+            "<span style='padding-right:6px'>•</span>"
             f"{_esc(title)}</div>"
         )
         if value is None:
@@ -315,13 +315,13 @@ def _rule_block(p: Post, accent: str) -> str:
 
 
 def _rule_text_lines(p: Post) -> list[str]:
-    """text/plain 파트의 같은 내용. 색 대신 ● 와 들여쓰기로 제목과 본문을 가른다."""
+    """text/plain 파트의 같은 내용. 색 대신 • 와 들여쓰기로 제목과 본문을 가른다."""
     sections = _rule_sections(p)
     if sections is None:
         return [f"    {_RULE_FAILED_TEXT}"]
     lines = []
     for title, value in sections:
-        lines.append(f"    ● {title}")
+        lines.append(f"    • {title}")
         if value is None:
             lines.append(f"      {_RULE_MISSING_TEXT}")
         else:

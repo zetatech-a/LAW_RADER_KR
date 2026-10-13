@@ -129,7 +129,7 @@ def main(argv=None) -> int:
     print(f"\n[{post.post_id}] {post.title}")
     for title in FSS_RULE_SECTION_TITLES:
         value = found.get(title)
-        print(f"\n● {title}" + ("" if value else "  — 추출 실패(누락)"))
+        print(f"\n• {title}" + ("" if value else "  — 추출 실패(누락)"))
         for line in (value or "").split("\n"):
             print(f"    {line}" if line else "")
     print(f"\n첨부 {len(post.attachments)}개: " + ", ".join(a.filename for a in post.attachments))

@@ -524,7 +524,7 @@ def test_html_shows_four_unnumbered_titles_in_fss_theme_color():
     assert accent == "#0f766e"                       # 기존 금감원 강조색을 그대로 쓴다
     assert html.count("class='lr-rule-title'") == 4
     for title in FSS_RULE_SECTION_TITLES:
-        assert f"●</span>{title}</div>" in html
+        assert f"•</span>{title}</div>" in html
     titles = html.split("class='lr-rule-title'")[1:]
     assert all(f"color:{accent}" in t.split(">", 1)[0] and "font-weight:700" in t.split(">", 1)[0]
                for t in titles)
@@ -577,16 +577,16 @@ def test_text_part_carries_the_same_original_content():
     lines = text.splitlines()
     start = lines.index(f"  - {p.title}  {p.date}")
     assert lines[start + 1:start + 17] == [
-        f"    ● {PURPOSE}",
+        f"    • {PURPOSE}",
         "      보험회사의 건전성 제고를 위해 게리가정 보고서를 신설하고 K-ICS 지급여력비율 제도 등을 정비",
-        f"    ● {CONTENT}",
+        f"    • {CONTENT}",
         "      1. '게리가정 보고서' 세부 기준 마련(안 제4-1조의5)",
         "      2. 주택연금상품 K-ICS 요구자본 등 산출기준 마련(안 별표22)",
         "      3. 업무보고서 정비(안 별지26)",
         "      4. 용어 정비(안 별표22의1)",
-        f"    ● {DEADLINE}",
+        f"    • {DEADLINE}",
         "      2026-11-23",
-        f"    ● {CONTACT}",
+        f"    • {CONTACT}",
         "      - 접수부서 : 보험리스크제도실",
         "      - 담당자 : 홍길동 선임 (☎ 02-0000-0001, gildong.hong@example.com)",
         "      - 담당자 : 김예시 수석 <yesi.kim@example.com> (☎ 02-0000-0002)",
@@ -601,9 +601,9 @@ def test_partial_extraction_marks_missing_sections_in_both_parts():
     _, html, text = _render(details)
     assert html.count("class='lr-rule-title'") == 4          # 4개 제목은 모두 자리를 지킨다
     assert html.count("class='lr-rule-body'") == 3
-    missing_block = html.split(f"●</span>{DEADLINE}</div>", 1)[1].split("</div>", 1)[0]
+    missing_block = html.split(f"•</span>{DEADLINE}</div>", 1)[1].split("</div>", 1)[0]
     assert "lr-rule-missing" in missing_block and "추출하지 못했습니다" in missing_block
-    i = text.splitlines().index(f"    ● {DEADLINE}")
+    i = text.splitlines().index(f"    • {DEADLINE}")
     assert "추출하지 못했습니다" in text.splitlines()[i + 1]
 
 
