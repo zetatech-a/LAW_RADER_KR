@@ -636,20 +636,71 @@ def test_other_cards_render_identically_when_a_rule_post_is_in_the_digest():
     assert mixed.count("<tr class='lr-detail'>") == 3
 
 
-# ── 5. 라이브 캡처(#4405) — 캡처 전에는 skip ─────────────────────────────────────
+# ── 5. 실제 응답(#4405) ─────────────────────────────────────────────────────────
+#
+# tests/fixtures/fss_rule/live/lrgSlno_4405.html 은 실제 금감원 상세 페이지 원본이다
+# (2026-10-13 사용자 제공, 서버 소스 저장본). 담당자 성명·이메일·직통/팩스 번호만 같은
+# 형태의 가짜 값으로 바꿨고 나머지는 바이트 그대로다(fixture README 참고).
+# 실제 구조: div.krds-reg > dl.form-group > dt.form-tit(번호+제목) / dd.form-conts(값).
+
+LIVE_4405_EXPECTED = [
+    (PURPOSE, "보험회사의 건전성 제고를 위해 계리가정 보고서를 신설하고 K-ICS 지급여력비율 제도 등을 정비"),
+    (CONTENT, "1. \u2018계리가정 보고서\u2019 세부 기준 마련(안 제4-1조의5)\n"
+              "2. 주택연금상품 K-ICS 요구자본 등 산출기준 마련(안 별표22)\n"
+              "3. 업무보고서 정비(안 별지26)\n"
+              "4. 용어 정비(안 별표22의1)"),
+    (DEADLINE, "2026-11-23"),
+    (CONTACT, "계리리스크감독국 홍길동 수석조사역(총괄) 02-0000-0001, contact1@example.com\n"
+              "계리리스크감독국 김예시 선임조사역(계리가정보고서) 02-0000-0002 contact2@example.com\n"
+              "계리리스크감독국 박예시 수석조사역(K-ICS 관련) 02-0000-0003 contact3@example.com\n"
+              "(팩스번호 : 02-0000-0009)"),
+]
+
+_SKIP_LIVE = pytest.mark.skipif(
+    not LIVE_4405.exists(),
+    reason="실제 응답 fixture 없음 — tests/fixtures/fss_rule/README.md 의 캡처 명령 참고",
+)
 
 
-@pytest.mark.skipif(not LIVE_4405.exists(),
-                    reason="라이브 fixture 없음 — tests/fixtures/fss_rule/README.md 의 캡처 명령 참고")
-def test_live_4405_extracts_four_sections_verbatim():
-    html = LIVE_4405.read_text(encoding="utf-8")
-    result = _extract(html)
+@_SKIP_LIVE
+def test_live_4405_extracts_four_sections_exactly():
+    result = _extract(LIVE_4405.read_text(encoding="utf-8"))
     assert result.missing == [], result.reason or result.missing
-    got = dict(result.sections)
+    assert result.sections == LIVE_4405_EXPECTED
+
+
+@_SKIP_LIVE
+def test_live_4405_values_are_verbatim_and_exclude_sections_1_and_4():
+    html = LIVE_4405.read_text(encoding="utf-8")
     page_text = _squash(BeautifulSoup(html, "lxml").get_text())
-    for value in got.values():
-        assert "규정의 명칭" not in value and "기타 필요사항" not in value
+    for _, value in _extract(html).sections:
+        assert "보험업감독업무시행세칙" not in value          # 1번(규정의 명칭) 값
+        for noise in ("규정의 명칭", "기타 필요사항", "첨부파일", "다운로드", "목록", "의견제출"):
+            assert noise not in value, noise
         for line in value.split("\n"):
-            assert _squash(line.split(". ", 1)[-1]) in page_text, line
-    assert len([ln for ln in got[CONTENT].split("\n") if ln[:2] in ("1.", "2.")]) >= 2
-    assert any(ch.isdigit() for ch in got[DEADLINE])
+            assert _squash(line) in page_text, line
+
+
+@_SKIP_LIVE
+def test_live_4405_enrich_keeps_attachments_and_counts_as_success(in_tmp):
+    sc = _scraper(LIVE_4405.read_text(encoding="utf-8"))
+    p = _post()
+    sc.enrich(p)
+    assert p.details == LIVE_4405_EXPECTED and p.body == ""
+    assert sc.enrich_succeeded(p) is True
+    assert [a.filename for a in p.attachments] == [
+        "2610_보험업감독업무시행세칙 개정 사전예고안_최종_187132806250143.hwp",
+        "2610_(별첨)_ 업무보고서 개정안_최종_187132842774673.xlsx",
+    ]
+    assert not (in_tmp / "debug").exists()
+
+
+@_SKIP_LIVE
+def test_live_4405_old_generic_selectors_matched_nothing():
+    """운영 #4405 본문이 빈 원인: 개편 페이지는 div.contents 로 감싸여 기존 공통 selector
+    (.view-cont/.board-view/.bbs-view/.cont/#content)가 하나도 맞지 않는다."""
+    from src.scrapers.fss import _BODY_SELECTORS, _body_text
+
+    soup = BeautifulSoup(LIVE_4405.read_text(encoding="utf-8"), "lxml")
+    assert all(not soup.select(sel) for sel in _BODY_SELECTORS)
+    assert _body_text(soup, _BODY_SELECTORS) == ""
