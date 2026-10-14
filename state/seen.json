@@ -833,13 +833,13 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_A805A73284B54D3184B7F01FED311E",
       "PRC_6476A403F8E64D14A9F1D6E1B2B570",
       "PRC_U2U5S1T2S2Z9A1Y6Y1X7Y2W3W7T0R7",
       "PRC_T2R6S0R9P2P2Y1Y3W1X0V2U0U4C9D6",
       "PRC_EC79D21C54024C16A5D06122914938",
       "PRC_J2K6S0S9Q2R2Q1O3O1W0W5V4W8U8U7",
       "PRC_6C1C9C69EEAE4989810098458E18E8",
-      "PRC_A805A73284B54D3184B7F01FED311E",
       "PRC_7D48C07754364EDB86653E1C190ABF",
       "PRC_E7F7BC9F9D614BD4B4D4156FE83093",
       "PRC_DE9119CD156E46D7A2F2478C3D17D3",
@@ -2828,19 +2828,7 @@
       "PRC_G2H6G0G8E0F5N1L4M4K6L2J5H5I0G1",
       "ARC_R2T6K0S9Y0Y3H1F1T1F3F2D6S8A5J1",
       "PRC_D2D6L0J8K2I8J1H3I4Q3Q0O4N2O3M9"
-    ],
-    "pending_detail": {
-      "PRC_A805A73284B54D3184B7F01FED311E": {
-        "first_seen_at": "2026-10-14T00:13:01Z",
-        "attempts": 1,
-        "title": "해양수산생명자원의 확보·관리 및 이용 등에 관한 법률 일부개정법률안 (송옥주의원 등 10인)",
-        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A805A73284B54D3184B7F01FED311E",
-        "date": "2026-10-13",
-        "status": "pending",
-        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-10-14T00:13:01Z"
-      }
-    }
+    ]
   },
   "pipc_notice": {
     "seen": [
