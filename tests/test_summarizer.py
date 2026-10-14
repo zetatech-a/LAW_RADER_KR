@@ -74,25 +74,23 @@ def test_config_exposes_llm_defaults():
     assert cfg.llm.model  # 모델명이 비어 있으면 안 됨
 
 
-def test_config_uses_latest_alias_and_ordered_fallbacks():
-    # 특정 버전을 하드코딩하면 그 버전 수명 종료일에 전 요청이 404 로 죽는다.
+def test_config_uses_flash_lite_primary_and_ordered_fallbacks():
+    # 긴급 전환: 기본 체인은 3.5 Flash-Lite → 3.1 Flash-Lite. 3.6/3.8 Flash 는 기본
+    # 체인에서 빠진다(코드 기본값 _DEFAULT_FALLBACK_MODELS 에는 남아 있다).
     cfg = load_config("config.yaml")
-    assert cfg.llm.model == "gemini-flash-latest"
-    assert cfg.llm.fallback_models == ["gemini-3.6-flash", "gemini-3.8-flash"]
+    assert cfg.llm.model == "gemini-3.5-flash-lite"
+    assert cfg.llm.fallback_models == ["gemini-3.1-flash-lite"]
     # 호출 순서: primary → fallback 순서 그대로
-    assert cfg.llm.model_chain == [
-        "gemini-flash-latest",
-        "gemini-3.6-flash",
-        "gemini-3.8-flash",
-    ]
+    assert cfg.llm.model_chain == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 
 
-def test_env_primary_36_dedupes_to_36_then_38(tmp_path, monkeypatch):
-    # 운영: GitHub Variable MODEL=gemini-3.6-flash → 3.6 → 3.8 (중복 제거·순서 보존)
-    monkeypatch.delenv("GEMINI_MODEL", raising=False)
-    monkeypatch.setenv("MODEL", "gemini-3.6-flash")
+def test_env_primary_flash_lite_dedupes_to_35_then_31(tmp_path, monkeypatch):
+    # 운영: Variable MODEL=gemini-3.5-flash-lite 를 워크플로가 GEMINI_MODEL 로 넘긴다
+    # → 3.5 Flash-Lite → 3.1 Flash-Lite (중복 제거·순서 보존)
+    monkeypatch.delenv("MODEL", raising=False)
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
     cfg = load_config("config.yaml")
-    assert cfg.llm.model_chain == ["gemini-3.6-flash", "gemini-3.8-flash"]
+    assert cfg.llm.model_chain == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 
 
 def test_model_chain_dedupes_and_preserves_order():
@@ -111,7 +109,7 @@ def test_config_allows_disabling_fallbacks(tmp_path):
     p.write_text(yaml.safe_dump(base, allow_unicode=True), encoding="utf-8")
     cfg = load_config(p)
     assert cfg.llm.fallback_models == []
-    assert cfg.llm.model_chain == ["gemini-flash-latest"]
+    assert cfg.llm.model_chain == ["gemini-3.5-flash-lite"]
 
 
 def test_config_defaults_fallbacks_when_key_missing(tmp_path):
