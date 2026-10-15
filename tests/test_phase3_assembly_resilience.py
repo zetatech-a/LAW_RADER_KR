@@ -482,11 +482,23 @@ def test_S3_gemini25_keeps_thinking_budget_contract():
 
 
 @pytest.mark.parametrize(
-    "model", [_ALIAS, _LITE, _FB38, "gemini-9-ultra", "gemini-3.6-flash-lite"]
+    "model",
+    [_ALIAS, _LITE, _FB38, "gemini-9-ultra", "gemini-3.6-flash-lite", "gemini-3.1-flash-lite"],
 )
 def test_S4_unknown_models_never_receive_thinking_level(model):
     assert supports_thinking_level(model, "minimal") is False
     assert "thinkingConfig" not in _assembly_gc(model)
+
+
+def test_S4b_production_chain_gets_no_thinking_config_on_batch_path(monkeypatch):
+    # 운영 config.yaml 의 체인 전체(Flash-Lite 계열)에 의안 배치 thinking_level 이
+    # 설정돼 있어도 thinkingConfig 가 실제 payload 에 실리지 않아야 한다.
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("MODEL", raising=False)
+    llm = load_config("config.yaml").llm
+    assert llm.assembly_batch.thinking_level == "minimal"
+    for model in llm.model_chain:
+        assert "thinkingConfig" not in _assembly_gc(model, llm.assembly_batch), model
 
 
 def test_S5_assembly_request_budget_is_90_and_split():
