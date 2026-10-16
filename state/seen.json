@@ -249,6 +249,7 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:241777",
       "nttId:241719",
       "nttId:241690",
       "nttId:241689",
@@ -504,6 +505,7 @@
   },
   "fss_rule_amendment": {
     "seen": [
+      "lrgSlno:4425",
       "lrgSlno:4405",
       "lrgSlno:4385",
       "lrgSlno:4347",
