@@ -13,8 +13,7 @@ from email.utils import formataddr
 from .config import EmailConfig
 from .models import (
     ASSEMBLY_SOURCE_KEY,
-    FSS_RULE_SECTION_TITLES,
-    FSS_RULE_SOURCE_KEY,
+    FSS_SECTION_TITLES_BY_SOURCE,
     Post,
     ProposalContentStatus,
 )
@@ -264,8 +263,9 @@ def _details_block(p: Post) -> str:
     )
 
 
-# 금감원 세칙 제·개정 예고 — 상세의 원문 4개 항목(AI 요약 아님). 제목은 표시용으로 고정
-# 하고(원문 번호 2·3·5·6 은 싣지 않는다) 값은 원문 그대로 줄 단위로 싣는다.
+# 금감원 세칙 제·개정 예고·행정지도 예고 — 상세의 원문 4개 항목(AI 요약 아님). 제목은
+# 표시용으로 고정하고(원문 번호 2·3·5·6 은 싣지 않는다) 값은 원문 그대로 줄 단위로 싣는다.
+# 두 소스가 같은 블록·같은 스타일을 쓰고, 제목만 FSS_SECTION_TITLES_BY_SOURCE 로 갈린다.
 _RULE_FAILED_TEXT = "상세 내용 추출 실패 — 원문 페이지에서 확인해 주세요."
 _RULE_MISSING_TEXT = "원문에서 이 항목을 추출하지 못했습니다 — 원문 페이지에서 확인해 주세요."
 # 다른 블록과 같은 연한 배경·테두리·모서리. 긴 연락처·이메일도 카드 밖으로 넘치지 않게
@@ -278,11 +278,11 @@ _RULE_BOX = (
 
 
 def _rule_sections(p: Post) -> list[tuple[str, str | None]] | None:
-    """세칙 예고의 (표시 제목, 원문 — 없으면 None) 4개. 하나도 없으면 None(전체 실패)."""
+    """원문 항목 전용 소스의 (표시 제목, 원문 — 없으면 None) 4개. 하나도 없으면 None(전체 실패)."""
     found = {label: value for label, value in p.details if value}
     if not found:
         return None
-    return [(title, found.get(title)) for title in FSS_RULE_SECTION_TITLES]
+    return [(title, found.get(title)) for title in FSS_SECTION_TITLES_BY_SOURCE[p.source_key]]
 
 
 def _rule_block(p: Post, accent: str) -> str:
@@ -336,9 +336,10 @@ def _summary_block(p: Post, accent: str) -> str:
     AI 유의사항 대상도 아니므로 가장 먼저 쓴다.
     요약은 LLM 장애·한도 초과로 비어 있을 수 있으므로 원문 발췌 폴백을 남겨 둔다.
     폴백은 제목 중복과 반복 안내문을 걷어낸 뒤 발췌한다(src/snippet.py).
-    세칙 제·개정 예고는 원문 4개 항목 전용 블록만 쓴다(요약·발췌로 대체하지 않는다).
+    세칙 제·개정 예고·행정지도 예고는 원문 4개 항목 전용 블록만 쓴다(요약·발췌로 대체하지
+    않는다).
     """
-    if p.source_key == FSS_RULE_SOURCE_KEY:
+    if p.source_key in FSS_SECTION_TITLES_BY_SOURCE:
         return _rule_block(p, accent)
     if p.details:
         return _details_block(p)
@@ -593,7 +594,7 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
         lines.append(f"\n[{source_name}] ({len(posts)}건)")
         for p in posts:
             lines.append(f"  - {p.title}  {p.date}".rstrip())
-            if p.source_key == FSS_RULE_SOURCE_KEY:
+            if p.source_key in FSS_SECTION_TITLES_BY_SOURCE:
                 lines.extend(_rule_text_lines(p))
             elif p.details:
                 # 원문 그대로의 항목 — AI 요약과 구분되도록 다른 표제를 쓴다.

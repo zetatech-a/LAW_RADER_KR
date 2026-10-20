@@ -152,6 +152,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
    - **의안 발췌는 220자 한 줄이 아닙니다.** 의안 본문은 '제안이유 및 주요내용' 한 덩어리라 앞 220자에는 거의 항상 현행 제도 설명만 실리고 정작 *무엇을 바꾸는지*가 잘립니다. 그래서 의안만 원문에서 **최대 3개의 서로 다른 의미 구간**(배경 → 입법행위 → 결론)을 골라 총 900자 이내로 싣습니다. 문장 분리가 되지 않는 한 덩어리 본문은 `머리 … [중략] 꼬리` 형태로 보여줍니다. **AI 요약이 아니라 원문 그대로의 결정적(deterministic) 발췌**이므로 라벨도 '제안이유 및 주요내용 발췌'를 유지합니다. Phase 2 의 '의안 상세 업데이트' 알림도 같은 렌더러를 쓰므로 자동으로 같은 발췌를 받습니다.
    - 의안 배치 호출이 실패하면 **실패의 종류에 따라** 다르게 다룹니다. 인증(401·403)·한도(429)·잘못된 요청(400)·모델 부재처럼 다시 불러도 결과가 같은 실패는 남은 배치를 **즉시** 포기합니다. 반대로 일시 장애(408·5xx·네트워크·타임아웃)는 재시도한 뒤 **다음 배치를 한 번은 더 두드려 보고**, 연속 실패가 `llm.assembly_batch.max_consecutive_transient_failures` 에 도달할 때만 남은 배치를 포기합니다. 호출은 성공했고 **응답 '내용'이 문제인 경우**(깨진 JSON·스키마 위반·안전필터 차단 등)는 그 배치에 담긴 의안 내용에 달린 판정이라 다음 배치는 통과할 수 있으므로 멈추지 않습니다. 자세한 분류는 아래 [알려진 한계](#알려진-한계)의 실패 처리 표를 보세요.
    - **금감원 세칙 제·개정 예고**(`fss_rule_amendment`)는 **AI 요약을 쓰지 않습니다.** 상세 페이지의 `2. 규정의 제·개정 취지` · `3. 규정의 제·개정 내용` · `5. 의견제출시한(도착기준)` · `6. 접수부서, 담당자, 전화번호, 팩스번호` 4개 항목만 **원문 그대로** 뽑아(`src/scrapers/fss_rule.py`, 기존 `post.details` 재사용) 메일 카드에 금감원 강조색 • 제목(원문 번호 없이 '규정의 제개정 취지' 등) + 연한 박스로 싣습니다. 1번 명칭·4번 기타 필요사항은 싣지 않고 경계로만 씁니다. 특정 class 를 추측하지 않고 항목 제목 문구와 그 공통 조상 요소로 구조를 찾으며(th/dt 라벨이면 짝지어진 td/dd 를 그대로 사용), 제목은 원문 번호·순서가 맞을 때만 인정해 3번 안의 `1.`·`2.` 하위 목록이 잘리지 않습니다. 일부 항목이 없으면 그 자리에 누락 안내를, 전부 없으면 '상세 내용 추출 실패 — 원문 페이지에서 확인해 주세요.'를 싣고(제목·첨부·원문 링크는 유지) 원인·URL 을 warning 으로, 원본 HTML 을 `debug/` 로 남깁니다. **어떤 경우에도 일반 본문 추출이나 AI 요약으로 대체하지 않습니다**(`summarizer._prepare_body` 에서 소스 단위로 제외 — 요약 호출과 AI 집계 모두). 상세 수집 성공은 4개 항목을 모두 확보했을 때만 셉니다(첨부만으로 성공 처리하지 않음). 재시도 정책은 바꾸지 않았습니다 — 다른 일반 게시물과 같이 발송 성공 후 `seen` 으로 확정됩니다.
+   - **금감원 행정지도 예고**(`fss_admin_guidance`)도 같은 방식입니다. 상세의 `2. 행정지도의 신규·변경·연장의 취지` · `3. 행정지도의 내용` · `5. 의견제출시한(도착기준)` · `6. 접수부서, 담당자, 전화번호, 팩스번호` 4개 항목만 원문 그대로 뽑아(`src/scrapers/fss_admin_guidance.py`) 세칙 예고와 같은 카드 디자인(금감원 강조색 • 제목, 원문 번호 없음 + 연한 박스)으로 싣습니다. 상세는 dt/dd 짝 없이 `div.n-dbdata` 한 요소 안에 1~6번이 글자와 `<br>` 로 이어지는 구조라, 세칙 예고의 추출 엔진(`fss_rule.extract_sections`)에 이 게시판의 항목 제목표만 넘겨 씁니다(번호+제목·순서 검증, 3번 하위 목록 보존, 1·4번은 경계로만). 값이 모두 빈 페이지에서 컨테이너를 바깥으로 넓히면 6번에 '목록'·'행정지도에 대한 의견제출' 버튼과 '정보관리 담당부서 안내'가 섞이므로 이 소스는 넓히지 않고 전체 실패로 드러냅니다. 누락·실패 안내, warning·`debug/` 덤프, AI 요약 제외(요약 호출·집계 모두), 4개 항목을 모두 확보해야 상세 수집 성공으로 세는 기준, `seen` 처리는 세칙 예고와 같습니다.
    - 금융규제포털 회신사례는 **법령해석·비조치의견서**의 질의요지·회답·이유를 `post.body` 에 담아 기존 일반 요약 경로(`min_body_chars` 이상이면 1건당 1회 호출)를 그대로 탑니다. 상세 응답이 목록의 그 글이 맞는지(제목·회신일·구분↔endpoint) 먼저 확인하고, 확인되지 않으면 본문·첨부를 수집하지 않을 뿐 아니라 **메일 링크도 통합조회 목록 URL 로 되돌립니다**(검증되지 않은 후보 링크를 그대로 두면 제목만 보고 누른 사용자가 다른 사건의 상세로 갑니다). 목록 `dataIdx`를 `lawreqIdx`/`opinionIdx`로 쓰는 매핑이 아직 라이브 확인 전이라, 가정이 틀렸을 때 다른 사건의 회답·첨부·링크가 나가는 것을 막는 안전장치입니다. 반대로 확인에 성공한 뒤의 본문 파싱·첨부 실패에서는 링크를 되돌리지 않습니다(원문을 직접 볼 수 있어야 합니다). 본문은 **세 항목이 모두 있을 때만** 만듭니다 — 회답이 빠진 질의만으로 3줄 요약을 만들면 결론을 지어낸 요약이 실립니다(하나라도 없으면 본문을 비우고 어떤 항목이 없는지 warning 을 남깁니다. 첨부 수집은 계속합니다). `details` 는 채우지 않습니다 — 실제 요약 호출 경로(`_summarize_general`)는 `details` 를 보지 않고 본문 길이만 보지만, notifier 가 `details` 를 요약보다 먼저 렌더해 그 요약이 메일에 보이지 않고 집계 로그(`ai_target_count`)만 대상에서 빼 로그와 실제 호출이 어긋나기 때문입니다. 상세 주소가 확인되지 않은 구분은 본문 없이 제목·링크만 나가며, 그 글은 per-post 훅(`BaseScraper.supports_enrich`)으로 상세 수집 통계에서 제외됩니다.
    - 모델이 수명 종료돼 404가 나면 `llm.fallback_models` 순서로 자동 전환하고, 성공한 모델을 그 실행 동안 재사용합니다. 전부 실패해도 원문 발췌로 발송됩니다. 일시 장애 중 **HTTP 503(과부하)만** 예외로, 그 모델의 기존 재시도를 모두 소진한 뒤 다음 설정 모델을 시도합니다(성공하면 그 모델을 재사용). **타임아웃·네트워크 실패·그 밖의 5xx(500·502·504)·408 에서는 모델을 바꾸지 않습니다.**
    - 의안 배치는 호출 1회마다 운영 로그에 입력 규모와 사용량을 남깁니다(추가 Gemini 요청 0회 — `countTokens` 를 따로 부르지 않습니다). 호출 전 `Assembly AI call — batch=i/n items=… body_chars=… prompt_chars=… min/avg/max_bill_chars=… allocated_window_sec=… overall_remaining_sec=…`, 성공 후 `Assembly AI call ok — elapsed_sec=… model_version=… prompt_tokens=… candidate_tokens=… thought_tokens=… total_tokens=…`(응답에 `usageMetadata` 가 없으면 `None`), 실패 시 `Assembly AI call failed — elapsed_sec=… error_kind=… error_type=… response_retry=…`. **API 키·프롬프트 전문·제안이유 본문은 로그에 남기지 않습니다**(길이만 남깁니다).
@@ -368,6 +369,7 @@ AI 3줄 요약 연동은 라이브와 무관하게 검증됩니다. 두 소스�
 - **신규 상한 초과분:** 한 소스의 신규가 상한(의안 75건, 그 외 50건)을 넘으면 최신 그만큼만 발송·상세수집되고 나머지는 상세 수집 없이 `seen` 처리됩니다. 그 초과분은 애초에 사용자에게 알려지지 않았으므로 상세 재조회 큐에도 넣지 않습니다(큐는 '이미 알린 의안의 후속 정보'를 위한 것입니다). 이 backlog 는 여전히 별개의 미해결 문제입니다.
 - **PIPC 두 소스 라이브 미검증:** `pipc_notice`·`pipc_press` 는 개발 환경의 egress 차단으로 실제 응답을 받아 보지 못한 채 배포됩니다. 상세 본문 셀렉터·첨부 endpoint·`pageIndex` 가 확인 대상이며, 어긋나도 fail-soft 로 degrade 합니다(목록만 수집되거나 본문이 빔 — 메일·state 는 정상). 범위와 확인 절차는 위 **[개인정보보호위원회(PIPC) 두 소스 — 라이브 미검증 범위](#개인정보보호위원회pipc-두-소스--라이브-미검증-범위)** 참고.
 - **금감원 세칙 제·개정 예고 상세 — 실제 구조 확인 범위:** 원문 4개 항목 추출은 사용자가 제공한 **실제 #4405 상세 HTML**(`tests/fixtures/fss_rule/live/lrgSlno_4405.html`, 담당자 연락처만 가짜 값으로 치환)로 검증했습니다 — 실제 구조는 `dl.form-group > dt.form-tit / dd.form-conts` 입니다. 다만 개발 환경에서는 `www.fss.or.kr` 이 egress 정책으로 차단되어 **GitHub 러너가 `requests` 로 받는 응답**은 직접 확인하지 못했습니다. Actions 의 *Verify sources* 를 `only=fss_rule_amendment` 로 돌리면 목록 첫 글의 표본 URL·추출된 4개 항목 값이 로그에 찍히고, 미달이면 🟠 와 함께 원본 HTML 이 `debug/` 아티팩트로 남습니다. 다른 게시물은 `python scripts/preview_fss_rule.py --url <상세 URL>` 로 단건 확인할 수 있습니다(메일·state·Gemini 사용 없음).
+- **금감원 행정지도 예고 상세 — 실제 구조 확인 범위:** 원문 4개 항목 추출은 사용자가 제공한 **실제 seqno=280 상세 HTML**(`tests/fixtures/fss_admin_guidance/live/seqno_280.html`, 6번 담당자 성명·직통·팩스·이메일만 가짜 값으로 치환)로 검증했습니다 — 실제 구조는 `div.krds-bd-view > div.n-dbdata`(글자 + `<br>`) 입니다. 세칙 예고와 마찬가지로 **GitHub 러너가 `requests` 로 받는 응답**은 개발 환경의 egress 차단으로 직접 확인하지 못했습니다. *Verify sources* 를 `only=fss_admin_guidance` 로 돌리면 표본 URL·4개 항목 값이 로그에 찍히고, 단건은 `python scripts/preview_fss_rule.py --source fss_admin_guidance --url <상세 URL>` 로 확인할 수 있습니다(`--url` 이 `admnPrvntc` 경로면 `--source` 생략 가능).
 - **해외 IP 접속 제한:** `fsc.go.kr`·`better.fsc.go.kr`·`open.assembly.go.kr` 는 시간대에 따라 GitHub 러너(해외 IP)에서 연결이 되지 않아 해당 회차에 건너뛸 수 있습니다(로그에 `ConnectTimeout`). 금융감독원(`fss.or.kr`) 5개 소스는 안정적으로 수집됩니다.
   - 연결 실패는 소스별로 격리되어 나머지 소스 수집에는 영향이 없고, 건너뛴 글은 **접속이 되는 다음 회차에 신규로 잡혀 발송**됩니다.
   - 완전히 해결하려면 국내 IP에서 실행해야 합니다(self-hosted runner 또는 국내 서버 cron). 코드는 환경 독립적이라 그대로 사용 가능합니다.
@@ -452,18 +454,20 @@ src/
     base.py                 # 스크래퍼 베이스(페이지네이션·디버그 덤프)
     fsc.py  fss.py          # 금융위 / 금감원 게시판
     fss_rule.py             # 금감원 세칙 제·개정 예고 상세의 원문 4개 항목 추출(AI 요약 없음)
+    fss_admin_guidance.py   # 금감원 행정지도 예고 상세의 원문 4개 항목(fss_rule 엔진 + 항목 제목표)
     better_fsc.py assembly.py  # 회신사례(JSON 목록 + 상세 수집) / 계류의안(Open API + 제안이유 수집)
     pipc.py                 # 개인정보위 공지사항·보도자료(상세 URL 계약 기반 목록 파싱)
 state/seen.json             # 이미 본 글 ID (자동 커밋)
 scripts/
   send_test_email.py        # SMTP 설정 확인
-  preview_fss_rule.py       # 세칙 예고 1건 단건 점검·메일 미리보기(발송·state·Gemini 없음)
+  preview_fss_rule.py       # 세칙·행정지도 예고 1건 단건 점검·메일 미리보기(발송·state·Gemini 없음)
   verify_sources.py         # 소스 점검(목록/상세를 구분해 판정)
   capture_assembly_network.py  # [진단] 의안 상세 XHR 캡처(Playwright, HAR·JS 분석)
   capture_assembly_fixture.py  # [진단] 의안 상세 HTML fixture 캡처(requests)
 tests/fixtures/             # 캡처한 실제 응답(회귀 테스트용, README 참고)
   synthetic/                # 손으로 만든 구조 fixture(상태 판정기 검증용 — 캡처 아님)
   fss_rule/                 # 세칙 예고 상세 fixture(합성) + live/ 캡처 자리(README 참고)
+  fss_admin_guidance/       # 행정지도 예고 상세 실제 응답 live/seqno_280.html(README 참고)
 ```
 
 새 게시판을 추가하려면 `config.yaml` 의 `sources` 에 항목을 추가하고, 알맞은 `type`(파서)을 지정하면 됩니다.

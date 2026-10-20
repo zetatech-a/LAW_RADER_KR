@@ -20,9 +20,16 @@ from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from ..fetcher import AttachmentTooLarge
-from ..models import FSS_RULE_SOURCE_KEY, Attachment, Post
+from ..models import (
+    FSS_ADMIN_GUIDANCE_SOURCE_KEY,
+    FSS_RULE_SOURCE_KEY,
+    FSS_SECTION_TITLES_BY_SOURCE,
+    Attachment,
+    Post,
+)
 from .base import BaseScraper, clean_text
-from .fss_rule import extract_rule_sections, is_complete
+from .fss_admin_guidance import extract_admin_guidance_sections
+from .fss_rule import extract_rule_sections, has_all_sections
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +77,17 @@ _WS_ALL = re.compile(r"\s+")
 # _BODY_SELECTORS 가 하나도 맞지 않는다(#content 는 주석으로만 남음). 이 게시판의 핵심은 규정 개정 내용 원문이므로
 # 상세의 지정 4개 항목만 원문 그대로 뽑는다(src/scrapers/fss_rule.py). AI 요약은 쓰지
 # 않고, 추출에 실패해도 일반 본문 추출·요약으로 되돌아가지 않는다(메일에 실패 안내).
-_RULE_KEY = FSS_RULE_SOURCE_KEY
+#
+# --- 행정지도 예고: 원문 4개 항목 ---
+# 같은 1~6번 양식이고 같은 이유(div.contents 개편 페이지라 공통 selector 0건)로 본문이 비어
+# 메일에 제목·날짜·첨부·링크만 실렸다. 상세는 div.n-dbdata 한 덩어리(글자 + <br>)라 dt/dd
+# 짝이 없지만, 추출 엔진은 같다(src/scrapers/fss_admin_guidance.py). 처리 정책도 세칙 예고와 같다.
+#
+# source key → (로그 표기, 추출기). 성공 판정의 대상 항목은 FSS_SECTION_TITLES_BY_SOURCE.
+_SECTION_BOARDS = {
+    FSS_RULE_SOURCE_KEY: ("세칙 예고", extract_rule_sections),
+    FSS_ADMIN_GUIDANCE_SOURCE_KEY: ("행정지도 예고", extract_admin_guidance_sections),
+}
 
 
 def _norm_label(s: str) -> str:
@@ -270,8 +287,8 @@ class FssBoardScraper(BaseScraper):
             # 실패하면 details 는 비고 아래의 기존 본문 추출로 되돌아간다.
             if post.source_key == _SANCTION_KEY:
                 post.details = self._sanction_details(soup, post)
-            if post.source_key == _RULE_KEY:
-                post.details = self._rule_details(soup, post, html)
+            if post.source_key in _SECTION_BOARDS:
+                post.details = self._section_details(soup, post, html)
             elif not post.details:
                 is_press = post.source_key == _PRESS_KEY
                 post.body = _body_text(
@@ -331,24 +348,27 @@ class FssBoardScraper(BaseScraper):
             (_SANCTION_DEPT, dept),
         ]
 
-    def _rule_details(self, soup: BeautifulSoup, post: Post, html: str) -> list[tuple[str, str]]:
-        """세칙 예고 상세에서 원문 4개 항목. 누락·실패는 로그와 debug 덤프로 남긴다."""
+    def _section_details(
+        self, soup: BeautifulSoup, post: Post, html: str
+    ) -> list[tuple[str, str]]:
+        """세칙·행정지도 예고 상세에서 원문 4개 항목. 누락·실패는 로그와 debug 덤프로 남긴다."""
+        board, extract = _SECTION_BOARDS[post.source_key]
         stop = {a.filename for a in post.attachments}
         for fa in soup.find_all("a", href=True):
             if any(h in fa["href"].lower() for h in _FILE_HINT):
                 stop.add(self._filename(fa, urljoin(post.url, fa["href"])))
-        result = extract_rule_sections(soup, stop_lines=tuple(sorted(n for n in stop if n)))
+        result = extract(soup, stop_lines=tuple(sorted(n for n in stop if n)))
         if not result.sections:
             log.warning(
-                "[%s] 세칙 예고 원문 항목 추출 실패(%s) — 메일에 추출 실패 안내를 싣습니다"
+                "[%s] %s 원문 항목 추출 실패(%s) — 메일에 추출 실패 안내를 싣습니다"
                 "(AI 요약 대체 없음): post_id=%s url=%s",
-                self.key, result.reason, post.post_id, post.url,
+                self.key, board, result.reason, post.post_id, post.url,
             )
         elif result.missing:
             log.warning(
-                "[%s] 세칙 예고 원문 항목 일부 누락(%s) — 추출한 항목만 싣고 누락을 표시합니다: "
+                "[%s] %s 원문 항목 일부 누락(%s) — 추출한 항목만 싣고 누락을 표시합니다: "
                 "post_id=%s url=%s",
-                self.key, ", ".join(result.missing), post.post_id, post.url,
+                self.key, board, ", ".join(result.missing), post.post_id, post.url,
             )
         if result.missing:
             # 셀렉터 없이 제목 문구로 찾는 방식이라, 실패하면 실제 마크업이 유일한 단서다.
@@ -356,13 +376,13 @@ class FssBoardScraper(BaseScraper):
         return result.sections
 
     def enrich_succeeded(self, post: Post) -> bool:
-        """세칙 예고는 원문 4개 항목을 모두 확보해야 성공이다.
+        """세칙·행정지도 예고는 원문 4개 항목을 모두 확보해야 성공이다.
 
         기본 판정(본문·구조화 항목·첨부 중 하나)으로는 첨부만 있어도 성공으로 세어,
         본문이 통째로 빈 #4405 가 '상세 수집 성공 1건'으로 기록됐다.
         """
-        if post.source_key == _RULE_KEY:
-            return is_complete(post.details)
+        if post.source_key in _SECTION_BOARDS:
+            return has_all_sections(post.details, FSS_SECTION_TITLES_BY_SOURCE[post.source_key])
         return super().enrich_succeeded(post)
 
     def _download_one(self, post: Post, att: Attachment) -> None:

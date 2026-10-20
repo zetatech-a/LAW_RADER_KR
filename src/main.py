@@ -47,7 +47,12 @@ from .detail_retry import (
     select_due,
 )
 from .fetcher import Fetcher
-from .models import ASSEMBLY_SOURCE_KEY, FSS_RULE_SOURCE_KEY, Post, ProposalContentStatus
+from .models import (
+    ASSEMBLY_SOURCE_KEY,
+    FSS_SECTION_TITLES_BY_SOURCE,
+    Post,
+    ProposalContentStatus,
+)
 from .notifier import missing_email_settings, send_digest, verify_smtp_login
 from .scrapers import build_scraper
 from .snippet import BodyKind, classify_body, clean_body_text
@@ -750,9 +755,13 @@ def _log_body_kinds(posts_by_source: dict[str, list[Post]]) -> None:
     counts = {kind: 0 for kind in BodyKind}
     for posts in posts_by_source.values():
         for p in posts:
-            # 의안·세칙 예고(원문 항목 전용)와 구조화 항목이 있는 글은 본문 발췌 경로를
-            # 타지 않는다.
-            if p.source_key in (ASSEMBLY_SOURCE_KEY, FSS_RULE_SOURCE_KEY) or p.details:
+            # 의안·세칙/행정지도 예고(원문 항목 전용)와 구조화 항목이 있는 글은 본문 발췌
+            # 경로를 타지 않는다.
+            if (
+                p.source_key == ASSEMBLY_SOURCE_KEY
+                or p.source_key in FSS_SECTION_TITLES_BY_SOURCE
+                or p.details
+            ):
                 continue
             kind = classify_body(p.body, p.title)
             counts[kind] += 1

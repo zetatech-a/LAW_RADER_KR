@@ -33,7 +33,7 @@ from itertools import zip_longest
 import requests
 
 from .config import LLMConfig
-from .models import ASSEMBLY_SOURCE_KEY, FSS_RULE_SOURCE_KEY, Post
+from .models import ASSEMBLY_SOURCE_KEY, FSS_SECTION_TITLES_BY_SOURCE, Post
 from .snippet import BodyKind, classify_body
 
 log = logging.getLogger(__name__)
@@ -329,12 +329,12 @@ def _prepare_body(cfg: LLMConfig, post: Post) -> str:
     요약할 내용이 없으므로 대상이 아니다(src/snippet.py classify_body). 길이 기준
     (min_body_chars)은 그대로 먼저 적용한다 — 판정과 길이 기준은 역할이 다르다.
 
-    금감원 세칙 제·개정 예고는 원문 4개 항목을 그대로 전달하는 소스라 **본문 유무와
-    무관하게** 대상이 아니다. 원문 추출에 실패한 경우에도 AI 요약으로 대체하지 않는다.
-    호출 경로(_summarize_general·summarize)와 집계(ai_target_count)가 모두 이 함수를
+    금감원 세칙 제·개정 예고·행정지도 예고는 원문 4개 항목을 그대로 전달하는 소스라
+    **본문 유무와 무관하게** 대상이 아니다. 원문 추출에 실패한 경우에도 AI 요약으로 대체하지
+    않는다. 호출 경로(_summarize_general·summarize)와 집계(ai_target_count)가 모두 이 함수를
     거치므로 여기 한 곳에서 막는다.
     """
-    if post.source_key == FSS_RULE_SOURCE_KEY:
+    if post.source_key in FSS_SECTION_TITLES_BY_SOURCE:
         return ""
     body = " ".join((post.body or "").split())
     if len(body) < cfg.min_body_chars:

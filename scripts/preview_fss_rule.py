@@ -1,7 +1,9 @@
-"""금감원 세칙 제·개정 예고 — 게시물 1건 단건 점검·메일 미리보기.
+"""금감원 세칙 제·개정 예고·행정지도 예고 — 게시물 1건 단건 점검·메일 미리보기.
 
-이미 seen 으로 처리된 게시물(예: lrgSlno=4405)도 목록의 신규 판정을 거치지 않고 상세
-1건만 수집해, 원문 4개 항목 추출 결과와 메일 HTML/텍스트 미리보기를 파일로 만든다.
+이미 seen 으로 처리된 게시물(예: lrgSlno=4405, seqno=280)도 목록의 신규 판정을 거치지 않고
+상세 1건만 수집해, 원문 4개 항목 추출 결과와 메일 HTML/텍스트 미리보기를 파일로 만든다.
+소스는 --source 로 고른다. 지정하지 않으면 --url 의 게시판 경로(admnPrvntc = 행정지도 예고)로
+정하고, 그 밖에는 세칙 예고다.
 
 이 스크립트는
   - 메일을 보내지 않는다(SMTP 에 연결하지 않는다),
@@ -18,7 +20,12 @@
   # 오프라인 — 저장해 둔 HTML 로
   python scripts/preview_fss_rule.py --html-file tests/fixtures/fss_rule/synthetic_inline.html
 
+  # 행정지도 예고(오프라인)
+  python scripts/preview_fss_rule.py --source fss_admin_guidance \
+    --html-file tests/fixtures/fss_admin_guidance/live/seqno_280.html
+
 결과: --out-dir(기본 debug/preview) 아래 fss_rule_<게시물ID>.html / .txt
+      (행정지도 예고는 fss_admin_guidance_<게시물ID>.html / .txt)
 종료 코드: 0 = 4개 항목 모두 추출 / 2 = 일부 누락 / 3 = 전체 실패 / 1 = 입력·접속 오류
 """
 import argparse
@@ -33,13 +40,30 @@ from bs4 import BeautifulSoup
 
 from src.config import SourceConfig, load_config
 from src.fetcher import Fetcher
-from src.models import FSS_RULE_SECTION_TITLES, FSS_RULE_SOURCE_KEY, Post
+from src.models import (
+    FSS_ADMIN_GUIDANCE_SOURCE_KEY,
+    FSS_RULE_SOURCE_KEY,
+    FSS_SECTION_TITLES_BY_SOURCE,
+    Post,
+)
 from src.notifier import build_html, build_text
 from src.scrapers.fss import FssBoardScraper
 
-_DEFAULT_URL = (
-    "https://www.fss.or.kr/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=4405&menuNo=200489&pageIndex=1"
-)
+# 소스 → (기본 상세 URL, 결과 파일 접두어, config 가 없을 때의 이름·목록 URL)
+_BOARDS = {
+    FSS_RULE_SOURCE_KEY: (
+        "https://www.fss.or.kr/fss/job/lrgRegItnPrvntc/view.do?lrgSlno=4405&menuNo=200489&pageIndex=1",
+        "fss_rule",
+        "금감원 · 세칙 제·개정 예고",
+        "https://www.fss.or.kr/fss/job/lrgRegItnPrvntc/list.do?menuNo=200489",
+    ),
+    FSS_ADMIN_GUIDANCE_SOURCE_KEY: (
+        "https://www.fss.or.kr/fss/job/admnPrvntc/view.do?seqno=280&menuNo=200491&pageIndex=1",
+        "fss_admin_guidance",
+        "금감원 · 행정지도 예고",
+        "https://www.fss.or.kr/fss/job/admnPrvntc/list.do?menuNo=200491",
+    ),
+}
 
 
 class _PageFetcher:
@@ -62,19 +86,23 @@ class _PageFetcher:
         return None  # 링크만(미리보기 메일에 '· 링크' 칩으로 표시)
 
 
-def _rule_source(config_path: str) -> SourceConfig:
+def _source_key(source: str | None, url: str | None) -> str:
+    if source:
+        return source
+    if url and "/admnPrvntc/" in url:
+        return FSS_ADMIN_GUIDANCE_SOURCE_KEY
+    return FSS_RULE_SOURCE_KEY
+
+
+def _rule_source(config_path: str, key: str) -> SourceConfig:
     try:
         for src in load_config(config_path).sources:
-            if src.key == FSS_RULE_SOURCE_KEY:
+            if src.key == key:
                 return src
     except FileNotFoundError:
         pass
-    return SourceConfig(
-        key=FSS_RULE_SOURCE_KEY,
-        name="금감원 · 세칙 제·개정 예고",
-        type="fss_board",
-        list_url="https://www.fss.or.kr/fss/job/lrgRegItnPrvntc/list.do?menuNo=200489",
-    )
+    _, _, name, list_url = _BOARDS[key]
+    return SourceConfig(key=key, name=name, type="fss_board", list_url=list_url)
 
 
 def _page_title(html: str) -> str:
@@ -87,8 +115,10 @@ def _page_title(html: str) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="세칙 제·개정 예고 단건 점검·메일 미리보기")
-    ap.add_argument("--url", default=_DEFAULT_URL, help="상세 페이지 URL(게시물 ID 를 여기서 읽음)")
+    ap = argparse.ArgumentParser(description="세칙 제·개정 예고·행정지도 예고 단건 점검·메일 미리보기")
+    ap.add_argument("--source", choices=sorted(_BOARDS),
+                    help="대상 소스(기본: --url 의 게시판 경로로 판단, 그 밖에는 세칙 예고)")
+    ap.add_argument("--url", help="상세 페이지 URL(게시물 ID 를 여기서 읽음, 기본: 소스별 표본)")
     ap.add_argument("--html-file", help="저장해 둔 상세 HTML(지정하면 네트워크를 쓰지 않음)")
     ap.add_argument("--save-html", help="라이브로 받은 원본 HTML 을 이 경로에 저장")
     ap.add_argument("--title", help="메일 카드 제목(기본: 페이지의 제목 요소)")
@@ -97,6 +127,9 @@ def main(argv=None) -> int:
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--download", action="store_true", help="첨부를 실제로 내려받는다(라이브)")
     args = ap.parse_args(argv)
+    key = _source_key(args.source, args.url)
+    default_url, stem_prefix, _, _ = _BOARDS[key]
+    args.url = args.url or default_url
 
     live = None
     if args.html_file:
@@ -113,7 +146,7 @@ def main(argv=None) -> int:
             Path(args.save_html).write_text(html, encoding="utf-8")
             print(f"원본 HTML 저장: {args.save_html}")
 
-    src = _rule_source(args.config)
+    src = _rule_source(args.config, key)
     scraper = FssBoardScraper(src, fetcher=_PageFetcher(html, live, args.download))
     post = Post(
         source_key=src.key,
@@ -125,9 +158,10 @@ def main(argv=None) -> int:
     )
     scraper.enrich(post)
 
+    titles = FSS_SECTION_TITLES_BY_SOURCE[key]
     found = dict(post.details)
     print(f"\n[{post.post_id}] {post.title}")
-    for title in FSS_RULE_SECTION_TITLES:
+    for title in titles:
         value = found.get(title)
         print(f"\n• {title}" + ("" if value else "  — 추출 실패(누락)"))
         for line in (value or "").split("\n"):
@@ -136,7 +170,7 @@ def main(argv=None) -> int:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = "fss_rule_" + re.sub(r"[^\w.-]", "_", post.post_id)
+    stem = f"{stem_prefix}_" + re.sub(r"[^\w.-]", "_", post.post_id)
     grouped = {post.source_name: [post]}
     page = (
         "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
@@ -151,7 +185,7 @@ def main(argv=None) -> int:
     if not post.details:
         print("결과: 전체 실패 — 메일에는 '상세 내용 추출 실패' 안내가 실립니다.")
         return 3
-    if len(found) < len(FSS_RULE_SECTION_TITLES):
+    if len(found) < len(titles):
         print("결과: 일부 누락 — 누락 항목은 메일에 안내가 실립니다.")
         return 2
     print("결과: 4개 항목 모두 추출")
