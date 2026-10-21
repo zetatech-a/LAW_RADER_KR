@@ -446,6 +446,27 @@ def test_generic_enrich_contract_failure_is_partial_not_ok():
     assert "enrich_succeeded" in detail
 
 
+def test_contract_failure_notice_matches_mail_behaviour_per_source():
+    """안내 문구가 실제 메일 동작과 맞는다 — 원문 항목 전용 소스(세칙·행정지도 예고)는
+    '제목·링크만'이 아니라 누락/추출 실패 안내가 실린다. 판정은 그대로 PARTIAL 이다."""
+
+    def _partial(p):
+        p.details = [("행정지도의 내용", "- 첨부파일 참고")]
+        p.attachments.append(Attachment(filename="a.pdf", url="https://www.fss.or.kr/a.pdf"))
+
+    for key in ("fss_admin_guidance", "fss_rule_amendment"):
+        r = _contract_run(_partial, key=key)
+        assert r["status"] == PARTIAL and r["enrich_ok"] is False
+        assert "상세 내용 추출 실패 — 원문 페이지에서 확인해 주세요." in r["detail"]
+        assert "AI 요약으로 대체하지 않습니다" in r["detail"]
+        assert "제목·링크만" not in r["detail"]
+
+    r = _contract_run(_partial, key="pipc_notice")
+    assert r["status"] == PARTIAL
+    assert "본문이 비면 AI 요약 입력이 없어 메일에 제목·링크만 실립니다" in r["detail"]
+    assert "상세 내용 추출 실패" not in r["detail"]
+
+
 def test_generic_enrich_exception_is_not_green():
     """Case C — enrich 가 예외를 던져도 초록불이 아니고, 검증기는 죽지 않는다."""
 

@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import load_config
 from src.fetcher import Fetcher
+from src.models import FSS_SECTION_TITLES_BY_SOURCE
 from src.scrapers import build_scraper
 
 OK = "✅"
@@ -211,11 +212,18 @@ def _enrich_contract_failure(key, post, list_count, error) -> str:
         if error is not None
         else "enrich 는 정상 종료했으나 스크래퍼의 enrich_succeeded() 계약을 만족하지 못함"
     )
+    # 원문 항목 전용 소스(세칙·행정지도 예고)는 본문·AI 요약을 쓰지 않고, 못 뽑은 항목 자리에
+    # 누락 안내를(전부 못 뽑으면 '상세 내용 추출 실패' 안내를) 싣는다(src/notifier.py).
+    effect = (
+        "원문 항목을 다 뽑지 못하면 메일에 누락 항목 안내가(전부 못 뽑으면 '상세 내용 추출 실패 "
+        "— 원문 페이지에서 확인해 주세요.' 가) 실리고 AI 요약으로 대체하지 않습니다"
+        if key in FSS_SECTION_TITLES_BY_SOURCE
+        else "본문이 비면 AI 요약 입력이 없어 메일에 제목·링크만 실립니다"
+    )
     return (
         f"[{key}] 목록 수집 성공({list_count}건) / 상세 수집 실패 — {cause}. "
         f"표본 {post.url} · 본문 {body_len}자 · 첨부 {n_att}개 · 구조화 항목 {n_details}개. "
-        "본문이 비면 AI 요약 입력이 없어 메일에 제목·링크만 실립니다 — "
-        "debug/ 덤프로 상세 마크업을 확인하세요."
+        f"{effect} — debug/ 덤프로 상세 마크업을 확인하세요."
     )
 
 

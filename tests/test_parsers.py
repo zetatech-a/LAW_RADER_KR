@@ -809,44 +809,52 @@ def test_fss_press_missing_body_does_not_raise():
 
 
 def test_other_fss_sources_keep_wide_content_fallback():
-    """보도자료가 아닌 게시판은 기존 #content fallback 을 그대로 쓴다."""
+    """보도자료가 아닌 게시판은 기존 #content fallback 을 그대로 쓴다.
+
+    세칙·행정지도 예고는 원문 4개 항목 전용 추출을 쓰므로(tests/test_fss_rule_amendment.py,
+    tests/test_fss_admin_guidance.py) 공통 본문 추출로 되돌아가는 검사결과 제재(3개 항목
+    구조화 실패 시)로 확인한다.
+    """
     html = """
-    <div id="content"><p>행정지도 예고 본문</p></div>"""
+    <div id="content"><p>검사결과 제재 본문</p></div>"""
     sc = _fss_scraper(
-        "fss_admin_guidance",
-        "https://www.fss.or.kr/fss/job/admnPrvntc/list.do?menuNo=200491",
+        "fss_sanction",
+        "https://www.fss.or.kr/fss/job/openInfo/list.do?menuNo=200476",
         _DetailFetcher(html),
     )
     post = Post(
-        source_key="fss_admin_guidance",
-        source_name="금감원 · 행정지도 예고",
-        post_id="seqno:123",
-        title="행정지도 예고",
-        url="https://www.fss.or.kr/fss/job/admnPrvntc/view.do?seqno=123",
+        source_key="fss_sanction",
+        source_name="금감원 · 검사결과 제재",
+        post_id="exam:123_1",
+        title="예시은행",
+        url="https://www.fss.or.kr/fss/job/openInfo/view.do?examMgmtNo=123&emOpenSeq=1",
     )
     sc.enrich(post)
-    assert "행정지도 예고 본문" in post.body
+    assert post.details == []
+    assert "검사결과 제재 본문" in post.body
 
 
 def test_other_fss_sources_can_also_read_new_markup():
     """다른 게시판이 같은 개편 구조를 쓰더라도 #content 폴백으로 본문은 살아 있다.
 
-    세칙 제·개정 예고는 원문 4개 항목 전용 추출을 쓰므로(tests/test_fss_rule_amendment.py)
-    여기서는 공통 본문 추출을 쓰는 다른 게시판으로 확인한다.
+    세칙·행정지도 예고는 원문 4개 항목 전용 추출을 쓰므로(tests/test_fss_rule_amendment.py,
+    tests/test_fss_admin_guidance.py) 여기서는 공통 본문 추출로 되돌아가는 검사결과 제재로
+    확인한다.
     """
     sc = _fss_scraper(
-        "fss_admin_guidance",
-        "https://www.fss.or.kr/fss/job/admnPrvntc/list.do?menuNo=200491",
+        "fss_sanction",
+        "https://www.fss.or.kr/fss/job/openInfo/list.do?menuNo=200476",
         _DetailFetcher(PRESS_DETAIL_NEW, blob=b"%HWP dummy"),
     )
     post = Post(
-        source_key="fss_admin_guidance",
-        source_name="금감원 · 행정지도 예고",
-        post_id="seqno:9",
-        title="행정지도 예고",
-        url="https://www.fss.or.kr/fss/job/admnPrvntc/view.do?seqno=9",
+        source_key="fss_sanction",
+        source_name="금감원 · 검사결과 제재",
+        post_id="exam:9_1",
+        title="예시은행",
+        url="https://www.fss.or.kr/fss/job/openInfo/view.do?examMgmtNo=9&emOpenSeq=1",
     )
     sc.enrich(post)
+    assert post.details == []
     assert "손실흡수능력" in post.body
 
 

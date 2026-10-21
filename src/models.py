@@ -21,6 +21,23 @@ FSS_RULE_SECTION_TITLES = (
     "접수부서 및 담당자 연락처",
 )
 
+# 금감원 '행정지도 예고' 소스의 key(config.yaml 의 key 와 동일). 세칙 예고와 같은 1~6번 양식의
+# 상세에서 원문 4개 항목을 그대로 싣고 AI 요약을 쓰지 않는다.
+FSS_ADMIN_GUIDANCE_SOURCE_KEY = "fss_admin_guidance"
+# 그 4개 항목의 메일 표시 제목(원문의 2·3·5·6 번호는 싣지 않는다). 쓰임은 세칙 예고와 같다.
+FSS_ADMIN_GUIDANCE_SECTION_TITLES = (
+    "행정지도의 신규·변경·연장의 취지",
+    "행정지도의 내용",
+    "의견제출시한(도착기준)",
+    "접수부서, 담당자, 전화번호, 팩스번호",
+)
+
+# 원문 항목 전용 소스 → 메일 표시 제목. 여기 있는 소스는 요약·발췌 대신 이 항목들만 싣는다.
+FSS_SECTION_TITLES_BY_SOURCE = {
+    FSS_RULE_SOURCE_KEY: FSS_RULE_SECTION_TITLES,
+    FSS_ADMIN_GUIDANCE_SOURCE_KEY: FSS_ADMIN_GUIDANCE_SECTION_TITLES,
+}
+
 
 class ProposalContentStatus(str, Enum):
     """의안 '제안이유 및 주요내용'의 상태.

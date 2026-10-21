@@ -17,6 +17,10 @@ dt.form-tit(번호+제목) / dd.form-conts(값) 구조다. 그래도 그 class �
 제목은 '번호 + 정해진 문구'로만 인정한다. 3번 안의 '1. …', '2. …' 하위 목록은 문구가
 달라 경계가 되지 않으므로 잘리지 않는다. 페이지에 번호 붙은 제목이 하나도 없을 때만
 번호 없는 제목(줄 전체가 제목이거나 제목 뒤에 콜론)을 받는다.
+
+같은 1~6번 양식을 쓰는 행정지도 예고(src/scrapers/fss_admin_guidance.py)도 이 엔진을
+그대로 쓴다 — 게시판마다 다른 것은 항목 제목표(extract_sections 의 sections), 컨테이너
+확장 단계(widen), 인식하지 못한 제목에서의 경계 처리(cut_unrecognized)뿐이다.
 """
 from __future__ import annotations
 
@@ -37,23 +41,31 @@ _REVISE = rf"제\s*{_DOT}\s*개정"
 # '담당자 : 홍길동' 을 제목으로 먹어 원문 라벨을 잃지 않게 하기 위함이다.
 _LIST_SEP = r"(?:\s*[,，、·ㆍ/]\s*(?:및\s*)?|\s*및\s*)"
 
-# (메일 표시 제목 — None 이면 싣지 않고 경계로만 쓴다, 원문 제목 정규식). 원문 순서대로이며
-# 위치(0~5)+1 이 원문의 항목 번호다.
-_SECTIONS: tuple[tuple[str | None, re.Pattern], ...] = tuple(
-    (title, re.compile(pattern))
-    for title, pattern in (
-        (None, r"규정\s*의\s*명칭"),
-        (_PURPOSE, rf"규정\s*의\s*{_REVISE}\s*취지"),
-        (_CONTENT, rf"규정\s*의\s*{_REVISE}\s*내용"),
-        (None, r"기타\s*필요\s*(?:한\s*)?사항"),
-        (_DEADLINE, r"의견\s*제출\s*[시기]한(?:\s*[(（]\s*도착\s*기준\s*[)）])?"),
-        (
-            _CONTACT,
-            rf"접수\s*부서(?:{_LIST_SEP}(?:담당자|전화\s*번호|팩스\s*번호|연락처"
-            rf"|이메일(?:\s*주소)?|전자\s*우편))*",
-        ),
-    )
+# 세칙·행정지도 예고가 같은 문구로 쓰는 4·5·6번 제목.
+OTHER_MATTERS_HEADING = r"기타\s*필요\s*(?:한\s*)?사항"
+DEADLINE_HEADING = r"의견\s*제출\s*[시기]한(?:\s*[(（]\s*도착\s*기준\s*[)）])?"
+CONTACT_HEADING = (
+    rf"접수\s*부서(?:{_LIST_SEP}(?:담당자|전화\s*번호|팩스\s*번호|연락처"
+    rf"|이메일(?:\s*주소)?|전자\s*우편))*"
 )
+
+# 항목 제목표: (메일 표시 제목 — None 이면 싣지 않고 경계로만 쓴다, 원문 제목 정규식).
+# 원문 순서대로이며 위치(0~5)+1 이 원문의 항목 번호다.
+Sections = tuple[tuple[str | None, re.Pattern], ...]
+
+
+def compile_sections(table: tuple[tuple[str | None, str], ...]) -> Sections:
+    return tuple((title, re.compile(pattern)) for title, pattern in table)
+
+
+_SECTIONS = compile_sections((
+    (None, r"규정\s*의\s*명칭"),
+    (_PURPOSE, rf"규정\s*의\s*{_REVISE}\s*취지"),
+    (_CONTENT, rf"규정\s*의\s*{_REVISE}\s*내용"),
+    (None, OTHER_MATTERS_HEADING),
+    (_DEADLINE, DEADLINE_HEADING),
+    (_CONTACT, CONTACT_HEADING),
+))
 
 # 항목 번호: '2.' '2)' '(2)' '②', 또는 숫자 하나 뒤 공백('<span>5</span> 의견…').
 _NUMBER = re.compile(
@@ -92,10 +104,15 @@ class RuleExtraction:
     reason: str = ""
 
 
-def is_complete(details: list[tuple[str, str]]) -> bool:
-    """4개 대상 항목이 모두 원문 값과 함께 있는가(상세 수집 성공 판정)."""
+def has_all_sections(details: list[tuple[str, str]], titles: tuple[str, ...]) -> bool:
+    """titles 의 대상 항목이 모두 원문 값과 함께 있는가(상세 수집 성공 판정)."""
     found = {label for label, value in details if value}
-    return all(title in found for title in FSS_RULE_SECTION_TITLES)
+    return all(title in found for title in titles)
+
+
+def is_complete(details: list[tuple[str, str]]) -> bool:
+    """세칙 예고의 4개 대상 항목이 모두 원문 값과 함께 있는가."""
+    return has_all_sections(details, FSS_RULE_SECTION_TITLES)
 
 
 # ── 블록 단위 줄 펼치기 ───────────────────────────────────────────────────────
@@ -204,7 +221,7 @@ def _tidy(lines: list[str]) -> str:
 # ── 항목 제목 판정 ────────────────────────────────────────────────────────────
 
 
-def _title_at(text: str, numbered: bool) -> tuple[int, int] | None:
+def _title_at(text: str, numbered: bool, sections: Sections) -> tuple[int, int] | None:
     """text 맨 앞이 항목 제목이면 (항목 index, 제목이 끝난 위치).
 
     번호가 있으면 그 번호가 원문 항목 번호와 같아야 한다. 3번 하위 목록에 '5. 의견제출
@@ -217,19 +234,21 @@ def _title_at(text: str, numbered: bool) -> tuple[int, int] | None:
     if m:
         digit = m.group("d") or m.group("p") or m.group("s")
         number = int(digit) if digit else _CIRCLED.index(m.group("c")) + 1
-        candidates = [number - 1] if number <= len(_SECTIONS) else []
+        candidates = [number - 1] if number <= len(sections) else []
         start = m.end()
     else:
-        candidates = list(range(len(_SECTIONS)))
+        candidates = list(range(len(sections)))
         start = 0
     for idx in candidates:
-        tm = _SECTIONS[idx][1].match(text, start)
+        tm = sections[idx][1].match(text, start)
         if tm:
             return idx, tm.end()
     return None
 
 
-def _heading(lines: list[str], i: int, numbered: bool) -> tuple[int, int, str] | None:
+def _heading(
+    lines: list[str], i: int, numbered: bool, sections: Sections
+) -> tuple[int, int, str] | None:
     """lines[i] 에서 시작하는 항목 제목 → (항목 index, 제목이 차지한 줄 수, 같은 줄의 값).
 
     제목이 줄바꿈으로 갈라졌으면(th 안 <br>, '2.' 과 제목이 다른 요소 등) 다음 두 줄까지
@@ -242,7 +261,7 @@ def _heading(lines: list[str], i: int, numbered: bool) -> tuple[int, int, str] |
             break
         prev_len = len(joined)
         joined = f"{joined} {lines[i + span - 1]}" if joined else lines[i + span - 1]
-        hit = _title_at(joined, numbered)
+        hit = _title_at(joined, numbered, sections)
         if hit is None:
             if best is not None:
                 break
@@ -269,12 +288,14 @@ def _heading(lines: list[str], i: int, numbered: bool) -> tuple[int, int, str] |
     return best
 
 
-def _headings(lines: list[str], numbered: bool) -> list[tuple[int, int, int, str]]:
+def _headings(
+    lines: list[str], numbered: bool, sections: Sections
+) -> list[tuple[int, int, int, str]]:
     """제목으로 보이는 모든 줄 — (줄 번호, 항목 index, 제목 줄 수, 같은 줄의 값)."""
     found = []
     i = 0
     while i < len(lines):
-        hit = _heading(lines, i, numbered)
+        hit = _heading(lines, i, numbered, sections)
         if hit:
             found.append((i, *hit))
             i += hit[1]
@@ -331,11 +352,48 @@ def _is_stop(line: str, stop_lines: tuple[str, ...]) -> bool:
     return any(name and line.startswith(name) for name in stop_lines)
 
 
-def _split(container: Tag, numbered: bool, stop_lines: tuple[str, ...]) -> dict[int, str]:
+def _line_number(line: str) -> int | None:
+    """줄 맨 앞의 항목 번호(제목과 같은 표기). 번호 뒤가 숫자이면('3.5배') 번호로 보지 않는다."""
+    m = _NUMBER.match(line)
+    if not m or line[m.end():m.end() + 1].isdigit():
+        return None
+    digit = m.group("d") or m.group("p") or m.group("s")
+    return int(digit) if digit else _CIRCLED.index(m.group("c")) + 1
+
+
+def _cut_at_unrecognized(body: list[str], first: int, after: int) -> list[str] | None:
+    """인식한 제목 사이에 빠진 번호(first ≤ 번호 < after)가 있을 때, 그 번호의 줄 앞에서 값을 끊는다.
+
+    제목 문구가 바뀌어 인식하지 못한 최상위 항목은 경계가 되지 않아, 그 내용이 앞 항목 값에
+    붙는다. 빠진 번호로 시작하는 첫 줄이 빈 줄 바로 뒤에 있고 값 안 하위 목록의 다음 번호
+    (앞에 번호-1 인 줄)가 아니면 그 항목의 제목으로 보고 끊는다. 그런 줄이 있는데 이 조건을
+    채우지 못하면 경계를 확신할 수 없으므로 None(이 항목은 누락) — 다른 항목의 내용을 섞어
+    싣지 않기 위함이다. 빠진 번호의 줄이 아예 없으면(항목 자체가 없음) 값을 그대로 둔다.
+    """
+    numbered: list[int] = []
+    for k, line in enumerate(body):
+        number = _line_number(line)
+        if number is None:
+            continue
+        if first <= number < after:
+            if k > 0 and not body[k - 1] and number - 1 not in numbered:
+                return body[:k]
+            return None
+        numbered.append(number)
+    return body
+
+
+def _split(
+    container: Tag,
+    numbered: bool,
+    stop_lines: tuple[str, ...],
+    sections: Sections,
+    cut_unrecognized: bool = False,
+) -> dict[int, str]:
     """컨테이너 안에서 항목별 원문(항목 index → 값)."""
     out = _lines_of(container)
     lines, blocks = out.lines, out.blocks
-    raw = _headings(lines, numbered)
+    raw = _headings(lines, numbered, sections)
     heads = _in_order(raw)
     values: dict[int, str] = {}
     for n, (i, idx, span, rest) in enumerate(heads):
@@ -358,41 +416,57 @@ def _split(container: Tag, numbered: bool, stop_lines: tuple[str, ...]) -> dict[
             if last and _is_stop(line, stop_lines):
                 break  # 마지막 항목 뒤 첨부 목록·목록 버튼 등은 싣지 않는다
             body.append(line)
+        if cut_unrecognized and numbered:
+            # 다음으로 인식한 제목(마지막이면 제목표의 끝)까지 사이에 빠진 번호가 있으면 경계를 다시 본다.
+            after = heads[n + 1][1] + 1 if not last else len(sections) + 1
+            body = _cut_at_unrecognized(body, idx + 2, after)
+            if body is None:
+                values[idx] = ""
+                continue
         values[idx] = _tidy(body)
     return values
 
 
-def extract_rule_sections(
-    soup: BeautifulSoup, *, stop_lines: tuple[str, ...] = ()
+def extract_sections(
+    soup: BeautifulSoup,
+    sections: Sections,
+    *,
+    stop_lines: tuple[str, ...] = (),
+    hint: str,
+    widen: int = 2,
+    cut_unrecognized: bool = False,
 ) -> RuleExtraction:
-    """상세 페이지에서 대상 4개 항목의 원문을 뽑는다. 못 찾은 항목은 missing·reason 으로 돌려준다.
+    """상세 페이지에서 sections 의 대상 항목 원문을 뽑는다. 못 찾은 항목은 missing·reason 으로.
 
     stop_lines: 마지막 항목 뒤에 이어질 수 있는 첨부파일명 등. 그 줄부터는 싣지 않는다.
+    hint: 제목을 하나도 못 찾았을 때 원인 문구에 넣을 대표 제목(로그용).
+    widen: 값이 하나도 없을 때 컨테이너를 바깥으로 넓혀 볼 최대 단계 수.
+    cut_unrecognized: 인식하지 못한 최상위 제목에서 앞 항목 값을 끊는다(_cut_at_unrecognized).
     """
     root = soup.body or soup
     page = _lines_of(root)
-    numbered = bool(_headings(page.lines, True))
-    heads = _in_order(_headings(page.lines, numbered))
+    numbered = bool(_headings(page.lines, True, sections))
+    heads = _in_order(_headings(page.lines, numbered, sections))
     if not heads:
         return RuleExtraction(
-            missing=list(FSS_RULE_SECTION_TITLES),
-            reason=f"항목 제목(규정의 제·개정 취지 등)을 찾지 못함 — 페이지 텍스트 {len(page.lines)}줄",
+            missing=[title for title, _ in sections if title],
+            reason=f"항목 제목({hint} 등)을 찾지 못함 — 페이지 텍스트 {len(page.lines)}줄",
         )
 
     container = _common_ancestor([page.blocks[i] for i, *_ in heads]) or root
-    values = _split(container, numbered, stop_lines)
+    values = _split(container, numbered, stop_lines, sections, cut_unrecognized)
     # 제목 요소 하나뿐이면 그 요소 자체가 컨테이너가 되어 값이 빈다(예: <p>제목</p> 뒤
-    # 형제 <p>값</p>). 값이 하나도 없을 때만 두 단계까지 바깥으로 넓혀 본다.
-    for _ in range(2):
-        if any(values.get(idx) for idx, (title, _) in enumerate(_SECTIONS) if title):
+    # 형제 <p>값</p>). 값이 하나도 없을 때만 widen 단계(기본 2)까지 바깥으로 넓혀 본다.
+    for _ in range(widen):
+        if any(values.get(idx) for idx, (title, _) in enumerate(sections) if title):
             break
         if container is root or container.parent is None:
             break
         container = container.parent
-        values = _split(container, numbered, stop_lines)
+        values = _split(container, numbered, stop_lines, sections, cut_unrecognized)
 
     result = RuleExtraction()
-    for idx, (title, _) in enumerate(_SECTIONS):
+    for idx, (title, _) in enumerate(sections):
         if title is None:
             continue
         if values.get(idx):
@@ -402,3 +476,10 @@ def extract_rule_sections(
     if not result.sections:
         result.reason = "항목 제목은 찾았으나 대상 4개 항목의 내용이 모두 비어 있음"
     return result
+
+
+def extract_rule_sections(
+    soup: BeautifulSoup, *, stop_lines: tuple[str, ...] = ()
+) -> RuleExtraction:
+    """세칙 예고 상세에서 대상 4개 항목의 원문을 뽑는다(extract_sections 참고)."""
+    return extract_sections(soup, _SECTIONS, stop_lines=stop_lines, hint="규정의 제·개정 취지")

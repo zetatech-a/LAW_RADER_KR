@@ -395,9 +395,13 @@ def test_http_failure_is_logged_with_url_and_not_counted_as_success(in_tmp, capl
 
 
 def test_other_fss_board_with_same_markup_keeps_generic_body(in_tmp):
-    """다른 금감원 게시판은 같은 마크업이어도 기존 본문 추출 그대로(구조화 항목 없음)."""
-    sc = _scraper(_fixture("synthetic_inline.html"), key="fss_admin_guidance")
-    p = _post(key="fss_admin_guidance", source_name="금감원 · 행정지도 예고", post_id="seqno:1")
+    """다른 금감원 게시판은 같은 마크업이어도 기존 본문 추출 그대로(구조화 항목 없음).
+
+    행정지도 예고도 원문 항목 전용 추출을 쓰므로(tests/test_fss_admin_guidance.py) 공통 본문
+    추출로 되돌아가는 검사결과 제재(3개 항목 구조화 실패 시)로 확인한다.
+    """
+    sc = _scraper(_fixture("synthetic_inline.html"), key="fss_sanction")
+    p = _post(key="fss_sanction", source_name="금감원 · 검사결과 제재", post_id="exam:1_1")
     sc.enrich(p)
     assert p.details == []
     assert "규정의 제·개정 취지" in p.body
