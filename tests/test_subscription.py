@@ -339,6 +339,16 @@ def test_invalid_json_raises(monkeypatch, raw):
         fetch_preferences(_sub(), [_h("a@example.com")])
 
 
+def test_deeply_nested_json_is_a_contract_error_not_a_crash(monkeypatch):
+    # 1 MB 상한 안의 깊은 중첩은 json 이 RecursionError 를 낸다. SubscriptionError 로 바뀌어야
+    # run() 이 정상 실패 경로(로그 + exit 1)를 탄다.
+    monkeypatch.setattr(
+        sub_mod.requests, "post", lambda *a, **k: _resp(200, raw=b"[" * 200_000)
+    )
+    with pytest.raises(SubscriptionError, match="JSON"):
+        fetch_preferences(_sub(), [_h("a@example.com")])
+
+
 def test_oversized_response_raises(monkeypatch):
     monkeypatch.setattr(
         sub_mod.requests, "post", lambda *a, **k: _resp(200, raw=b" " * 1_000_001)

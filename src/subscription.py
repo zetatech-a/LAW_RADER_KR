@@ -247,7 +247,8 @@ def fetch_preferences(sub: SubscriptionConfig, subscriber_ids: list[str]) -> dic
         raise SubscriptionError("구독 API 응답이 너무 큽니다")
     try:
         data = json.loads(body.decode("utf-8"))
-    except ValueError:
+    except (ValueError, RecursionError):
+        # 과도하게 중첩된 JSON 은 크기 상한 안에서도 RecursionError 를 낸다 — 같은 계약 위반으로 본다.
         raise SubscriptionError("구독 API 응답이 올바른 JSON 이 아닙니다") from None
     return parse_response(data, set(payload["subscribers"]), tuple(a.id for a in sub.agencies))
 
