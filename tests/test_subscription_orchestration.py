@@ -117,6 +117,7 @@ class _Ctx:
         self.summarize_calls = 0
         self.verify_calls = 0
         self.rc = None
+        self.builds = []         # build_scraper 가 불린 소스 key(수집이 시작됐는지 확인용)
 
     @property
     def state(self):
@@ -178,6 +179,8 @@ def _run(tmp_path, monkeypatch, *, enabled=True, worker=None, news=None, statuse
         "SUBSCRIPTION_API_TOKEN": TOKEN,
         "SUBSCRIBER_HASH_KEY": KEY,
         "SUBSCRIPTION_PAGE_URL": PAGE,
+        # 개발자 셸에 남은 값이 결과를 바꾸지 않도록 기본은 미설정.
+        "SUBSCRIPTION_REQUIRED": None,
     }
     base_env.update(env or {})
     for k, v in base_env.items():
@@ -187,6 +190,7 @@ def _run(tmp_path, monkeypatch, *, enabled=True, worker=None, news=None, statuse
             monkeypatch.setenv(k, v)
 
     def _factory(src, fetcher):
+        ctx.builds.append(src.key)
         return _FakeScraper(src.key, news.get(src.key, []), statuses)
 
     def _send(cfg, posts_by_source, detail_updates_by_source=None):
@@ -368,10 +372,18 @@ def test_llm_failure_still_sends_groups(tmp_path, monkeypatch):
     assert ctx.state.seen_ids(FSC) == {"old", "f1"}
 
 
-def test_nothing_new_does_not_call_api(tmp_path, monkeypatch):
+def test_nothing_new_syncs_subscribers_without_sending(tmp_path, monkeypatch):
+    """Phase 2: 보낼 것이 없는 실행도 MAIL_TO 를 동기화한다(삭제 사용자 접근 차단 지연 해소).
+
+    Phase 1 에서는 이 경우 API 를 부르지 않았다 — 요구사항 10 에 따라 의도적으로 바뀐 계약이다.
+    """
     ctx = _run(tmp_path, monkeypatch, news={})
     assert ctx.rc == 0
-    assert ctx.worker.calls == [] and ctx.sends == []
+    assert len(ctx.worker.calls) == 1
+    sent_ids = ctx.worker.calls[0][1]["json"]["subscribers"]
+    assert sent_ids == sorted(subscriber_hash(a, KEY) for a in RECIPIENTS)
+    assert ctx.sends == [] and ctx.summarize_calls == 0
+    assert ctx.state_path.read_bytes() == ctx.before
 
 
 def test_dry_run_never_calls_api_or_changes_state(tmp_path, monkeypatch):
@@ -407,3 +419,82 @@ def test_state_file_holds_no_subscription_data(tmp_path, monkeypatch):
     assert "selected" not in raw and "subscri" not in raw
     for addr in RECIPIENTS:
         assert subscriber_hash(addr, KEY) not in raw
+
+
+# ==========================================================================
+# Phase 2 — 발송 없는 실행의 동기화
+# ==========================================================================
+@pytest.mark.parametrize(
+    "worker",
+    [_FakeWorker(status=503), _FakeWorker(error=requests.Timeout("t")),
+     _FakeWorker(mutate=lambda b: {**b, "api_version": 9})],
+    ids=["http503", "timeout", "contract"],
+)
+def test_quiet_sync_failure_changes_nothing(tmp_path, monkeypatch, caplog, worker):
+    with caplog.at_level(logging.INFO):
+        ctx = _run(tmp_path, monkeypatch, news={}, worker=worker)
+    assert ctx.rc == 0                               # 기존 '신규 없음' 실행 결과 그대로
+    assert ctx.sends == []
+    assert ctx.state_path.read_bytes() == ctx.before
+    assert "구독자 목록 동기화 실패" in caplog.text
+    for addr in RECIPIENTS:
+        assert addr not in caplog.text and subscriber_hash(addr, KEY) not in caplog.text
+
+
+def test_quiet_sync_unexpected_exception_is_contained(tmp_path, monkeypatch, caplog):
+    worker = _FakeWorker(error=RecursionError("deep"))
+    with caplog.at_level(logging.INFO):
+        ctx = _run(tmp_path, monkeypatch, news={}, worker=worker)
+    assert ctx.rc == 0 and ctx.sends == []
+    assert "RecursionError" in caplog.text
+
+
+def test_quiet_sync_skipped_in_dry_run_and_when_disabled(tmp_path, monkeypatch):
+    dry = _run(tmp_path, monkeypatch, news={}, argv_extra=["--dry-run"])
+    assert dry.worker.calls == []
+    off_dir = tmp_path / "off"
+    off_dir.mkdir()
+    off = _run(off_dir, monkeypatch, news={}, enabled=False)
+    assert off.worker.calls == []
+
+
+# ==========================================================================
+# Phase 2 — SUBSCRIPTION_REQUIRED 운영 보호장치
+# ==========================================================================
+def test_required_but_disabled_stops_before_collection(tmp_path, monkeypatch, caplog):
+    with caplog.at_level(logging.INFO):
+        ctx = _run(tmp_path, monkeypatch, enabled=False, news=MIXED_NEWS,
+                   env={"SUBSCRIPTION_REQUIRED": "true"})
+    assert ctx.rc == 1
+    assert ctx.builds == []                          # 수집조차 시작하지 않음
+    assert ctx.sends == [] and ctx.worker.calls == [] and ctx.summarize_calls == 0
+    assert ctx.state_path.read_bytes() == ctx.before
+    assert "SUBSCRIPTION_REQUIRED=true" in caplog.text
+
+
+def test_required_but_disabled_dry_run_only_warns(tmp_path, monkeypatch):
+    ctx = _run(tmp_path, monkeypatch, enabled=False, news=MIXED_NEWS, argv_extra=["--dry-run"],
+               env={"SUBSCRIPTION_REQUIRED": "true"})
+    assert ctx.rc == 0 and ctx.sends == []
+    assert ctx.state_path.read_bytes() == ctx.before
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", " true "])
+def test_required_and_enabled_runs_normally(tmp_path, monkeypatch, value):
+    ctx = _run(tmp_path, monkeypatch, news=MIXED_NEWS, env={"SUBSCRIPTION_REQUIRED": value})
+    assert ctx.rc == 0 and len(ctx.sends) == 3
+
+
+@pytest.mark.parametrize("value", [None, "", "false", "FALSE"])
+def test_not_required_keeps_legacy_disabled_behaviour(tmp_path, monkeypatch, value):
+    ctx = _run(tmp_path, monkeypatch, enabled=False, news=MIXED_NEWS,
+               env={"SUBSCRIPTION_REQUIRED": value})
+    assert ctx.rc == 0
+    assert len(ctx.sends) == 1 and ctx.sends[0][0] == RECIPIENTS
+
+
+@pytest.mark.parametrize("value", ["ture", "yes", "1", "on", "enabled"])
+def test_invalid_required_value_is_a_config_error_not_false(tmp_path, monkeypatch, value):
+    with pytest.raises(ValueError, match="SUBSCRIPTION_REQUIRED"):
+        _run(tmp_path, monkeypatch, enabled=False, news=MIXED_NEWS,
+             env={"SUBSCRIPTION_REQUIRED": value})

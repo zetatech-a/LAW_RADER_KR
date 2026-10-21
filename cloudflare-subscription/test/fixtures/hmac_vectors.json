@@ -1,0 +1,106 @@
+{
+  "_comment": "Python src/subscription.py 가 만든 교차 검증 벡터. Worker(crypto.test.ts)와 Python(test_subscription_contract.py)이 같은 파일을 검사한다. 테스트 전용 키.",
+  "key": "lrk-test-vector-key-0123456789abcdef",
+  "cases": [
+    {
+      "input": "user@example.com",
+      "normalized": "user@example.com",
+      "hash": "9292fd3d4e126fbca878f786cb18947413bc958bc0bfb877036120cf22dbd489"
+    },
+    {
+      "input": "User@Example.COM",
+      "normalized": "user@example.com",
+      "hash": "9292fd3d4e126fbca878f786cb18947413bc958bc0bfb877036120cf22dbd489"
+    },
+    {
+      "input": "  padded@example.com  ",
+      "normalized": "padded@example.com",
+      "hash": "03aa4477daa0900f16808da5dd45b3a82ad1b708efeb7cb0ef86b9356c6b7435"
+    },
+    {
+      "input": "\ttab@example.com\n",
+      "normalized": "tab@example.com",
+      "hash": "b43b9bc58a3bb6e5bf597ee1ad6f27eab14a3a33d41c1bb9ddc0a0caedd75b5f"
+    },
+    {
+      "input": "first.last+tag@sub.example.co.kr",
+      "normalized": "first.last+tag@sub.example.co.kr",
+      "hash": "5ff260f2c1c8a7d83f4b38073307512416cd6bdbf1749a25fa86b8783af63b79"
+    },
+    {
+      "input": "UPPER.CASE@EXAMPLE.ORG",
+      "normalized": "upper.case@example.org",
+      "hash": "32e011f0c3d0dbfbf824f9b59295a03dfbf0e493676e149dab159276ff622b1f"
+    },
+    {
+      "input": "a@b",
+      "normalized": "a@b",
+      "hash": "347b7e5465d4bf4198d1af780bbadfed594cfd5b9a1e6a73667f86668ffd538c"
+    },
+    {
+      "input": "x_y-z@example-domain.com",
+      "normalized": "x_y-z@example-domain.com",
+      "hash": "54d8dbdfa9d4e19a48ea1fd0c608ee78b22acacdc950af0c13de4ef3dcde13e7"
+    },
+    {
+      "input": "",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "no-at-sign",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "two@@example.com",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "a@b@c",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "@example.com",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "local@",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "in side@example.com",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "홍길동@example.com",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "user@exämple.com",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "ctrl\u0001@example.com",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "del@example.com",
+      "normalized": null,
+      "hash": null
+    },
+    {
+      "input": "Name <user@example.com>",
+      "normalized": null,
+      "hash": null
+    }
+  ]
+}

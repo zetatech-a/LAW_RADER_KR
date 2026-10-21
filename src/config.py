@@ -219,6 +219,9 @@ class SubscriptionConfig:
     subscriber_hash_key: str = field(default="", repr=False)
     timeout_sec: float = 10.0
     agencies: tuple[AgencyConfig, ...] = ()
+    # 운영 보호장치(GitHub Variable SUBSCRIPTION_REQUIRED). true 인데 enabled 가 false 면
+    # main 이 실행을 중단한다 — 활성화 후 플래그 실수로 전체 발송이 재개되는 것을 막는다.
+    required: bool = False
 
 
 @dataclass
@@ -310,6 +313,20 @@ def validate_agency_mapping(
             )
 
 
+def _env_required_flag(name: str) -> bool:
+    """엄격한 true/false 환경변수. 비어 있으면 false, 그 밖의 값은 설정 오류.
+
+    오타('ture', 'yes', '1')를 조용히 false 로 읽으면 보호장치가 꺼진 채 전체 발송이
+    재개될 수 있으므로 true/false 외에는 받지 않는다.
+    """
+    raw = _env(name).strip().lower()
+    if raw in ("", "false"):
+        return False
+    if raw == "true":
+        return True
+    raise ValueError(f"{name} 는 true 또는 false 여야 합니다(비워 두면 false)")
+
+
 def _load_subscription(raw, sources: list[SourceConfig]) -> SubscriptionConfig:
     """subscription 블록 + 환경변수. 블록이 없으면 비활성 기본값."""
     if raw is None:
@@ -327,6 +344,7 @@ def _load_subscription(raw, sources: list[SourceConfig]) -> SubscriptionConfig:
         subscriber_hash_key=_env("SUBSCRIBER_HASH_KEY").strip(),
         timeout_sec=timeout if timeout is not None else SubscriptionConfig.timeout_sec,
         agencies=agencies,
+        required=_env_required_flag("SUBSCRIPTION_REQUIRED"),
     )
 
 

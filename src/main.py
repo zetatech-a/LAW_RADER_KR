@@ -114,6 +114,17 @@ def run(argv=None) -> int:
 
     cfg = load_config(args.config)
     _log_llm_settings(cfg.llm)
+    # 운영 보호장치: 구독 기능을 정식으로 켠 뒤(SUBSCRIPTION_REQUIRED=true) 설정 실수로
+    # enabled 가 false 가 되면 사용자 선택을 무시한 전체 발송이 재개된다. 수집·발송·state
+    # 변경 전에 멈춘다(--dry-run 은 원래 발송하지 않으므로 경고만).
+    if cfg.subscription.required and not cfg.subscription.enabled:
+        if not args.dry_run:
+            log.error(
+                "SUBSCRIPTION_REQUIRED=true 인데 config.yaml subscription.enabled 가 false 입니다 — "
+                "구독자 선택을 무시한 전체 발송을 막기 위해 실행을 중단합니다(수집·발송·state 변경 없음)."
+            )
+            return 1
+        log.warning("SUBSCRIPTION_REQUIRED=true 인데 subscription.enabled=false — dry-run 이라 계속합니다.")
     state = State(args.state)
     fetcher = Fetcher(
         timeout=cfg.fetch.timeout_sec,
@@ -415,6 +426,10 @@ def run(argv=None) -> int:
                     len(selection.selected),
                 )
                 return 1
+    elif cfg.subscription.enabled and not args.dry_run:
+        # 보낼 것이 없는 실행에서도 MAIL_TO 를 구독 API 에 동기화한다 — MAIL_TO 에서 뺀 사람의
+        # 설정 페이지 접근을 다음 '발송 있는' 실행까지 기다리지 않고 막기 위해서다.
+        _sync_subscribers_quietly(cfg)
 
     # ── 큐 재조회 실행 ─────────────────────────────────────────────────────────
     retry = RetryOutcome()
@@ -532,6 +547,23 @@ def run(argv=None) -> int:
     # 상세 재조회·업데이트 발송이 성공했더라도 목록 전면 장애는 그대로 실패로 보고한다
     # (Actions 를 초록불로 만들어 list 쪽 장애를 숨기지 않는다).
     return 1 if collection_failed_globally else 0
+
+
+def _sync_subscribers_quietly(cfg) -> None:
+    """발송 없는 실행의 구독자 동기화. 메일·state 와 무관하므로 실패해도 실행 결과를 바꾸지 않는다.
+
+    발송이 있는 실행은 지금처럼 같은 API 를 fail-closed 로 부르므로, 여기서 실패를 삼켜도
+    장애가 가려지지 않는다(다음 발송 실행이 실패로 드러낸다). 로그에는 주소·식별자를 남기지 않는다.
+    """
+    try:
+        resolve_recipient_groups(cfg.subscription, cfg.email)
+    except SubscriptionError as e:
+        log.warning("구독자 목록 동기화 실패(%s) — 메일·state 영향 없음, 다음 실행에 다시 시도합니다.", e)
+    except Exception as e:  # noqa: BLE001 — 동기화 오류가 모니터링을 멈추면 안 된다
+        log.warning(
+            "구독자 목록 동기화 중 예외(%s) — 메일·state 영향 없음, 다음 실행에 다시 시도합니다.",
+            type(e).__name__,
+        )
 
 
 def _positive_int_or_zero(raw) -> int:

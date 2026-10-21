@@ -206,7 +206,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 ### 3) 수신자 설정
 수신자 주소는 **저장소에 커밋하지 않습니다.** `MAIL_TO` Secret(여러 명은 `a@x.com, b@y.com`)으로만 지정하세요. 로컬 실행 시에는 `.env` 의 `MAIL_TO` 를 사용합니다(`.env` 는 커밋 제외).
 여러 명에게 보내도 **수신자끼리는 서로의 주소를 볼 수 없습니다**(BCC 방식). 메일함에는 발신자가 `LAW RADER` 로 표시됩니다.
-구독자별로 받을 기관을 고르게 하려면 아래 [구독 기관 선택](#구독-기관-선택-phase-1--기본-비활성) 절을 참고하세요(기본 비활성).
+구독자별로 받을 기관을 고르게 하려면 아래 [구독 기관 선택](#구독-기관-선택-기본-비활성) 절을 참고하세요(기본 비활성).
 
 ### 4) 실행
 - 자동: Cloudflare Cron → GitHub `workflow_dispatch` → GitHub-hosted runner → Python 모니터 순서로 실행
@@ -258,12 +258,16 @@ npm run deploy -- --secrets-file .dev.vars
 
 현재 `.github/workflows/monitor.yml`의 기존 GitHub `schedule` 두 개는 Cloudflare 실운영 검증 전 임시 fallback으로 유지합니다. 검증 완료 후 별도 변경에서 제거합니다.
 
-## 구독 기관 선택 (Phase 1 — 기본 비활성)
+## 구독 기관 선택 (기본 비활성)
 
-`MAIL_TO` 의 기존 구독자가 본인 인증 후 받고 싶은 기관만 고르는 기능입니다. Phase 1 은
-Python 쪽(조회·필터·그룹 발송)만 구현돼 있고, 설정 페이지·인증을 맡을 Cloudflare Worker·D1·
-Google Apps Script 는 Phase 2 에서 아래 계약대로 만듭니다. **`config.yaml` 의
-`subscription.enabled` 가 `false`(기본)이면 구독 API 를 부르지 않고 지금과 똑같이 발송합니다.**
+`MAIL_TO` 의 기존 구독자가 본인 인증 후 받고 싶은 기관만 고르는 기능입니다.
+
+- Python(`src/subscription.py`): 발송 전 구독 설정 조회·필터·그룹 발송(Phase 1)
+- Cloudflare Worker + D1(`cloudflare-subscription/`): 설정 페이지, 인증번호 발급·검증, 설정 저장, 내부 API(Phase 2)
+- Google Apps Script(`google-apps-script/`): 서명된 요청에 한해 인증번호 메일 발송(Phase 2)
+
+배포 절차는 **[cloudflare-subscription/DEPLOY.md](cloudflare-subscription/DEPLOY.md)**(운영자용 한국어 가이드)를 따릅니다.
+**`config.yaml` 의 `subscription.enabled` 가 `false`(기본)이면 구독 API 를 부르지 않고 지금과 똑같이 발송합니다.**
 
 ### 동작 (enabled: true)
 
@@ -304,6 +308,7 @@ Google Apps Script 는 Phase 2 에서 아래 계약대로 만듭니다. **`confi
 | `SUBSCRIPTION_API_TOKEN` | Secret | 구독 API Bearer 토큰(Worker Secret 과 같은 값) |
 | `SUBSCRIBER_HASH_KEY` | Secret | 구독자 식별자 HMAC 키, 32자 이상(Worker Secret 과 같은 값) |
 | `SUBSCRIPTION_PAGE_URL` | Variable | 메일 하단 설정 링크(`https://…workers.dev/`) |
+| `SUBSCRIPTION_REQUIRED` | Variable | 운영 보호장치. 정식 활성화 후 `true`. `true` 인데 `enabled: false` 면 실행 중단(아래). `true`/`false`/빈값 외에는 설정 오류 |
 
 ### 수신자 처리 규칙
 
@@ -313,11 +318,17 @@ Google Apps Script 는 Phase 2 에서 아래 계약대로 만듭니다. **`confi
 | 형식이 잘못된 주소(공백·비ASCII·`이름 <주소>` 등) | 설정 오류로 발송 중단(주소는 로그에 남기지 않고 개수만) |
 | 중복 주소(대소문자만 다른 경우 포함) | 정규화(앞뒤 공백 제거 + ASCII 소문자) 기준 1명으로 보고 한 통만 발송 |
 | `MAIL_TO` 에 새로 추가 | D1 에 행이 없으므로 `mode=all` — 첫 동기화 때 구독자로 등록 |
-| `MAIL_TO` 에서 삭제 | 메일 대상에서 빠짐. Worker 는 그 구독자를 비활성(soft)으로 표시해 OTP 로그인만 막고 설정은 보존 |
-| 삭제 후 재등록 | 비활성 → 활성 복귀, 보존된 설정 재적용(보존 기간이 지나 삭제됐으면 `mode=all`) |
+| `MAIL_TO` 에서 삭제 | 메일 대상에서 빠짐. Worker 는 그 구독자를 비활성(soft)으로 표시하고 로그인 세션·인증번호를 즉시 삭제, 설정은 보존 |
+| 삭제 후 재등록 | 비활성 → 활성 복귀, 보존된 설정 재적용 |
+| 최초 동기화 전 | D1 에 구독자가 없으므로 아무도 인증번호를 받을 수 없음(신규 가입 불가) |
 
 비활성화는 **로그인 가능 여부에만** 영향을 줍니다. 발송 대상은 언제나 그 실행의 `MAIL_TO` 이므로,
 `MAIL_TO` 를 실수로 줄였다가 되돌려도 설정은 사라지지 않습니다.
+
+동기화 시점: 보낼 것이 있는 실행은 발송 직전에(fail-closed), **보낼 것이 없는 정기 실행도 매번**
+같은 API 로 동기화합니다(Phase 2). 그래서 `MAIL_TO` 에서 뺀 사람의 설정 페이지 접근은 다음 정기
+실행(최대 약 15분)에 막힙니다. 발송 없는 실행의 동기화 실패는 경고만 남기고 메일·state·실행 결과를
+바꾸지 않습니다(다음 발송 실행이 fail-closed 로 드러냅니다). `--dry-run` 은 동기화하지 않습니다.
 
 ### 장애 정책
 
@@ -340,12 +351,18 @@ Google Apps Script 는 Phase 2 에서 아래 계약대로 만듭니다. **`confi
 - **켜기**: Phase 2 Worker·D1·Apps Script 배포와 Secret 등록 → `MAIL_TO` 를 운영자 1명으로 둔 별도 실행으로
   링크·인증·필터 확인 → `subscription.enabled: true` 커밋. 첫 실행에서 모든 기존 구독자가 `mode=all` 로
   동기화되므로 받는 내용은 전과 같습니다. 그 뒤 링크를 안내합니다.
+- **운영 보호장치**: 정식 활성화 후 GitHub Variable `SUBSCRIPTION_REQUIRED=true` 를 둡니다. 이 상태에서
+  `enabled` 가 `false` 가 되면 실행 시작 직후(수집 전) 멈추고 메일·state 를 바꾸지 않습니다(`--dry-run` 은 경고만).
+  오타(`ture`, `yes`, `1` 등)는 false 로 읽지 않고 설정 오류로 실행을 실패시킵니다. 코드를 이 장치 이전
+  버전으로 되돌리면 보호장치도 사라지므로, 되돌리기 전에 아래 폐지 절차를 먼저 마칩니다.
 - **켠 뒤 끄기(`enabled: false`)는 장애 대응 수단이 아닙니다.** 끄는 순간 모든 구독자의 선택(일시중지
   포함)이 무시되고 전체 메일이 나갑니다. Worker 장애에는 끄지 말고 복구를 기다리세요(메일은 보류됐다가
   복구 후 발송). 기능 자체를 폐지해야 한다면 ① 구독자에게 사전 공지, ② D1 에서 일시중지·선택 구독자
   현황을 확인해 필요한 주소를 `MAIL_TO` 에서 정리, ③ 그다음에 끄거나 코드를 되돌립니다.
-- Secret 교체(`SUBSCRIBER_HASH_KEY`)는 모든 식별자를 바꾸므로 D1 의 기존 설정이 전부 `mode=all` 로
-  돌아갑니다. 키는 교체하지 않는 것을 원칙으로 하고, 필요하면 Worker 쪽 재해시 마이그레이션을 먼저 준비합니다.
+- **HMAC 키 정책**: `SUBSCRIBER_HASH_KEY` 는 최초 설정 후 고정합니다. 실제 값은 Cloudflare·GitHub Secret 에만
+  두고 git 추적 파일에 기록하지 않습니다. 키를 바꾸면 모든 식별자가 바뀌어 저장된 선택이 전부 `mode=all` 로
+  초기화되므로 조용한 교체는 금지합니다. 유출 시에는 설정을 보존하는 별도 마이그레이션을 먼저 준비합니다
+  (현재 버전에 자동 키 회전 기능은 없습니다).
 
 ### Python ↔ Worker API 계약 (v1)
 
@@ -392,7 +409,7 @@ Google Apps Script 는 Phase 2 에서 아래 계약대로 만듭니다. **`confi
 - `api_version` 은 정수 1. 그 밖의 최상위 키는 무시합니다(하위 호환 확장용).
 - 응답 본문 1 MB 초과, 200 이외 상태(리다이렉트 포함)는 오류입니다. 타임아웃은 `subscription.timeout_sec`.
 
-Worker 가 지켜야 할 것(Phase 2):
+Worker 구현(`cloudflare-subscription/src/internal.ts`)이 지키는 것:
 
 1. 토큰을 상수 시간으로 비교하고, 실패하면 401 을 반환하며 아무것도 쓰지 않는다.
 2. 요청 전체를 먼저 검증한다(버전, 빈 목록 금지 → 400, 64자 hex, 중복 금지, 기관 ID 형식).
@@ -406,55 +423,58 @@ Worker 가 지켜야 할 것(Phase 2):
    `mode=all` 로 응답해 조용한 수신 중단을 막는다.
 6. D1 에는 평문 이메일을 저장하지 않는다(식별자만). 로그에도 토큰·식별자를 남기지 않는다.
 
-### Phase 2 보안 설계 (구현 전 요건)
+### 설정 서비스 구현 (Phase 2)
 
-**OTP 흐름**: 페이지에서 주소 입력 → Worker 가 같은 규칙으로 식별자를 계산해 활성 구독자인지 확인 →
-구독자일 때만 Apps Script 로 발송 요청. 응답은 구독자 여부와 무관하게 항상 같은 문구·같은 상태코드
-(발송은 `ctx.waitUntil` 로 처리해 응답 시간 차이도 줄임).
+Worker API(`cloudflare-subscription/src/index.ts`):
 
-- 6자리, `crypto.getRandomValues` + 거부 표본추출(모듈로 편향 제거). 유효 10분, 시도 5회, 1회용.
-- 새 번호 발급 시 같은 구독자의 이전 번호 무효화. D1 에는 `HMAC(pepper, challenge_id‖code)` 만 저장하고
-  원문은 Apps Script 요청 1회에만 쓴다. 만료·사용된 challenge 는 정기 삭제.
-- 검증 실패 메시지는 하나로 통일("인증번호가 올바르지 않거나 만료되었습니다").
+| 메서드 · 경로 | 인증 | 설명 |
+|---|---|---|
+| `GET /` · `/app.js` · `/app.css` | — | 설정 페이지(프레임워크·외부 스크립트 없음, 기관 목록은 D1 카탈로그로 그림) |
+| `POST /api/otp/request` `{email}` | Origin | 항상 `202 {"ok":true}`(등록 여부 비노출). 활성 구독자일 때만 응답 뒤 인증번호 발급·메일 요청 |
+| `POST /api/otp/verify` `{email, code}` | Origin | 성공 시 `200` + `__Host-lrk_session` 쿠키. 실패는 사유와 무관하게 `400 invalid_code` |
+| `GET /api/preferences` | 세션 | `{mode, agencies, version, catalog, session_expires_at}` (실효 설정 = 다음 발송에 적용될 상태) |
+| `PUT /api/preferences` `{mode, agencies, version}` | 세션 + Origin | 본인 설정만 저장. 읽은 `version` 이 아니면 `409 version_conflict` + 최신 상태 |
+| `POST /api/logout` | Origin | 세션 삭제·쿠키 제거 |
+| `POST /internal/sync-and-resolve` | Bearer | Python 전용, 위 계약 v1 |
+
+오류 응답은 `{"error":"코드"}` 와 알맞은 상태코드이며 실패를 200 으로 가장하지 않습니다.
+
+**인증번호**: 6자리(`crypto.getRandomValues` + 거부 표본추출), 10분, 5회, 일회용, 재발급 시 이전 번호 무효
+(구독자당 1행). D1 에는 `HMAC(SERVER_SECRET, "otp:{식별자}:{salt}:{번호}")` 만 저장합니다. 시도 횟수는 비교
+**전에** 원자적으로 올리고, 성공 시 행 삭제로 소비해 병렬 요청에도 세션은 1개만 생깁니다.
+
+**요청 제한**: isolate 메모리 IP 제한(분당 30회, D1 이전 1차 차단 — 최선 노력) → D1 고정 창 카운터(이메일 15분 3회·
+하루 5회, IP 시간당 10회, 검증 IP 시간당 20회, 전체 발송 하루 30통). 카운터 키는 HMAC 이라 원문이 없습니다.
+Cloudflare Rate Limiting 바인딩은 무료 플랜 제공 여부를 공식 문서로 확인하지 못해 쓰지 않습니다.
+
+**세션·웹 보안**: 256비트 토큰(D1 에는 SHA-256), 절대 만료 30분, 구독자당 1개.
+`__Host-lrk_session; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=1800`. 상태 변경 API 는 `Origin` 이
+`PUBLIC_ORIGIN` 과 정확히 같고 `Content-Type: application/json` 일 때만 받습니다(CORS 헤더 없음).
+모든 응답에 CSP(`default-src 'none'; script-src 'self'; …; frame-ancestors 'none'`), `Cache-Control: no-store`,
+`nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. 화면은 서버 데이터를 `textContent` 로만 넣습니다.
+세션 확인 때마다 구독자 활성 여부를 함께 확인합니다.
 
 **Apps Script 호출 보호** — 공식 문서로 확인한 제약:
 [Web Apps](https://developers.google.com/apps-script/guides/web) /
-[Event Objects](https://developers.google.com/apps-script/guides/triggers/events) 에 따르면 `doPost(e)`
-이벤트 객체는 `parameter`·`parameters`·`queryString`·`contentLength`·`postData.contents/type/length` 등을
-제공하며, **수신 요청 헤더를 읽는 필드는 문서에 없습니다.** 그래서 인증 정보는 헤더가 아니라 본문에 넣습니다.
+[Event Objects](https://developers.google.com/apps-script/guides/triggers/events) 의 `doPost(e)` 이벤트 객체에는
+수신 요청 헤더 필드가 없으므로 인증 정보는 본문에 넣습니다.
 
-- 배포: Execute as = 소유자, Who has access = Anyone(Worker 가 Google 로그인 없이 호출해야 하므로).
-  URL 은 사실상 공개로 보고 아래 서명 없이는 아무 것도 하지 않습니다.
-- 본문: `{"v":1,"ts":<unix초>,"nonce":"<128비트 hex>","to":"<주소>","code":"<6자리>","sig":"<hex>"}`,
-  `sig = HMAC-SHA256(공유 Secret, "v1\n{ts}\n{nonce}\n{to}\n{code}")`. 공유 Secret 은 Worker Secret 과
-  Apps Script **Script Properties** 에만 둡니다(코드에 넣지 않음).
-- Apps Script 순서: 본문 크기 상한 → JSON 파싱 → 버전 → `ts` ±300초 → 서명 검증
-  ([`Utilities.computeHmacSha256Signature`](https://developers.google.com/apps-script/reference/utilities/utilities),
-  바이트 단위 상수 시간 비교) → nonce 재사용 검사 → 수신자별·일일 상한 → `MailApp.getRemainingDailyQuota()`
-  여유 확인 → **그다음에만** `MailApp.sendEmail()`.
-- nonce 저장소: [`CacheService`](https://developers.google.com/apps-script/reference/cache/cache) 는 만료(최대
-  21600초) 전에 항목이 사라질 수 있다고 문서에 명시돼 있어 재전송 방지가 완전하지 않습니다. 그래서 ±300초
-  창 + nonce 캐시 + 수신자별 발송 횟수 제한을 겹쳐 쓰고, 재전송이 성공해도 같은 주소에 같은 번호가 다시 갈
-  뿐이도록 설계합니다. 카운터 갱신은 [`LockService`](https://developers.google.com/apps-script/reference/lock)
-  로 직렬화합니다.
-- Apps Script 는 응답을 JSON 본문(`{"ok":true}` / `{"ok":false,"error":"…"}`)으로만 판정합니다. 웹앱
-  응답의 HTTP 상태·리다이렉트 동작은 이번에 공식 문서로 확인하지 못했으므로 Phase 2 에서 실제 호출로
-  검증한 뒤 Worker 처리 방식을 정합니다.
+- 본문: `{"v":1,"ts":<unix초>,"nonce":"<32자 hex>","to":"<정규화 주소>","code":"<6자리>","sig":"<hex>"}`,
+  `sig = HMAC-SHA256(공유 Secret, "LRK-OTP-v1\n{ts}\n{nonce}\n{to}\n{code}")` — 수신자와 메일 내용(번호)에 대한 서명.
+  공유 Secret 은 Worker Secret 과 Apps Script **스크립트 속성** `OTP_SHARED_SECRET` 에만 둡니다.
+- Apps Script 순서: 본문 형식 → 서명(상수 시간) → `ts` ±300초 → `LockService` 직렬화 → **`PropertiesService`(영속)**
+  nonce 재사용 검사 → 자체 상한(하루 30통·수신자별 5통) → `MailApp.getRemainingDailyQuota()` 예비분 확인 →
+  nonce·카운터를 **발송 전에** 기록 → `MailApp.sendEmail()`. 서명이 틀린 요청은 nonce 저장소도 건드리지 않습니다.
+- `CacheService` 는 쓰지 않습니다([공식 문서](https://developers.google.com/apps-script/reference/cache/cache)상 만료 전 삭제 가능).
+  스크립트 속성은 값 9KB·저장소 500KB 한도라 15분 지난 nonce 와 지난 날짜 카운터를 매 요청 정리합니다.
+- 웹앱 응답은 [공식 문서](https://developers.google.com/apps-script/guides/content)상 `script.googleusercontent.com` 의
+  일회용 주소로 리다이렉트되므로 Worker 는 `redirect: "follow"` 로 따라가 JSON 본문의 `ok` 로만 판정합니다.
+  **이 리다이렉트·응답 동작은 실제 Google 서버로 검증하지 못했으므로 배포 시 DEPLOY.md 8단계로 확인합니다.**
 
 **발송량** — [Apps Script 할당량](https://developers.google.com/apps-script/guides/services/quotas):
-일반 Gmail 계정의 `MailApp` 수신자 한도는 **하루 100명**(24시간 기준, 초과 시 예외로 실행 중단)입니다.
-
-- 이메일별 OTP 재요청: 15분 3회·하루 5회. IP(해시)별: 시간당 10회. 전역 일일 상한: 30통(100명 한도에
-  여유를 둠). 상한·한도 소진 시 사용자에게는 "잠시 후 다시 시도" 만 보여 주고 발송하지 않습니다.
-- 정기 모니터링 메일은 Gmail SMTP(앱 비밀번호)로 나가며 `MailApp` 수신자 할당량과는 별개 집계입니다.
-  다만 같은 Google 계정을 쓰면 계정 단위 남용 탐지·평판은 공유될 수 있습니다(공식 수치로 확인하지 못함).
-  영향을 없애려면 Apps Script 는 별도의 무료 Gmail 계정으로 배포하는 것을 권장합니다.
-
-**세션**: 32바이트 난수 토큰, D1 에는 SHA-256 만 저장, 절대 만료 30분.
-쿠키 `__Host-…; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=1800`. 상태 변경 요청은
-`Origin` 이 자기 출처인지 확인하고 `Content-Type: application/json` 만 받습니다(CORS 미허용).
-세션은 인증한 식별자 하나에만 묶이며 그 설정만 읽고 바꿀 수 있습니다. 인증번호·세션 토큰·주소는 로그에
-남기지 않습니다. 페이지는 외부 스크립트 없이 CSP `default-src 'self'` 로 제공합니다.
+일반 Gmail 계정의 `MailApp` 수신자 한도는 하루 100명입니다. 자체 상한(하루 30통)으로 여유를 둡니다. 정기
+모니터링 메일(Gmail SMTP)은 별도 경로이지만 같은 계정이면 계정 평판을 공유할 수 있어(공식 수치 미확인)
+**인증번호 전용 무료 Gmail 계정**으로 Apps Script 를 배포하는 것을 권장합니다.
 
 ### 무료 운영 제약 (월 추가 비용 0원)
 
@@ -466,7 +486,10 @@ Worker 가 지켜야 할 것(Phase 2):
   **D1 이 한도로 실패하면 구독 API 도 실패하고, fail-closed 정책상 정기 메일 전체가 UTC 자정까지 보류됩니다.**
   그래서 OTP 엔드포인트는 D1 쓰기 전에 요청 제한을 걸고, 동기화는 차분만 씁니다.
 - Apps Script: 위 `MailApp` 하루 100명. 유료 서비스·Resend·도메인 구매는 사용하지 않습니다.
-- 수치는 2026-10 기준 공식 문서 확인 값이며 바뀔 수 있습니다. Phase 2 배포 전에 다시 확인하세요.
+- Workers·D1 무료 한도는 **계정 단위**입니다. 공개 페이지를 대량으로 두드려 한도를 소진시키면 구독 API 도
+  실패해 정기 메일이 보류될 수 있습니다(fail-closed). 1차 메모리 제한과 D1 이전 검증으로 줄이지만 완전히
+  막을 수는 없습니다 — DEPLOY.md 15단계로 사용량을 확인하세요.
+- 수치는 2026-10 기준 공식 문서 확인 값이며 바뀔 수 있습니다. 배포 전에 다시 확인하세요.
 
 ## 주요 설정값 (`config.yaml`)
 
@@ -608,7 +631,17 @@ python scripts/send_test_email.py
 
 # 테스트
 python -m pytest -q
+
+# 구독 설정 Worker 테스트(workerd + 로컬 D1, 외부 호출 없음)
+cd cloudflare-subscription && npm ci && npm run check && npm test && cd ..
+
+# 인증번호 메일 Apps Script 테스트(Node 대역, 실제 Google 서비스 호출 없음)
+node --test google-apps-script/test/*.test.mjs
 ```
+
+로컬 Worker 와 Python 의 실제 HTTP 연동 테스트(`tests/test_subscription_contract.py` 의 E2E)는
+`wrangler dev` 로 로컬 Worker 를 띄우고 `LRK_WORKER_E2E_URL`(127.0.0.1 만 허용)·`LRK_WORKER_E2E_TOKEN`·
+`LRK_WORKER_E2E_HASH_KEY` 를 지정했을 때만 실행됩니다(지정하지 않으면 skip).
 
 ## 소스 점검 (파서가 깨졌을 때)
 
@@ -651,6 +684,8 @@ config.yaml                 # 수신자·발송옵션·모니터링 대상 목�
   monitor.yml               # Dispatch 실행(수집→메일→state 커밋)
   verify.yml                # 수동 소스 점검
 cloudflare-scheduler/       # Cron Trigger 및 GitHub Dispatch Worker
+cloudflare-subscription/    # 수신 기관 설정 Worker + D1 마이그레이션 + 테스트(DEPLOY.md 배포 가이드)
+google-apps-script/         # 인증번호 메일 발송 전용 Apps Script 웹앱 + Node 테스트
 src/
   main.py                   # 오케스트레이션(수집→신규판별→enrich→메일→저장)
   config.py  fetcher.py     # 설정 로딩 / HTTP 세션(재시도·한글 인코딩·첨부 용량 제한)
@@ -672,6 +707,7 @@ src/
 state/seen.json             # 이미 본 글 ID (자동 커밋)
 scripts/
   send_test_email.py        # SMTP 설정 확인
+  check_subscription_api.py # 구독 API 연동 점검(동기화 + 그룹 요약, 메일·state 변경 없음)
   preview_fss_rule.py       # 세칙·행정지도 예고 1건 단건 점검·메일 미리보기(발송·state·Gemini 없음)
   verify_sources.py         # 소스 점검(목록/상세를 구분해 판정)
   capture_assembly_network.py  # [진단] 의안 상세 XHR 캡처(Playwright, HAR·JS 분석)

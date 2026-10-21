@@ -49,6 +49,7 @@ ENV_KEYS = (
     "SUBSCRIPTION_API_TOKEN",
     "SUBSCRIBER_HASH_KEY",
     "SUBSCRIPTION_PAGE_URL",
+    "SUBSCRIPTION_REQUIRED",
 )
 AGENCIES = (
     AgencyConfig("fsc", "금융위원회", ("fsc_press", "fsc_legislation")),
@@ -652,3 +653,39 @@ def test_monitor_workflow_passes_subscription_settings():
     assert env["SUBSCRIPTION_API_TOKEN"] == "${{ secrets.SUBSCRIPTION_API_TOKEN }}"
     assert env["SUBSCRIBER_HASH_KEY"] == "${{ secrets.SUBSCRIBER_HASH_KEY }}"
     assert env["SUBSCRIPTION_PAGE_URL"] == "${{ vars.SUBSCRIPTION_PAGE_URL }}"
+    # 운영 보호장치 값은 비밀이 아니므로 Variable.
+    assert env["SUBSCRIPTION_REQUIRED"] == "${{ vars.SUBSCRIPTION_REQUIRED }}"
+
+
+# ==========================================================================
+# 운영자 점검 스크립트(scripts/check_subscription_api.py)
+# ==========================================================================
+def test_check_script_prints_group_counts_only(monkeypatch, capsys):
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "check_subscription_api",
+        Path(__file__).parent.parent / "scripts" / "check_subscription_api.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setenv("SUBSCRIPTION_API_URL", "https://w.workers.dev/internal/sync-and-resolve")
+    monkeypatch.setenv("SUBSCRIPTION_API_TOKEN", "tok")
+    monkeypatch.setenv("SUBSCRIBER_HASH_KEY", KEY)
+    monkeypatch.setenv("SUBSCRIPTION_PAGE_URL", "https://w.workers.dev/")
+    monkeypatch.setenv("MAIL_TO", "a@example.com, b@example.com")
+
+    def fake_post(url, **kw):
+        ids = kw["json"]["subscribers"]
+        return _resp(body=_ok_body([(ids[0], "all", []), (ids[1], "selected", ["assembly"])]))
+
+    monkeypatch.setattr(sub_mod.requests, "post", fake_post)
+    assert mod.main() == 0
+    out = capsys.readouterr().out
+    assert "그룹 2개" in out and "selected:assembly: 1명" in out
+    assert "@example.com" not in out and _h("a@example.com") not in out
+
+    monkeypatch.setattr(sub_mod.requests, "post", lambda *a, **k: _resp(503, {}))
+    assert mod.main() == 1
+    assert "HTTP 503" in capsys.readouterr().out
