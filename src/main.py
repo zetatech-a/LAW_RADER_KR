@@ -57,6 +57,7 @@ from .notifier import missing_email_settings, send_digest, verify_smtp_login
 from .scrapers import build_scraper
 from .snippet import BodyKind, classify_body, clean_body_text
 from .state import State, utcnow_iso
+from .subscription import SubscriptionError, resolve_recipient_groups, send_grouped
 from .summarizer import ai_target_count, summarize_posts
 
 log = logging.getLogger("law_rader")
@@ -369,6 +370,11 @@ def run(argv=None) -> int:
     # 만들어질 수 있으므로 같은 선점검을 거친다. 메일을 못 보내는 상태에서 재조회를
     # 강행하면 복구된 본문을 전달하지 못한 채 사이트만 두드리게 된다(그리고 본문을
     # state 에 쌓아 두는 우회는 하지 않는다).
+    #
+    # 구독 기능이 켜져 있으면 구독 API 도 여기서(LLM 전에) 한 번 조회한다. 실패하면
+    # SMTP 선점검 실패와 같은 경로로 끝낸다 — MAIL_TO 전체 발송으로 되돌아가지 않는다.
+    # --dry-run 은 이 블록을 타지 않으므로 구독 API(=운영 D1 동기화)를 부르지 않는다.
+    recipient_groups = None
     if (total > 0 or selection.selected) and not args.dry_run:
         missing = missing_email_settings(cfg.email)
         if missing:
@@ -396,6 +402,19 @@ def run(argv=None) -> int:
                 len(selection.selected),
             )
             return 1
+        if cfg.subscription.enabled:
+            try:
+                recipient_groups = resolve_recipient_groups(cfg.subscription, cfg.email)
+            except SubscriptionError as e:
+                log.error(
+                    "구독 설정 조회 실패(%s) — 메일을 보내지 않습니다(전체 발송으로 되돌아가지 "
+                    "않음). 신규 %d건과 재조회 대상 %d건은 미확정으로 남아 복구 후 다음 "
+                    "실행에 처리됩니다.",
+                    e,
+                    total,
+                    len(selection.selected),
+                )
+                return 1
 
     # ── 큐 재조회 실행 ─────────────────────────────────────────────────────────
     retry = RetryOutcome()
@@ -454,8 +473,18 @@ def run(argv=None) -> int:
 
     if total > 0 or detail_updates:
         try:
+            if cfg.subscription.enabled:
+                # 선점검을 거치지 않은 경로로 여기 오면(그럴 수 없어야 한다) 사용자 선택을
+                # 무시한 전체 발송이 되지 않도록 발송 없이 실패로 끝낸다.
+                if recipient_groups is None:
+                    raise SubscriptionError("구독 설정을 조회하지 않은 상태로 발송 단계에 도달")
+                # 그룹마다 source_key 로 걸러 보낸다. 한 그룹이라도 실패하면 아래 실패
+                # 경로로 가서 seen·큐를 확정하지 않는다(먼저 성공한 그룹은 중복 수신 가능).
+                send_grouped(
+                    send_digest, cfg.email, recipient_groups, posts_by_source, detail_updates
+                )
             # 상세 업데이트가 없으면 기존과 **완전히 같은 호출**을 유지한다.
-            if detail_updates:
+            elif detail_updates:
                 send_digest(
                     cfg.email, posts_by_source, detail_updates_by_source=detail_updates
                 )

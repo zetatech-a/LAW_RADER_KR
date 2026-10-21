@@ -95,6 +95,10 @@ _UPDATE_NOTICE = (
 )
 
 
+# 구독 기능이 켜졌을 때 푸터에 싣는 설정 링크 문구(HTML·텍스트 공용).
+_PREFERENCES_LABEL = "수신 기관 설정"
+_PREFERENCES_TEXT = "받을 기관을 선택하거나 변경할 수 있습니다."
+
 # 웹 본문이 첨부 참조 안내 한 문장뿐인 일반 게시물. 그 안내문을 원문 발췌처럼 다시
 # 싣지 않고 짧은 안내로 바꾼다. 첨부 목록이 비어 있으면 없는 첨부파일을 확인하라고
 # 하지 않도록 중립 문구를 쓴다(수집 쪽 이상일 수 있어 main 이 따로 경고를 남긴다).
@@ -520,11 +524,14 @@ def _header_lines(total: int, updates: int, src_count: int) -> tuple[str, str]:
 def build_html(
     posts_by_source: dict[str, list[Post]],
     detail_updates_by_source: dict[str, list[Post]] | None = None,
+    *,
+    preferences_url: str = "",
 ) -> str:
     """다이제스트 HTML.
 
     detail_updates_by_source 는 **이미 알린** 의안의 제안이유를 나중에 확보해 보내는
     '상세 업데이트' 묶음이다. 생략하면(기본) 기존과 완전히 같은 출력이 나온다.
+    preferences_url 이 있으면 푸터에 '수신 기관 설정' 링크를 싣는다(없으면 출력 불변).
     """
     updates = detail_updates_by_source or {}
     total = sum(len(v) for v in posts_by_source.values())
@@ -571,6 +578,12 @@ def build_html(
     parts.append("</td></tr>")
     # ── 푸터. AI 요약이 실린 메일에만 요약 관련 유의사항을 덧붙인다.
     ai_note = f"{_esc(_AI_NOTICE)}<br>" if _has_summary(posts_by_source, updates) else ""
+    prefs_note = (
+        f"<a href='{_esc(preferences_url)}' style='color:#64748b;text-decoration:underline'>"
+        f"{_esc(_PREFERENCES_LABEL)}</a> — {_esc(_PREFERENCES_TEXT)}<br>"
+        if preferences_url
+        else ""
+    )
     parts.append(
         "<tr><td style='padding:16px 24px 22px;background:#f8fafc;"
         "border-radius:0 0 10px 10px;border-top:1px solid #e2e8f0'>"
@@ -578,7 +591,7 @@ def build_html(
         "이 메일은 금융위원회·금융감독원·금융규제포털·의안정보시스템의 신규 게시물을 "
         f"자동 수집해 발송합니다.<br>{ai_note}"
         "첨부파일은 원문 그대로이며, 용량이 큰 파일은 링크로만 "
-        "제공됩니다.<br>RADER stands for Regulatory Alert Detection & Email Reporter"
+        f"제공됩니다.<br>{prefs_note}RADER stands for Regulatory Alert Detection & Email Reporter"
         "</div></td></tr>"
     )
     parts.append("</table></div>")
@@ -639,6 +652,8 @@ def _text_sections(posts_by_source: dict[str, list[Post]]) -> list[str]:
 def build_text(
     posts_by_source: dict[str, list[Post]],
     detail_updates_by_source: dict[str, list[Post]] | None = None,
+    *,
+    preferences_url: str = "",
 ) -> str:
     """다이제스트 text/plain 파트. HTML 파트와 같은 의미를 전달해야 한다."""
     updates = detail_updates_by_source or {}
@@ -666,6 +681,8 @@ def build_text(
 
     if _has_summary(posts_by_source, updates):
         lines.append(f"\n※ {_AI_NOTICE}")
+    if preferences_url:
+        lines.append(f"\n{_PREFERENCES_LABEL}: {preferences_url}")
     return "\n".join(lines)
 
 
@@ -763,8 +780,12 @@ def send_digest(
     # 수신자 숨김: To 헤더에는 발신주소만 표시하고, 실제 수신자는 봉투(envelope)로만
     # 전달한다. 이렇게 하면 여러 명에게 보내도 서로의 주소가 보이지 않는다(BCC 효과).
     msg["To"] = formataddr((cfg.from_name, cfg.mail_from))
-    msg.set_content(build_text(posts_by_source, updates))
-    msg.add_alternative(build_html(posts_by_source, updates), subtype="html")
+    # 구독 기능이 꺼져 있으면 빈 문자열이라 기존과 같은 본문이 나온다.
+    prefs_url = getattr(cfg, "preferences_url", "")
+    msg.set_content(build_text(posts_by_source, updates, preferences_url=prefs_url))
+    msg.add_alternative(
+        build_html(posts_by_source, updates, preferences_url=prefs_url), subtype="html"
+    )
 
     # 첨부 (용량 상한 내에서만)
     budget = cfg.max_attach_bytes
@@ -782,27 +803,55 @@ def send_digest(
                         )
                         budget -= len(a.data)
 
-    with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=60) as server:
-        server.starttls()
-        server.login(cfg.smtp_user, cfg.smtp_password)
-        # 실제 수신자는 to_addrs(봉투)로만 전달 → To 헤더에 노출되지 않아 서로 안 보임.
-        # send_message 는 '일부' 수신자만 거부되면 예외 대신 거부목록 dict 를 반환한다
-        # (전원 거부 시에는 SMTPRecipientsRefused 예외). 반환값을 무시하면 거부된
-        # 수신자가 알림을 못 받는데도 state 가 저장돼 재시도되지 않으므로 예외로 승격한다.
-        refused = server.send_message(msg, to_addrs=cfg.recipients)
+    try:
+        with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=60) as server:
+            server.starttls()
+            server.login(cfg.smtp_user, cfg.smtp_password)
+            # 실제 수신자는 to_addrs(봉투)로만 전달 → To 헤더에 노출되지 않아 서로 안 보임.
+            # send_message 는 '일부' 수신자만 거부되면 예외 대신 거부목록 dict 를 반환한다
+            # (전원 거부 시에는 SMTPRecipientsRefused 예외). 반환값을 무시하면 거부된
+            # 수신자가 알림을 못 받는데도 state 가 저장돼 재시도되지 않으므로 예외로 승격한다.
+            refused = server.send_message(msg, to_addrs=cfg.recipients)
+    except smtplib.SMTPException as e:
+        # smtplib 예외 문자열에는 수신·발신 주소가 들어간다(SMTPRecipientsRefused 는 거부
+        # 주소 dict 자체). 저장소가 공개라 Actions 로그도 공개되므로 종류·응답 코드만 남기고
+        # 원래 예외는 체인에서 끊는다.
+        raise RuntimeError(f"SMTP 발송 실패: {_smtp_error_summary(e)}") from None
 
     if refused:
         # 일부 거부 → 실패로 취급해 state 저장을 막고 다음 실행에 재시도한다.
         # (성공한 수신자에게는 재발송되어 중복될 수 있으나, 알림 누락보다 낫다)
-        raise RuntimeError(f"일부 수신자에게 발송 실패(재시도 대상): {refused}")
+        # 거부된 주소는 싣지 않는다 — 인원과 응답 코드만.
+        raise RuntimeError(
+            f"일부 수신자에게 발송 실패(재시도 대상): {len(refused)}명, "
+            f"응답 코드 {_refused_codes(refused)}"
+        )
 
     log.info(
-        "메일 발송 완료 → %s (신규 %d건 / %s %d건)",
-        ", ".join(cfg.recipients),
+        "메일 발송 완료 → 수신자 %d명 (신규 %d건 / %s %d건)",
+        len(cfg.recipients),
         total,
         _UPDATE_HEADING,
         updates_total,
     )
+
+
+def _refused_codes(refused: dict) -> str:
+    """거부 dict({주소: (코드, 메시지)})에서 응답 코드만 뽑는다(주소·메시지는 버림)."""
+    codes = sorted(
+        {str(v[0]) for v in refused.values() if isinstance(v, tuple) and v}
+    )
+    return ",".join(codes) or "알 수 없음"
+
+
+def _smtp_error_summary(e: "smtplib.SMTPException") -> str:
+    """SMTP 예외를 주소 없이 요약한다: 예외 종류 + 응답 코드(있으면) + 거부 인원."""
+    parts = [type(e).__name__]
+    if isinstance(e, smtplib.SMTPRecipientsRefused):
+        parts.append(f"{len(e.recipients)}명 거부, 응답 코드 {_refused_codes(e.recipients)}")
+    elif isinstance(e, smtplib.SMTPResponseException):
+        parts.append(f"응답 코드 {e.smtp_code}")
+    return " ".join(parts)
 
 
 def _guess_mime(filename: str) -> tuple[str, str, str]:

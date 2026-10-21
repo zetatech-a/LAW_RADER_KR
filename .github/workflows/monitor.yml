@@ -80,6 +80,13 @@ jobs:
           # 그대로 남아 있어 Variable 을 지워도 요약이 멈추지 않는다.
           # 다만 워크플로 자체에는 모델명을 적지 않는다(운영 중 교체는 Variable 로).
           GEMINI_MODEL: ${{ vars.MODEL }}
+          # 구독자별 수신 기관 선택. config.yaml 의 subscription.enabled 가 true 일 때만
+          # 쓰이며, 꺼져 있으면 비어 있어도 된다. 페이지 주소는 메일에 실리는 공개값이라
+          # Variable, 나머지는 Secret 이다.
+          SUBSCRIPTION_API_URL: ${{ secrets.SUBSCRIPTION_API_URL }}
+          SUBSCRIPTION_API_TOKEN: ${{ secrets.SUBSCRIPTION_API_TOKEN }}
+          SUBSCRIBER_HASH_KEY: ${{ secrets.SUBSCRIBER_HASH_KEY }}
+          SUBSCRIPTION_PAGE_URL: ${{ vars.SUBSCRIPTION_PAGE_URL }}
         run: python -m src.main
 
       # 모니터가 실패·취소되더라도 그때까지 기록된 기준선/신규 상태를 저장소에 반영해,

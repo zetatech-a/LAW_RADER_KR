@@ -320,3 +320,49 @@ sources:
     #
     # 사이트가 경로를 또 옮기면 코드 수정 없이 아래 한 줄로 덮어쓸 수 있습니다.
     # detail_url: "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId={bill_id}"
+
+# -------------------------------------------------------------------------
+# 구독자별 수신 기관 선택 (기본 비활성)
+#
+# enabled: false 이면 지금처럼 MAIL_TO 전원에게 전체 기관 다이제스트를 보냅니다.
+# true 로 켜면 발송 직전에 구독 API(Cloudflare Worker)에서 구독자별 설정을 조회해,
+# 같은 설정끼리 묶은 그룹마다 선택한 기관의 신규·의안 상세 업데이트만 보냅니다.
+# 구독 API 가 실패하면 메일을 보내지 않고 실패로 끝납니다(전체 발송으로 되돌아가지
+# 않음). 켜기 전 README '구독 기관 선택' 절의 운영 전환·롤백 절차를 확인하세요.
+#
+# 필요한 환경변수/Secret(값은 여기 적지 않습니다):
+#   SUBSCRIPTION_API_URL    구독 API 주소(https://…/internal/sync-and-resolve)
+#   SUBSCRIPTION_API_TOKEN  구독 API Bearer 토큰(Worker Secret 과 같은 값)
+#   SUBSCRIBER_HASH_KEY     구독자 식별자 HMAC 키(32자 이상, Worker Secret 과 같은 값)
+#   SUBSCRIPTION_PAGE_URL   메일 하단 '수신 기관 설정' 링크(https://…workers.dev/)
+#
+# agencies 는 기관 ↔ source_key 매핑의 단일 원천입니다. 켜져 있을 때는 활성 소스가
+# 모두 정확히 한 기관에 속해야 합니다(아니면 설정 오류로 실행이 멈춥니다).
+# 새 게시판을 추가하면 해당 기관의 sources 에도 넣으세요 — 그 기관을 고른 구독자가
+# 자동으로 받습니다. 기관 id 는 구독 설정에 저장되는 값이므로 바꾸지 마세요.
+# -------------------------------------------------------------------------
+subscription:
+  enabled: false
+  # 구독 API 요청 타임아웃(초). 실패 시 재시도하지 않고 다음 실행(15분)에 다시 시도합니다.
+  timeout_sec: 10
+  agencies:
+    - id: fsc
+      name: "금융위원회"
+      sources: [fsc_press, fsc_legislation]
+    - id: fss
+      name: "금융감독원"
+      sources:
+        - fss_press
+        - fss_admin_guidance
+        - fss_rule_amendment
+        - fss_sanction
+        - fss_mgmt_notice
+    - id: better
+      name: "금융규제·법령해석포털"
+      sources: [better_reply]
+    - id: pipc
+      name: "개인정보보호위원회"
+      sources: [pipc_notice, pipc_press]
+    - id: assembly
+      name: "의안정보시스템"
+      sources: [assembly_bill]

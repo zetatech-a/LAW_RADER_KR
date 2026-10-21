@@ -22,6 +22,9 @@ class EmailConfig:
     smtp_user: str
     smtp_password: str
     mail_from: str
+    # 메일 하단 '수신 기관 설정' 링크. 구독 기능이 켜졌을 때만 채워지며, 비어 있으면
+    # 링크를 싣지 않는다(= 기존 메일 출력 그대로).
+    preferences_url: str = ""
 
     @property
     def max_attach_bytes(self) -> int:
@@ -193,16 +196,138 @@ class SourceConfig:
     extra: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class AgencyConfig:
+    """구독자가 고르는 기관 1개와 그 기관에 속한 소스 key 들(config.yaml 이 단일 원천)."""
+
+    id: str
+    name: str
+    sources: tuple[str, ...]
+
+
+@dataclass
+class SubscriptionConfig:
+    """구독자별 수신 기관 선택(구독 API) 설정. 기본은 비활성 — 기존 발송 그대로.
+
+    토큰과 HMAC 키는 환경변수/Secret 으로만 주입하고, repr 에도 나오지 않게 한다
+    (설정 객체가 로그·예외 메시지에 찍혀도 비밀이 새지 않도록).
+    """
+
+    enabled: bool = False
+    api_url: str = ""
+    api_token: str = field(default="", repr=False)
+    subscriber_hash_key: str = field(default="", repr=False)
+    timeout_sec: float = 10.0
+    agencies: tuple[AgencyConfig, ...] = ()
+
+
 @dataclass
 class Config:
     email: EmailConfig
     fetch: FetchConfig
     llm: LLMConfig
     sources: list[SourceConfig]
+    subscription: SubscriptionConfig = field(default_factory=SubscriptionConfig)
 
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
+
+
+# 기관 ID 는 API·D1 에 그대로 저장되는 식별자라 형식을 좁게 묶는다.
+_AGENCY_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+
+def _load_agencies(raw) -> tuple[AgencyConfig, ...]:
+    """subscription.agencies 를 읽는다. 형식 오류는 기능이 꺼져 있어도 즉시 알린다."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError("subscription.agencies 는 목록이어야 합니다")
+    agencies: list[AgencyConfig] = []
+    for i, item in enumerate(raw):
+        where = f"subscription.agencies[{i}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{where} 는 id/name/sources 를 가진 항목이어야 합니다")
+        agency_id = item.get("id")
+        if not isinstance(agency_id, str) or not _AGENCY_ID_RE.match(agency_id):
+            raise ValueError(f"{where}.id 형식이 올바르지 않습니다 — 받은 값: {agency_id!r}")
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{where}.name 이 비어 있습니다")
+        sources = item.get("sources")
+        if (
+            not isinstance(sources, list)
+            or not sources
+            or not all(isinstance(s, str) and s.strip() for s in sources)
+        ):
+            raise ValueError(f"{where}.sources 는 비어 있지 않은 source key 목록이어야 합니다")
+        agencies.append(
+            AgencyConfig(
+                id=agency_id,
+                name=name.strip(),
+                sources=tuple(s.strip() for s in sources),
+            )
+        )
+    return tuple(agencies)
+
+
+def validate_agency_mapping(
+    agencies: tuple[AgencyConfig, ...],
+    sources: list[SourceConfig],
+    *,
+    require_complete: bool,
+) -> None:
+    """기관 ↔ source_key 매핑 검증.
+
+    항상 보는 것: 기관 ID 중복, 한 소스가 두 기관에 속함, 존재하지 않는 source key.
+    require_complete 이면 추가로 **활성화된 모든 소스가 정확히 한 기관에** 속하는지 본다
+    — 빠진 소스는 'selected' 구독자 누구에게도 가지 않는 조용한 누락이 되기 때문이다.
+    """
+    known = {s.key for s in sources}
+    seen_ids: set[str] = set()
+    owner: dict[str, str] = {}
+    for agency in agencies:
+        if agency.id in seen_ids:
+            raise ValueError(f"subscription.agencies 의 기관 ID 가 중복됩니다: {agency.id}")
+        seen_ids.add(agency.id)
+        for key in agency.sources:
+            if key not in known:
+                raise ValueError(
+                    f"subscription.agencies[{agency.id}] 에 없는 source key 가 있습니다: {key}"
+                )
+            if key in owner:
+                raise ValueError(
+                    f"source key {key} 가 두 기관({owner[key]}, {agency.id})에 속합니다"
+                )
+            owner[key] = agency.id
+    if require_complete:
+        unmapped = [s.key for s in sources if s.enabled and s.key not in owner]
+        if unmapped:
+            raise ValueError(
+                "구독 기능을 켜려면 활성 소스가 모두 기관에 매핑되어야 합니다 — 누락: "
+                + ", ".join(unmapped)
+            )
+
+
+def _load_subscription(raw, sources: list[SourceConfig]) -> SubscriptionConfig:
+    """subscription 블록 + 환경변수. 블록이 없으면 비활성 기본값."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("subscription 설정은 항목(dict)이어야 합니다")
+    enabled = _as_bool(raw.get("enabled"), "subscription.enabled", False)
+    timeout = _as_optional_positive_float(raw.get("timeout_sec"), "subscription.timeout_sec")
+    agencies = _load_agencies(raw.get("agencies"))
+    validate_agency_mapping(agencies, sources, require_complete=enabled)
+    return SubscriptionConfig(
+        enabled=enabled,
+        api_url=_env("SUBSCRIPTION_API_URL").strip(),
+        api_token=_env("SUBSCRIPTION_API_TOKEN").strip(),
+        subscriber_hash_key=_env("SUBSCRIBER_HASH_KEY").strip(),
+        timeout_sec=timeout if timeout is not None else SubscriptionConfig.timeout_sec,
+        agencies=agencies,
+    )
 
 
 # Gemini 가 정의한 thinking 수준. 여기 없는 값은 설정 오타로 보고 즉시 실패한다 —
@@ -414,4 +539,12 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             )
         )
 
-    return Config(email=email, fetch=fetch, llm=llm, sources=sources)
+    subscription = _load_subscription(raw.get("subscription"), sources)
+    # 설정 링크는 기능이 켜졌을 때만 싣는다. 꺼진 상태에서 링크만 나가면 사용자가
+    # 바꾼 설정이 발송에 반영되지 않아 혼란을 준다.
+    if subscription.enabled:
+        email.preferences_url = _env("SUBSCRIPTION_PAGE_URL").strip()
+
+    return Config(
+        email=email, fetch=fetch, llm=llm, sources=sources, subscription=subscription
+    )
