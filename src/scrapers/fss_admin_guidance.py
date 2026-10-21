@@ -59,7 +59,16 @@ def extract_admin_guidance_sections(
     없고, 값이 모두 빈 페이지에서 넓히면 div.contents 까지 올라가 6번 값에 '목록 행정지도에
     대한 의견제출'·'정보관리 담당부서 안내' 같은 페이지 문구가 실린다(실제 seqno=280 구조로
     확인). 그런 페이지는 전체 추출 실패로 드러낸다.
+
+    인식하지 못한 최상위 제목에서도 앞 항목 값을 끊는다(cut_unrecognized). 1~6번이 한 덩어리
+    글자라 제목 문구 하나만 바뀌어도(예: '6. 담당부서 및 연락처') 그 항목 내용이 앞 항목(5번
+    제출시한)에 붙어 메일에 실린다. 경계를 확신할 수 없으면 그 항목을 누락으로 돌린다.
     """
     return extract_sections(
-        soup, _SECTIONS, stop_lines=stop_lines, hint="행정지도의 신규·변경·연장의 취지", widen=0
+        soup,
+        _SECTIONS,
+        stop_lines=stop_lines,
+        hint="행정지도의 신규·변경·연장의 취지",
+        widen=0,
+        cut_unrecognized=True,
     )

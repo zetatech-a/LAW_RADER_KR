@@ -733,3 +733,138 @@ def test_preview_script_reports_total_failure(in_tmp):
     assert rc == 3
     html = (in_tmp / "out" / "fss_admin_guidance_seqno_280.html").read_text(encoding="utf-8")
     assert "상세 내용 추출 실패 — 원문 페이지에서 확인해 주세요." in html
+
+
+# ── 7. 항목 경계 보호(제목 변형·누락) ──────────────────────────────────────────
+#
+# 회귀 대상: 제목 문구가 바뀐 최상위 항목은 경계로 인식되지 않아, 그 내용이 직전 항목 값에
+# 붙어 메일에 실렸다(3번→2번, 4번→3번, 6번→5번). 인식한 제목 사이에 빠진 번호가 있을 때만
+# 그 번호로 시작하는 줄을 경계로 보고, 확실하지 않으면 그 항목을 누락으로 돌린다.
+
+_SECTION_3 = "3. 행정지도의 내용"
+_SECTION_4 = "4. 기타 필요사항"
+_SECTION_6 = "6. 접수부서, 담당자, 전화번호, 팩스번호"
+
+
+def _live_renamed(old: str, new: str) -> str:
+    html = _live()
+    assert html.count(old) == 1
+    return html.replace(old, new)
+
+
+def test_renamed_section_3_heading_does_not_leak_into_section_2():
+    """A — 3번 제목만 바뀜: 2번은 원래 값 그대로, 3번은 누락, 5·6번 정상."""
+    result = _extract(_live_renamed(_SECTION_3, "3. 지도 사항"))
+    assert result.missing == [CONTENT]
+    assert result.sections == [LIVE_280_EXPECTED[0], *LIVE_280_EXPECTED[2:]]
+    joined = "\n".join(v for _, v in result.sections)
+    assert "지도 사항" not in joined and "첨부파일 참고" not in joined
+
+
+def test_renamed_section_3_with_multiline_body_keeps_section_2_clean():
+    html = _page(_guidance_body(**{
+        "3": "3. 행정지도 사항<br> - 가. 대상 확대<br> - 나. 기간 연장<br>1. 세부 기준",
+    }))
+    result = _extract(html)
+    assert result.missing == [CONTENT]
+    assert dict(result.sections)[PURPOSE] == "- 취지 원문"
+
+
+def test_renamed_section_6_heading_does_not_leak_into_deadline():
+    """B — 6번 제목만 바뀜: 5번은 제출시한만, 6번은 누락."""
+    result = _extract(_live_renamed(_SECTION_6, "6. 담당부서 및 연락처"))
+    assert result.missing == [CONTACT]
+    assert result.sections == LIVE_280_EXPECTED[:3]
+    assert dict(result.sections)[DEADLINE] == "- 2026-11-09"
+
+
+def test_renamed_section_6_example_from_review():
+    html = _page(_guidance_body(**{
+        "6": "6. 담당부서 및 연락처<br>- 전자금융감독국 전자금융총괄팀<br>- 전화번호: 02-1234-5678",
+    }))
+    result = _extract(html)
+    assert result.missing == [CONTACT]
+    assert dict(result.sections)[DEADLINE] == "- 2026-11-09"
+    assert "02-1234-5678" not in "\n".join(v for _, v in result.sections)
+
+
+def test_renamed_boundary_heading_4_does_not_leak_into_section_3():
+    """표시하지 않는 4번 제목이 바뀌어도 3번에 '없음' 이 붙지 않는다(이전엔 성공으로 집계됐다)."""
+    result = _extract(_live_renamed(_SECTION_4, "4. 그 밖의 사항"))
+    assert result.sections == LIVE_280_EXPECTED and result.missing == []
+
+
+def test_sub_list_in_section_3_ends_exactly_at_heading_4():
+    """C — 3번 안의 하위 1·2·3번은 최상위 항목이 아니고, 3번은 4번에서 끝난다."""
+    html = _page(_guidance_body(**{
+        "3": "3. 행정지도의 내용<br>- 세부 내용<br><br>1. 적용 대상<br>2. 적용 기준<br>3. 유의 사항",
+        "4": "4. 기타 필요사항<br>- 없음",
+    }))
+    result = _extract(html)
+    assert result.missing == []
+    assert dict(result.sections)[CONTENT] == "- 세부 내용\n\n1. 적용 대상\n2. 적용 기준\n3. 유의 사항"
+    assert dict(result.sections)[DEADLINE] == "- 2026-11-09"
+    assert dict(result.sections)[CONTACT] == "- 예시국 예시팀 홍길동 (02-0000-0000)"
+
+
+def test_ambiguous_boundary_after_sub_list_fails_safely():
+    """하위 1·2·3번 뒤의 '4.' 가 하위 목록의 다음 번호인지 바뀐 4번 제목인지 알 수 없으면 3번을
+    누락으로 돌린다 — 반쯤 맞는 값을 정상 결과로 싣지 않는다."""
+    html = _page(_guidance_body(**{
+        "3": "3. 행정지도의 내용<br>- 세부 내용<br><br>1. 적용 대상<br>2. 적용 기준<br>3. 유의 사항",
+        "4": "4. 그 밖의 사항<br>- 없음",
+    }))
+    result = _extract(html)
+    assert result.missing == [CONTENT]
+    assert [t for t, _ in result.sections] == [PURPOSE, DEADLINE, CONTACT]
+    assert "없음" not in "\n".join(v for _, v in result.sections)
+
+
+def test_renamed_heading_without_blank_line_fails_safely():
+    """빠진 번호의 줄이 빈 줄 없이 값에 바로 붙어 있으면 경계로 확신하지 않는다."""
+    html = _page(_guidance_body(**{
+        "5": "5. 의견제출시한(도착기준)<br> - 2026-11-09<br>6. 담당부서 및 연락처<br> - 예시국",
+        "6": None,
+    }))
+    result = _extract(html)
+    assert result.missing == [DEADLINE, CONTACT]
+    assert "예시국" not in "\n".join(v for _, v in result.sections)
+
+
+def test_number_leading_value_lines_are_not_boundaries():
+    """'3.5배' 처럼 번호 뒤가 숫자인 줄은 제목 후보가 아니다 — 바뀐 3번 제목에서만 끊는다."""
+    html = _page(_guidance_body(**{
+        "2": "2. 행정지도의 신규·변경·연장의 취지<br> - 한도 관리<br><br>3.5배 이내로 관리",
+        "3": "3. 지도 사항<br> - 첨부파일 참고",
+    }))
+    result = _extract(html)
+    assert dict(result.sections)[PURPOSE] == "- 한도 관리\n\n3.5배 이내로 관리"
+    assert result.missing == [CONTENT]
+
+
+def test_renamed_section_6_enrich_logs_missing_and_mail_shows_no_wrong_contact(in_tmp, caplog):
+    """B — 스크래퍼·메일 경로: 누락 기록, 성공 집계 제외, 잘못된 연락처 미표시."""
+    sc = _scraper(_live_renamed(_SECTION_6, "6. 담당부서 및 연락처"))
+    p = _post()
+    with caplog.at_level(logging.WARNING):
+        sc.enrich(p)
+    assert p.details == LIVE_280_EXPECTED[:3]
+    assert sc.enrich_succeeded(p) is False
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "일부 누락" in msg and CONTACT in msg and VIEW_280 in msg
+    assert (in_tmp / "debug" / "fss_admin_guidance_detail_seqno_280.txt").exists()
+
+    grouped = {SOURCE_NAME: [p]}
+    html, text = build_html(grouped), build_text(grouped)
+    for wrong in ("전자금융총괄팀", "02-0000-0001", "contact1@example.com", "담당부서 및 연락처"):
+        assert wrong not in html and wrong not in text, wrong
+    deadline_box = html.split(f"•</span>{DEADLINE}</div>", 1)[1].split("</div>", 1)[0]
+    assert deadline_box.endswith(">- 2026-11-09")
+    contact_box = html.split(f"•</span>{CONTACT}</div>", 1)[1].split("</div>", 1)[0]
+    assert "lr-rule-missing" in contact_box and "추출하지 못했습니다" in contact_box
+    i = text.splitlines().index(f"    • {DEADLINE}")
+    assert text.splitlines()[i + 1:i + 4] == [
+        "      - 2026-11-09", f"    • {CONTACT}",
+        "      원문에서 이 항목을 추출하지 못했습니다 — 원문 페이지에서 확인해 주세요.",
+    ]
+    assert p.attachments and p.url in text                 # 첨부·원문 링크 유지
