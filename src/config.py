@@ -222,6 +222,9 @@ class SubscriptionConfig:
     # 운영 보호장치(GitHub Variable SUBSCRIPTION_REQUIRED). true 인데 enabled 가 false 면
     # main 이 실행을 중단한다 — 활성화 후 플래그 실수로 전체 발송이 재개되는 것을 막는다.
     required: bool = False
+    # 운영 D1 식별자(GitHub Variable SUBSCRIPTION_DB_INSTANCE, 32자 hex). 있으면 Worker 의 D1 이
+    # 같은 데이터인지 매번 확인한다 — D1 이 재생성·교체되면 설정이 전부 mode=all 로 보이는 대신 발송을 멈춘다.
+    db_instance: str = ""
 
 
 @dataclass
@@ -327,6 +330,17 @@ def _env_required_flag(name: str) -> bool:
     raise ValueError(f"{name} 는 true 또는 false 여야 합니다(비워 두면 false)")
 
 
+_DB_INSTANCE_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _env_db_instance(name: str) -> str:
+    """D1 식별자 환경변수. 비어 있으면 미설정, 형식이 틀리면 설정 오류(조용히 무시하지 않음)."""
+    raw = _env(name).strip()
+    if raw and not _DB_INSTANCE_RE.match(raw):
+        raise ValueError(f"{name} 는 32자 소문자 hex 여야 합니다(비워 두면 미설정)")
+    return raw
+
+
 def _load_subscription(raw, sources: list[SourceConfig]) -> SubscriptionConfig:
     """subscription 블록 + 환경변수. 블록이 없으면 비활성 기본값."""
     if raw is None:
@@ -345,6 +359,7 @@ def _load_subscription(raw, sources: list[SourceConfig]) -> SubscriptionConfig:
         timeout_sec=timeout if timeout is not None else SubscriptionConfig.timeout_sec,
         agencies=agencies,
         required=_env_required_flag("SUBSCRIPTION_REQUIRED"),
+        db_instance=_env_db_instance("SUBSCRIPTION_DB_INSTANCE"),
     )
 
 

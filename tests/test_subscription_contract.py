@@ -6,6 +6,7 @@
    로컬 Worker + 로컬 D1 에 실제 HTTP 로 붙어 Python 의 요청·응답 검증을 그대로 통과하는지 본다.
    운영 Worker·운영 D1 에는 절대 붙이지 않는다(127.0.0.1 만 허용).
 """
+import dataclasses
 import json
 import os
 import subprocess
@@ -20,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import AgencyConfig, EmailConfig, SubscriptionConfig
 from src.models import ASSEMBLY_SOURCE_KEY, Post
 from src.subscription import (
+    SubscriptionError,
     fetch_preferences,
     group_recipients,
     normalize_email,
@@ -93,9 +95,13 @@ def test_e2e_python_and_worker_agree_end_to_end():
     emails = ["all@example.com", "asm@example.com", "fscasm@example.com", "paused@example.com"]
     ids = {e: subscriber_hash(e, sub.subscriber_hash_key) for e in emails}
 
-    # 1) 최초 동기화: Python 검증기를 그대로 통과하고 전원 mode=all
-    first = fetch_preferences(sub, list(ids.values()))
+    # 1) 최초 동기화: Python 검증기를 그대로 통과하고 전원 mode=all. D1 식별자가 만들어진다.
+    meta = {}
+    first = fetch_preferences(sub, list(ids.values()), meta)
     assert {p.mode for p in first.values()} == {"all"}
+    assert len(meta["instance"]) == 32
+    # 이후는 운영처럼 SUBSCRIPTION_DB_INSTANCE 를 설정한 상태로 호출한다.
+    sub = dataclasses.replace(sub, db_instance=meta["instance"])
 
     # 2) 설정 페이지가 저장했을 행(로컬 D1 에 직접) → 다시 동기화
     for email, mode, agencies in [
@@ -137,3 +143,16 @@ def test_e2e_python_and_worker_agree_end_to_end():
     fetch_preferences(sub, [ids[e] for e in emails if e != "asm@example.com"])
     back = fetch_preferences(sub, list(ids.values()))
     assert back[ids["asm@example.com"]].agencies == ("assembly",)
+
+    # 5) Phase 2.6 무결성: 고른 기관이 카탈로그에서 빠지면 mode=all 이 아니라 409 → Python 발송 중단
+    no_assembly = dataclasses.replace(sub, agencies=AGENCIES[:-1])
+    with pytest.raises(SubscriptionError, match="catalog_mismatch"):
+        fetch_preferences(no_assembly, list(ids.values()))
+    # 다른 D1 식별자를 기대하면 거절
+    with pytest.raises(SubscriptionError, match="instance_mismatch"):
+        fetch_preferences(dataclasses.replace(sub, db_instance="e" * 32), list(ids.values()))
+    # 설정을 저장한 적 있는 구독자의 행이 사라지면 거절
+    _d1_local(f"UPDATE subscribers SET pref_saved = 1 WHERE subscriber = '{ids['asm@example.com']}'")
+    _d1_local(f"DELETE FROM preferences WHERE subscriber = '{ids['asm@example.com']}'")
+    with pytest.raises(SubscriptionError, match="preference_missing"):
+        fetch_preferences(sub, list(ids.values()))

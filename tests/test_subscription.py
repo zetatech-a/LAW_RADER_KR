@@ -50,6 +50,7 @@ ENV_KEYS = (
     "SUBSCRIBER_HASH_KEY",
     "SUBSCRIPTION_PAGE_URL",
     "SUBSCRIPTION_REQUIRED",
+    "SUBSCRIPTION_DB_INSTANCE",
 )
 AGENCIES = (
     AgencyConfig("fsc", "금융위원회", ("fsc_press", "fsc_legislation")),
@@ -660,6 +661,7 @@ def test_monitor_workflow_passes_subscription_settings():
     assert env["SUBSCRIPTION_PAGE_URL"] == "${{ vars.SUBSCRIPTION_PAGE_URL }}"
     # 운영 보호장치 값은 비밀이 아니므로 Variable.
     assert env["SUBSCRIPTION_REQUIRED"] == "${{ vars.SUBSCRIPTION_REQUIRED }}"
+    assert env["SUBSCRIPTION_DB_INSTANCE"] == "${{ vars.SUBSCRIPTION_DB_INSTANCE }}"
 
 
 # ==========================================================================
@@ -694,3 +696,66 @@ def test_check_script_prints_group_counts_only(monkeypatch, capsys):
     monkeypatch.setattr(sub_mod.requests, "post", lambda *a, **k: _resp(503, {}))
     assert mod.main() == 1
     assert "HTTP 503" in capsys.readouterr().out
+
+
+# ==========================================================================
+# Phase 2.6 — D1 식별자(SUBSCRIPTION_DB_INSTANCE)·오류 사유 코드
+# ==========================================================================
+INSTANCE = "c3" * 16
+
+
+def test_db_instance_env_is_strict(tmp_path, monkeypatch):
+    path = _write_config(tmp_path, lambda raw: None)
+    monkeypatch.setenv("SUBSCRIPTION_DB_INSTANCE", INSTANCE)
+    assert load_config(path).subscription.db_instance == INSTANCE
+    for bad in ["XYZ", "c3" * 15, ("c3" * 16).upper()]:
+        monkeypatch.setenv("SUBSCRIPTION_DB_INSTANCE", bad)
+        with pytest.raises(ValueError, match="SUBSCRIPTION_DB_INSTANCE"):
+            load_config(path)
+
+
+def test_required_mode_demands_db_instance():
+    missing = missing_subscription_settings(_sub(required=True), _email())
+    assert any("SUBSCRIPTION_DB_INSTANCE" in m for m in missing)
+    assert missing_subscription_settings(_sub(required=True, db_instance=INSTANCE), _email()) == []
+    assert missing_subscription_settings(_sub(required=False), _email()) == []
+
+
+def test_request_carries_instance_only_when_configured(monkeypatch):
+    sent = []
+
+    def fake_post(url, **kw):
+        sent.append(kw["json"])
+        return _resp(body={**_ok_body([(_h("a@example.com"), "all", [])]), "instance": INSTANCE})
+
+    monkeypatch.setattr(sub_mod.requests, "post", fake_post)
+    fetch_preferences(_sub(), [_h("a@example.com")])
+    meta = {}
+    fetch_preferences(_sub(db_instance=INSTANCE), [_h("a@example.com")], meta)
+    assert "instance" not in sent[0]
+    assert sent[1]["instance"] == INSTANCE
+    assert meta == {"instance": INSTANCE}
+
+
+@pytest.mark.parametrize("instance", ["d4" * 16, None])
+def test_response_instance_must_match_expected(monkeypatch, instance):
+    body = _ok_body([(_h("a@example.com"), "all", [])])
+    if instance:
+        body["instance"] = instance
+    monkeypatch.setattr(sub_mod.requests, "post", lambda *a, **k: _resp(body=body))
+    with pytest.raises(SubscriptionError, match="식별자"):
+        fetch_preferences(_sub(db_instance=INSTANCE), [_h("a@example.com")])
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [({"error": "catalog_mismatch"}, "HTTP 409 (catalog_mismatch)"),
+     ({"error": "Not A Code!"}, "HTTP 409"),
+     (None, "HTTP 409")],
+)
+def test_error_code_is_reported_without_echoing_free_text(monkeypatch, body, expected):
+    raw = b"<html>oops</html>" if body is None else None
+    monkeypatch.setattr(sub_mod.requests, "post", lambda *a, **k: _resp(409, body, raw=raw))
+    with pytest.raises(SubscriptionError) as ei:
+        fetch_preferences(_sub(), [_h("a@example.com")])
+    assert str(ei.value) == f"구독 API {expected}"

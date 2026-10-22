@@ -73,7 +73,7 @@ export async function sync(emails: string[], catalog = CATALOG, opts: CallOption
 export async function resetDb(): Promise<void> {
   resetMemoryLimiter();
   await env.DB.batch(
-    ["sessions", "otp_challenges", "preferences", "rate_limits", "subscribers", "agencies"].map((t) =>
+    ["sessions", "otp_challenges", "preferences", "rate_limits", "subscribers", "agencies", "service_meta"].map((t) =>
       env.DB.prepare(`DELETE FROM ${t}`),
     ),
   );

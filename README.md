@@ -308,7 +308,8 @@ npm run deploy -- --secrets-file .dev.vars
 | `SUBSCRIPTION_API_TOKEN` | Secret | 구독 API Bearer 토큰(Worker Secret 과 같은 값) |
 | `SUBSCRIBER_HASH_KEY` | Secret | 구독자 식별자 HMAC 키, 32자 이상(Worker Secret 과 같은 값) |
 | `SUBSCRIPTION_PAGE_URL` | Variable | 메일 하단 설정 링크(`https://…workers.dev/`) |
-| `SUBSCRIPTION_REQUIRED` | Variable | 운영 보호장치. 정식 활성화 후 `true`. `true` 인데 `enabled: false` 면 실행 중단(아래). `true`/`false`/빈값 외에는 설정 오류 |
+| `SUBSCRIPTION_REQUIRED` | Variable | 운영 보호장치. 정식 전환 **직전** `true`. `true` 인데 `enabled: false` 면 실행 중단(아래). `true`/`false`/빈값 외에는 설정 오류 |
+| `SUBSCRIPTION_DB_INSTANCE` | Variable | 운영 D1 식별자(32자 hex, 점검 스크립트 출력값). D1 재생성·교체 시 발송 중단. `SUBSCRIPTION_REQUIRED=true` 이면 필수 |
 
 ### 수신자 처리 규칙
 
@@ -348,10 +349,13 @@ npm run deploy -- --secrets-file .dev.vars
 
 ### 운영 전환·롤백
 
-- **켜기**: Phase 2 Worker·D1·Apps Script 배포와 Secret 등록 → `MAIL_TO` 를 운영자 1명으로 둔 별도 실행으로
-  링크·인증·필터 확인 → `subscription.enabled: true` 커밋. 첫 실행에서 모든 기존 구독자가 `mode=all` 로
-  동기화되므로 받는 내용은 전과 같습니다. 그 뒤 링크를 안내합니다.
-- **운영 보호장치**: 정식 활성화 후 GitHub Variable `SUBSCRIPTION_REQUIRED=true` 를 둡니다. 이 상태에서
+- **켜기**(상세: [DEPLOY.md 14단계](cloudflare-subscription/DEPLOY.md)): 스테이징 검증 → 운영 D1 식별자를
+  `SUBSCRIPTION_DB_INSTANCE` 에 등록 → 이 기능을 `enabled: false` 그대로 main 반영 → **전환 직전 `SUBSCRIPTION_REQUIRED=true`**
+  (이 순간부터 `enabled: false` 인 main 은 잠시 실행을 멈춤) → `enabled: true` 반영 → 첫 실행 확인 → 링크 안내.
+  보호장치를 사용자 설정 기능(메일 하단 링크)보다 먼저 켭니다. 첫 실행에서 기존 구독자는 모두 `mode=all` 이라 받는 내용은 전과 같습니다.
+- **보호장치의 전제**: ① main 의 Python 코드(이 기능 포함 버전) ② `monitor.yml` env 줄 ③ GitHub Variable 이 모두 있어야 작동합니다.
+  이 기능 이전의 운영 코드는 `SUBSCRIPTION_REQUIRED` 를 읽지 않으므로 Variable 만 먼저 바꿔도 효과가 없습니다.
+- **운영 보호장치**: GitHub Variable `SUBSCRIPTION_REQUIRED=true` 상태에서
   `enabled` 가 `false` 가 되면 실행 시작 직후(수집 전) 멈추고 메일·state 를 바꾸지 않습니다(`--dry-run` 은 경고만).
   오타(`ture`, `yes`, `1` 등)는 false 로 읽지 않고 설정 오류로 실행을 실패시킵니다. 코드를 이 장치 이전
   버전으로 되돌리면 보호장치도 사라지므로, 되돌리기 전에 아래 폐지 절차를 먼저 마칩니다.
@@ -389,11 +393,14 @@ npm run deploy -- --secrets-file .dev.vars
 }
 ```
 
+`instance`(선택): 운영자가 `SUBSCRIPTION_DB_INSTANCE` 에 등록한 D1 식별자(32자 hex). 있으면 Worker 의 D1 과 같은지 확인합니다.
+
 응답(Worker → Python, HTTP 200):
 
 ```json
 {
   "api_version": 1,
+  "instance": "3f9c…(이 D1 의 식별자 32자 hex)",
   "subscribers": [
     {"subscriber": "1f0c…", "mode": "all", "agencies": []},
     {"subscriber": "9a7e…", "mode": "selected", "agencies": ["fsc", "assembly"]}
@@ -407,7 +414,12 @@ npm run deploy -- --secrets-file .dev.vars
   정확히 1개 — 누락·중복·요청하지 않은 식별자는 Python 이 오류로 처리합니다.
 - `mode` 는 `all`/`selected` 만. `mode=all` 이면 `agencies` 는 빈 목록이어야 합니다.
   `selected` + 빈 목록은 정상(일시중지)입니다. 기관 ID 는 요청 카탈로그에 있는 것만, 중복 없이.
-- `api_version` 은 정수 1. 그 밖의 최상위 키는 무시합니다(하위 호환 확장용).
+- `api_version` 은 정수 1. 그 밖의 최상위 키는 무시합니다(하위 호환 확장용). Python 은 `SUBSCRIPTION_DB_INSTANCE` 가
+  설정돼 있으면 응답 `instance` 가 같은지도 확인합니다.
+- **무결성 거절(Phase 2.6, 모두 409·쓰기 없음 — Python 은 발송 중단):** `instance_missing`(Python 이 식별자를 기대하는데 D1 에
+  없음 = D1 재생성·교체 의심) · `instance_mismatch`(다른 D1) · `key_changed`(최초 동기화 때와 다른 키 — GitHub·Worker 키가 함께 바뀜) ·
+  `catalog_mismatch`(구독자가 고른 기관이 카탈로그에서 빠짐) · `preference_missing`(설정을 저장한 적 있는 구독자의 설정 행이 없음).
+  어느 경우든 기본값 `mode=all` 로 조용히 돌아가지 않습니다. Python 오류 메시지에 사유 코드가 함께 표시됩니다(예: `HTTP 409 (catalog_mismatch)`).
 - `key_check` 는 Python 과 Worker 에 등록한 `SUBSCRIBER_HASH_KEY` 가 같은지 확인하는 값입니다(키 자체가 아님).
   Worker 가 자기 키로 계산한 값과 다르면 DB 를 건드리지 않고 `409 hash_key_mismatch` 로 거절합니다 —
   키가 다르면 모든 식별자가 '새 구독자'로 보여 전원 `mode=all` 로 응답되는(일시중지·선택이 조용히 무시되는)
@@ -424,9 +436,10 @@ Worker 구현(`cloudflare-subscription/src/internal.ts`)이 지키는 것:
    upsert. 변화가 없는 실행은 쓰기 0건이어야 한다(15분마다 호출되므로).
 4. 모든 쓰기를 하나의 `D1 batch` 로 실행한다(트랜잭션 — 중간 실패 시 전체 롤백). 실패하면 5xx 를
    반환해 Python 이 발송을 중단하게 한다. 부분 동기화로 기존 구독자가 비활성화되는 일이 없어야 한다.
-5. 응답 기관 목록은 **이번 요청 카탈로그에 있는 ID 만** 담는다(알 수 없는 ID 를 그대로 주면 Python 이
-   전체 발송을 중단한다). 카탈로그에서 사라진 기관 때문에 선택이 비게 되면 일시중지로 바꾸지 말고
-   `mode=all` 로 응답해 조용한 수신 중단을 막는다.
+5. 구독자가 고른 기관 중 하나라도 이번 요청 카탈로그에 없으면 **전체 수신으로 넓히지도, 조용히 좁히지도 않고**
+   `409 catalog_mismatch` 로 거절한다(쓰기 없음, 저장된 선택 보존 — 기관을 되돌리면 그대로 복원). 일시중지(`selected` + 빈 목록)는
+   정상이다. 기관을 없애야 하면 DEPLOY.md '기관 제거' 절차로 해당 선택을 먼저 정리한다. (Phase 2 의 '선택이 비면 mode=all' 규칙은
+   원하지 않은 기관의 메일을 보낼 수 있어 Phase 2.6 에서 폐기했다.)
 6. D1 에는 평문 이메일을 저장하지 않는다(식별자만). 로그에도 토큰·식별자를 남기지 않는다.
 
 ### 설정 서비스 구현 (Phase 2)
@@ -497,8 +510,11 @@ Cloudflare Rate Limiting 바인딩은 무료 플랜 제공 여부를 공식 문�
   그래서 OTP 엔드포인트는 D1 쓰기 전에 요청 제한을 걸고, 동기화는 차분만 씁니다.
 - Apps Script: 위 `MailApp` 하루 100명. 유료 서비스·Resend·도메인 구매는 사용하지 않습니다.
 - Workers·D1 무료 한도는 **계정 단위**입니다. 공개 페이지를 대량으로 두드려 한도를 소진시키면 구독 API 도
-  실패해 정기 메일이 보류될 수 있습니다(fail-closed). 1차 메모리 제한과 D1 이전 검증으로 줄이지만 완전히
-  막을 수는 없습니다 — DEPLOY.md 15단계로 사용량을 확인하세요.
+  실패해 정기 메일이 보류될 수 있습니다(fail-closed). D1 쓰기는 '막힌 요청은 쓰지 않음 + 전체 요청 예산'으로 보호하지만,
+  **Workers 하루 요청 한도(100,000건)는 Worker 코드가 실행되기 전에 집계되므로 코드로 막을 수 없습니다.** 구독 Worker 를 별도 무료
+  계정에 두면 예약 실행 Worker(scheduler)는 보호되지만, 구독 Worker 자신의 한도 소진 → 내부 동기화 실패 → 그날 KST 09시까지 정기 메일
+  보류라는 구조적 위험은 남습니다(유료 기능 없이 완전히 없애는 방법은 없음). DEPLOY.md 15단계로 사용량을 확인하세요.
+- D1 은 무료 플랜에서도 Time Travel(최근 7일 시점 복원)이 됩니다. 복원·백업 절차와 주의사항은 DEPLOY.md 'D1 백업·복구'.
 - 수치는 2026-10 기준 공식 문서 확인 값이며 바뀔 수 있습니다. 배포 전에 다시 확인하세요.
 
 ## 주요 설정값 (`config.yaml`)

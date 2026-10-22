@@ -31,6 +31,7 @@ from src.subscription import API_VERSION, subscriber_hash
 KEY = "h" * 48
 TOKEN = "token-very-secret-xyz"
 PAGE = "https://law-rader-sub.example.workers.dev/"
+INSTANCE = "a1" * 16
 FSC, FSS = "fsc_press", "fss_press"
 ONLY = f"{FSC},{FSS},{ASSEMBLY_SOURCE_KEY}"
 OLD = "2020-01-01T00:00:00Z"
@@ -96,6 +97,8 @@ class _FakeWorker:
             raise self.error
         body = {
             "api_version": API_VERSION,
+            # 실제 Worker 처럼 D1 식별자를 돌려준다(요청에 있으면 같은 값).
+            "instance": kw["json"].get("instance", INSTANCE),
             "subscribers": [
                 {"subscriber": sid, "mode": self.by_hash.get(sid, ("all", []))[0],
                  "agencies": list(self.by_hash.get(sid, ("all", []))[1])}
@@ -481,8 +484,10 @@ def test_required_but_disabled_dry_run_only_warns(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("value", ["true", "TRUE", " true "])
 def test_required_and_enabled_runs_normally(tmp_path, monkeypatch, value):
-    ctx = _run(tmp_path, monkeypatch, news=MIXED_NEWS, env={"SUBSCRIPTION_REQUIRED": value})
+    ctx = _run(tmp_path, monkeypatch, news=MIXED_NEWS,
+               env={"SUBSCRIPTION_REQUIRED": value, "SUBSCRIPTION_DB_INSTANCE": INSTANCE})
     assert ctx.rc == 0 and len(ctx.sends) == 3
+    assert ctx.worker.calls[0][1]["json"]["instance"] == INSTANCE
 
 
 @pytest.mark.parametrize("value", [None, "", "false", "FALSE"])
@@ -498,3 +503,34 @@ def test_invalid_required_value_is_a_config_error_not_false(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="SUBSCRIPTION_REQUIRED"):
         _run(tmp_path, monkeypatch, enabled=False, news=MIXED_NEWS,
              env={"SUBSCRIPTION_REQUIRED": value})
+
+
+def test_required_without_db_instance_fails_closed(tmp_path, monkeypatch):
+    """Phase 2.6: 정식 운영(REQUIRED=true)에서는 D1 교체 감지 없이 돌지 않는다."""
+    ctx = _run(tmp_path, monkeypatch, news=MIXED_NEWS, env={"SUBSCRIPTION_REQUIRED": "true"})
+    assert ctx.rc == 1
+    assert ctx.worker.calls == [] and ctx.sends == [] and ctx.summarize_calls == 0
+    assert ctx.state_path.read_bytes() == ctx.before
+
+
+@pytest.mark.parametrize(
+    "worker",
+    [
+        # D1 재생성(식별자 없음)·카탈로그 불일치·설정 유실 — Worker 가 409 로 거절
+        _FakeWorker(status=409, mutate=lambda b: {"error": "instance_missing"}),
+        _FakeWorker(status=409, mutate=lambda b: {"error": "catalog_mismatch"}),
+        _FakeWorker(status=409, mutate=lambda b: {"error": "preference_missing"}),
+        # Worker 가 200 이어도 식별자가 다르거나 없으면 Python 이 스스로 거절
+        _FakeWorker(mutate=lambda b: {**b, "instance": "b2" * 16}),
+        _FakeWorker(mutate=lambda b: {k: v for k, v in b.items() if k != "instance"}),
+    ],
+    ids=["instance_missing", "catalog_mismatch", "preference_missing", "other-db", "no-instance"],
+)
+def test_integrity_failures_never_fall_back_to_full_send(tmp_path, monkeypatch, caplog, worker):
+    with caplog.at_level(logging.INFO):
+        ctx = _run(tmp_path, monkeypatch, news=MIXED_NEWS, worker=worker,
+                   env={"SUBSCRIPTION_REQUIRED": "true", "SUBSCRIPTION_DB_INSTANCE": INSTANCE})
+    assert ctx.rc == 1
+    assert ctx.sends == [] and ctx.summarize_calls == 0
+    assert ctx.state_path.read_bytes() == ctx.before
+    assert "구독 설정 조회 실패" in caplog.text

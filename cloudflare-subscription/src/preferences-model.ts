@@ -10,11 +10,14 @@ export interface Effective {
 
 export class CorruptPreference extends Error {}
 
+/** 저장된 선택 기관이 현재 카탈로그에 없다 — 운영 설정 오류. 선택을 추측해 넓히거나 좁히지 않는다. */
+export class CatalogMismatch extends Error {}
+
 /**
  * - 행 없음 / mode=all → 전체 수신
- * - selected → 저장된 기관 중 현재 카탈로그에 있는 것만, 카탈로그 순서로
- * - selected 이고 저장 목록은 비어 있지 않았는데 카탈로그 변경으로 모두 사라짐
- *   → 조용한 수신 중단을 막기 위해 전체 수신으로 본다(README 계약)
+ * - selected → 저장된 기관을 카탈로그 순서로. 저장값은 바꾸지 않는다(기관을 되돌리면 그대로 복원).
+ * - selected 인데 저장된 기관 중 하나라도 현재 카탈로그에 없음 → CatalogMismatch.
+ *   전체 수신으로 확대하면 원하지 않은 기관의 메일이 가고, 조용히 좁히면 선택이 사라진다.
  * - selected + 빈 목록(사용자가 고른 일시중지)은 그대로 둔다
  * 저장값이 손상돼 있으면 예외 — 호출자는 추측하지 않고 실패로 응답한다.
  */
@@ -34,8 +37,8 @@ export function effectivePreference(
   if (!Array.isArray(stored) || !stored.every((a) => typeof a === "string")) {
     throw new CorruptPreference("agencies");
   }
+  const known = new Set(catalogOrder);
+  if ((stored as string[]).some((id) => !known.has(id))) throw new CatalogMismatch("unknown_agency");
   const chosen = new Set(stored as string[]);
-  const kept = catalogOrder.filter((id) => chosen.has(id));
-  if (stored.length > 0 && kept.length === 0) return { mode: "all", agencies: [] };
-  return { mode: "selected", agencies: kept };
+  return { mode: "selected", agencies: catalogOrder.filter((id) => chosen.has(id)) };
 }

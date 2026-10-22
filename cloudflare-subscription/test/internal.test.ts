@@ -116,8 +116,9 @@ describe("동기화와 응답", () => {
     const res = await post(req);
     expect(res.status).toBe(200);
     const body = await res.json<any>();
-    expect(Object.keys(body).sort()).toEqual(["api_version", "subscribers"]);
+    expect(Object.keys(body).sort()).toEqual(["api_version", "instance", "subscribers"]);
     expect(body.api_version).toBe(1);
+    expect(body.instance).toMatch(/^[0-9a-f]{32}$/);
     expect(body.subscribers.map((s: any) => s.subscriber)).toEqual(req.subscribers);
     for (const s of body.subscribers) {
       expect(Object.keys(s).sort()).toEqual(["agencies", "mode", "subscriber"]);
@@ -161,29 +162,7 @@ describe("동기화와 응답", () => {
     expect(await count("SELECT count(*) AS n FROM subscribers WHERE active = 1")).toBe(2);
   });
 
-  it("카탈로그 갱신: 이름 변경·추가는 반영, 사라진 기관은 비활성·응답에서 제외", async () => {
-    await sync(["sel@example.com", "lost@example.com", "paused@example.com"]);
-    await setPref("sel@example.com", "selected", ["fsc", "pipc"]);
-    await setPref("lost@example.com", "selected", ["pipc"]);
-    await setPref("paused@example.com", "selected", []);
-    const next = [
-      { id: "fsc", name: "금융위원회(변경)" },
-      { id: "fss", name: "금융감독원" },
-      { id: "assembly", name: "의안정보시스템" },
-      { id: "newagency", name: "신규 기관" },
-    ];
-    const body = await (await sync(["sel@example.com", "lost@example.com", "paused@example.com"], next)).json<any>();
-    const by = Object.fromEntries(body.subscribers.map((s: any) => [s.subscriber, s]));
-    expect(by[await sid("sel@example.com")]).toMatchObject({ mode: "selected", agencies: ["fsc"] });
-    // 선택한 기관이 전부 사라졌으면 조용히 끊지 않고 전체 수신으로 본다.
-    expect(by[await sid("lost@example.com")]).toMatchObject({ mode: "all", agencies: [] });
-    // 사용자가 고른 일시중지는 그대로.
-    expect(by[await sid("paused@example.com")]).toMatchObject({ mode: "selected", agencies: [] });
-    const agencies = (await env.DB.prepare("SELECT id, name, active FROM agencies ORDER BY id").all()).results;
-    expect(agencies).toContainEqual({ id: "fsc", name: "금융위원회(변경)", active: 1 });
-    expect(agencies).toContainEqual({ id: "pipc", name: "개인정보보호위원회", active: 0 });
-    expect(agencies).toContainEqual({ id: "newagency", name: "신규 기관", active: 1 });
-  });
+  // 카탈로그에서 고른 기관이 빠지는 경우는 test/catalog.test.ts(Phase 2.6: 409 catalog_mismatch)에서 다룬다.
 
   it("변화 없는 재동기화는 아무 행도 쓰지 않는다", async () => {
     await sync(["a@example.com", "b@example.com"]);

@@ -156,6 +156,8 @@ export const APP_JS = `"use strict";
     unauthorized: "로그인이 만료되었습니다. 다시 인증해 주세요.",
     version_conflict: "다른 화면에서 설정이 먼저 바뀌었습니다. 최신 설정을 불러왔으니 다시 확인해 주세요.",
     unknown_agency: "선택할 수 없는 기관이 포함되어 있습니다. 화면을 새로 고쳐 주세요.",
+    catalog_mismatch: "기관 목록이 변경되어 운영자 확인이 필요합니다. 잠시 후 다시 시도해 주세요.",
+    preference_missing: "저장된 설정을 확인할 수 없어 운영자 확인이 필요합니다. 잠시 후 다시 시도해 주세요.",
     network: "서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요."
   };
   function message(code) { return MESSAGES[code] || "요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요."; }

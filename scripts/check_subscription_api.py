@@ -31,12 +31,15 @@ def main() -> int:
     email = dataclasses.replace(
         cfg.email, preferences_url=os.environ.get("SUBSCRIPTION_PAGE_URL", "").strip()
     )
+    meta: dict = {}
     try:
-        groups = resolve_recipient_groups(sub, email)
+        groups = resolve_recipient_groups(sub, email, meta)
     except SubscriptionError as e:
         print(f"실패: {e}")
         return 1
     print(f"성공: 그룹 {len(groups)}개")
+    # 비밀값이 아닌 무작위 식별자다. 운영 전환 전에 GitHub Variable SUBSCRIPTION_DB_INSTANCE 로 등록한다.
+    print(f"  구독 DB 식별자(SUBSCRIPTION_DB_INSTANCE): {meta.get('instance', '(응답에 없음)')}")
     for g in groups:
         print(f"  {g.label}: {len(g.recipients)}명")
     return 0

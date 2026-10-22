@@ -129,6 +129,9 @@ def missing_subscription_settings(sub: SubscriptionConfig, email: EmailConfig) -
         missing.append("SUBSCRIPTION_PAGE_URL(https://)")
     if not sub.agencies:
         missing.append("config.yaml subscription.agencies")
+    if sub.required and not sub.db_instance:
+        # 정식 운영(SUBSCRIPTION_REQUIRED=true)에서는 D1 교체 감지를 끈 채로 돌지 않는다.
+        missing.append("SUBSCRIPTION_DB_INSTANCE(SUBSCRIPTION_REQUIRED=true 일 때 필수)")
     return missing
 
 
@@ -168,16 +171,19 @@ def build_request(sub: SubscriptionConfig, subscriber_ids: list[str]) -> dict:
 
     식별자는 정렬해서 보낸다(MAIL_TO 순서를 서버에 드러내지 않는다).
     """
-    return {
+    payload = {
         "api_version": API_VERSION,
         "key_check": key_check(sub.subscriber_hash_key),
         "subscribers": sorted(set(subscriber_ids)),
         "agencies": [{"id": a.id, "name": a.name} for a in sub.agencies],
     }
+    if sub.db_instance:
+        payload["instance"] = sub.db_instance
+    return payload
 
 
 def parse_response(
-    data, requested: set[str], agency_order: tuple[str, ...]
+    data, requested: set[str], agency_order: tuple[str, ...], expected_instance: str = ""
 ) -> dict[str, Preference]:
     """응답 검증. 계약에 조금이라도 어긋나면 SubscriptionError(부분 수용 없음).
 
@@ -189,6 +195,8 @@ def parse_response(
     version = data.get("api_version")
     if type(version) is not int or version != API_VERSION:
         raise SubscriptionError("구독 API 버전이 일치하지 않습니다")
+    if expected_instance and data.get("instance") != expected_instance:
+        raise SubscriptionError("구독 DB 식별자가 SUBSCRIPTION_DB_INSTANCE 와 일치하지 않습니다")
     items = data.get("subscribers")
     if not isinstance(items, list):
         raise SubscriptionError("구독 API 응답에 subscribers 목록이 없습니다")
@@ -229,8 +237,25 @@ def parse_response(
     return prefs
 
 
-def fetch_preferences(sub: SubscriptionConfig, subscriber_ids: list[str]) -> dict[str, Preference]:
-    """구독 API 1회 호출. 재시도하지 않는다 — 실패하면 실행 전체가 다음 주기에 재시도된다."""
+_ERROR_CODE_RE = re.compile(r"^[a-z_]{1,40}$")
+
+
+def _error_code(resp) -> str:
+    """Worker 오류 응답의 고정 사유 코드(예: catalog_mismatch). 형식이 다르면 빈 문자열."""
+    try:
+        code = json.loads(resp.content.decode("utf-8")).get("error")
+    except (ValueError, AttributeError, RecursionError):
+        return ""
+    return code if isinstance(code, str) and _ERROR_CODE_RE.match(code) else ""
+
+
+def fetch_preferences(
+    sub: SubscriptionConfig, subscriber_ids: list[str], meta: dict | None = None
+) -> dict[str, Preference]:
+    """구독 API 1회 호출. 재시도하지 않는다 — 실패하면 실행 전체가 다음 주기에 재시도된다.
+
+    meta 를 넘기면 응답의 D1 식별자를 meta["instance"] 에 담는다(운영자 점검 스크립트용).
+    """
     payload = build_request(sub, subscriber_ids)
     try:
         resp = requests.post(
@@ -251,7 +276,9 @@ def fetch_preferences(sub: SubscriptionConfig, subscriber_ids: list[str]) -> dic
         raise SubscriptionError(f"구독 API 연결 실패({type(e).__name__})") from None
 
     if resp.status_code != 200:
-        raise SubscriptionError(f"구독 API HTTP {resp.status_code}")
+        # 사유 코드는 Worker 가 정한 고정 문자열이라 개인정보가 없다 — 운영자가 원인을 구분할 수 있게 싣는다.
+        code = _error_code(resp)
+        raise SubscriptionError(f"구독 API HTTP {resp.status_code}" + (f" ({code})" if code else ""))
     body = resp.content or b""
     if len(body) > _MAX_RESPONSE_BYTES:
         raise SubscriptionError("구독 API 응답이 너무 큽니다")
@@ -260,7 +287,12 @@ def fetch_preferences(sub: SubscriptionConfig, subscriber_ids: list[str]) -> dic
     except (ValueError, RecursionError):
         # 과도하게 중첩된 JSON 은 크기 상한 안에서도 RecursionError 를 낸다 — 같은 계약 위반으로 본다.
         raise SubscriptionError("구독 API 응답이 올바른 JSON 이 아닙니다") from None
-    return parse_response(data, set(payload["subscribers"]), tuple(a.id for a in sub.agencies))
+    prefs = parse_response(
+        data, set(payload["subscribers"]), tuple(a.id for a in sub.agencies), sub.db_instance
+    )
+    if meta is not None and isinstance(data.get("instance"), str):
+        meta["instance"] = data["instance"]
+    return prefs
 
 
 # --------------------------------------------------------------------------
@@ -293,13 +325,15 @@ def group_recipients(
     return groups
 
 
-def resolve_recipient_groups(sub: SubscriptionConfig, email: EmailConfig) -> list[RecipientGroup]:
+def resolve_recipient_groups(
+    sub: SubscriptionConfig, email: EmailConfig, meta: dict | None = None
+) -> list[RecipientGroup]:
     """설정 점검 → 식별자 생성 → API 조회·검증 → 그룹화. 어느 단계든 실패하면 예외."""
     missing = missing_subscription_settings(sub, email)
     if missing:
         raise SubscriptionError("구독 설정 누락: " + ", ".join(missing))
     pairs = _unique_recipients(email.recipients, sub.subscriber_hash_key)
-    prefs = fetch_preferences(sub, [sid for _, sid in pairs])
+    prefs = fetch_preferences(sub, [sid for _, sid in pairs], meta)
     groups = group_recipients(pairs, prefs, sub.agencies)
     paused = sum(len(g.recipients) for g in groups if g.sources is not None and not g.agencies)
     everyone = sum(len(g.recipients) for g in groups if g.sources is None)

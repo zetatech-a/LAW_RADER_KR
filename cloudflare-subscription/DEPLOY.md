@@ -40,6 +40,10 @@ LAW RADER KR 기존 구독자가 이메일 인증 후 받을 기관을 고르는
    **기존 `law-rader-kr-scheduler` 가 있는 계정과 다른, 새 무료 계정을 권장합니다.** Workers·D1 무료 한도는 계정 단위라,
    공개 설정 페이지에 요청이 몰려 한도가 소진되면 같은 계정의 예약 실행 Worker 까지 영향을 받을 수 있습니다
    (예약 실행이 요청 한도에 어떻게 집계되는지는 공식 문서로 확인하지 못했습니다).
+   > **별도 계정으로도 막지 못하는 위험(구조적 한계):** 계정을 나누면 예약 실행 Worker 는 보호되지만, 구독 Worker 자신의
+   > 하루 요청 한도(100,000건) 소진은 막지 못합니다. 한도가 소진되면 Python 의 내부 동기화 요청도 실패하고, fail-closed 정책에
+   > 따라 **그날 KST 09시까지 정기 메일이 보류**됩니다(전체 발송으로 되돌아가지 않음). 요청은 Worker 코드가 실행되기 전에
+   > 집계되므로 코드로는 막을 수 없고, 무료 플랜에서는 workers.dev 앞단 WAF 요청 제한도 쓸 수 없습니다. 사용량을 주기적으로 확인하세요.
 2. 왼쪽 메뉴 **Workers & Pages** 를 한 번 열어 workers.dev 하위 도메인을 정합니다(예: `myname`). 주소는 `https://law-rader-subscription.myname.workers.dev` 형태가 됩니다.
 3. 터미널:
    ```bash
@@ -108,8 +112,13 @@ npx wrangler deploy
 일회용 주소로 리다이렉트됩니다. 일부러 잘못된 요청을 보내 응답 형식만 확인합니다:
 ```bash
 read -r APPS_URL   # 웹 앱 URL 붙여 넣기(이 주소도 공개하지 않습니다)
-curl -sL -X POST -H 'Content-Type: application/json' -d '{}' "$APPS_URL"
+curl -sSL \
+  -H 'Content-Type: application/json' \
+  --data '{}' \
+  "$APPS_URL"
 ```
+(`-X POST` 를 쓰지 않습니다 — `-X POST` 는 리다이렉트 뒤에도 POST 를 강제할 수 있어, 리다이렉트 후 GET 으로 결과를 받는
+웹앱 응답 방식과 다르게 동작할 수 있습니다. `--data` 만으로 첫 요청은 POST 가 됩니다.)
 **확인:** `{"ok":false,"error":"bad_request"}` 가 나와야 합니다. HTML(로그인 페이지 등)이 나오면 8-2 의 액세스 설정을 다시 확인하세요.
 > 이 동작(POST → 리다이렉트 → JSON 본문)은 개발 단계에서 실제 Google 서버로 검증하지 못했습니다. 이 확인이 통과해야 다음 단계로 갑니다.
 
@@ -128,7 +137,8 @@ Worker 는 `https://script.google.com/macros/s/<ID>/exec` 형식이 아닌 주�
 | Secret | `SUBSCRIPTION_API_TOKEN` | `INTERNAL_API_TOKEN` 과 같은 값 |
 | Secret | `SUBSCRIBER_HASH_KEY` | Worker 와 같은 값 |
 | Variable | `SUBSCRIPTION_PAGE_URL` | `https://law-rader-subscription.myname.workers.dev/` |
-| Variable | `SUBSCRIPTION_REQUIRED` | **지금은 비워 둡니다**(14단계 마지막에 `true`) |
+| Variable | `SUBSCRIPTION_DB_INSTANCE` | **지금은 비워 둡니다**(14단계에서 운영 D1 식별자 등록) |
+| Variable | `SUBSCRIPTION_REQUIRED` | **지금은 비워 둡니다**(14단계 전환 직전에 `true`) |
 
 `config.yaml` 의 `subscription.enabled` 가 `false` 인 동안에는 이 값들이 있어도 정기 발송은 지금과 똑같습니다.
 
@@ -144,7 +154,7 @@ export SUBSCRIPTION_PAGE_URL=https://law-rader-subscription.myname.workers.dev/
 export MAIL_TO=본인시험주소@gmail.com
 python scripts/check_subscription_api.py
 ```
-**확인:** `성공: 그룹 1개 / all: 1명`.
+**확인:** `성공: 그룹 1개 / all: 1명`. 함께 출력되는 `구독 DB 식별자` 는 이 D1 의 고유값입니다(비밀값 아님, 14단계에서 사용).
 그다음 설정 페이지에서 시험 주소를 입력 → 메일(스팸함 포함)의 6자리 번호 입력 → 설정 화면이 열리면 성공입니다.
 등록되지 않은 다른 주소를 넣으면 화면 안내는 같지만 메일은 오지 않아야 합니다.
 
@@ -156,18 +166,54 @@ python scripts/check_subscription_api.py
 
 ## 13. Python 구독 API 연동 테스트
 - 11·12단계의 `scripts/check_subscription_api.py` 는 정기 실행과 **같은 코드**로 동기화·검증·그룹화를 수행합니다(메일·state 변경 없음).
-- 실패 시 원인 코드: `HTTP 401`(토큰 불일치) · **`HTTP 409`(GitHub 와 Worker 의 `SUBSCRIBER_HASH_KEY` 가 다름 — 두 곳에 같은 값을 다시 등록)** ·
-  `HTTP 500`(Worker Secret 누락·짧음) · `응답에서 구독자 N명 누락`(계약 위반) · `시간 초과`.
+- 실패 시 원인(메시지 괄호 안 코드):
+
+  | 메시지 | 뜻 | 조치 |
+  |---|---|---|
+  | `HTTP 401 (unauthorized)` | 내부 API 토큰 불일치 | GitHub `SUBSCRIPTION_API_TOKEN` 과 Worker `INTERNAL_API_TOKEN` 을 같은 값으로 |
+  | `HTTP 409 (hash_key_mismatch)` | GitHub 와 Worker 의 `SUBSCRIBER_HASH_KEY` 가 다름 | 두 곳에 같은 값을 다시 등록 |
+  | `HTTP 409 (key_changed)` | 두 키가 **함께** 바뀜(최초 동기화 때 키와 다름) | 원래 키로 되돌리기. 의도한 교체는 아래 'HMAC 키 정책' |
+  | `HTTP 409 (instance_missing)` | D1 이 재생성·교체되어 기록된 식별자가 없음 | 아래 'D1 백업·복구' 로 원래 데이터 복원. 의도한 재생성이면 '의도적 변경 절차' |
+  | `HTTP 409 (instance_mismatch)` / `구독 DB 식별자가 … 일치하지 않습니다` | 다른 D1 에 연결됨 | `wrangler.jsonc` 의 database_id·`SUBSCRIPTION_DB_INSTANCE` 확인 |
+  | `HTTP 409 (catalog_mismatch)` | 구독자가 고른 기관이 `config.yaml` 카탈로그에서 빠짐 | 기관을 되돌리거나 '기관 제거 절차' 수행 |
+  | `HTTP 409 (preference_missing)` | 설정을 저장한 적 있는 구독자의 설정 행이 사라짐 | 'D1 백업·복구' 로 복원(운영자 승인 후) |
+  | `HTTP 500 (server_misconfigured)` | Worker Secret 누락·짧음 | 4단계 Secret 확인 |
+  | `응답에서 구독자 N명 누락`·`시간 초과` | 계약 위반·네트워크 | Worker 로그·상태 확인 |
 - Secret 은 `wrangler secret put` 의 **대화형 프롬프트로 입력**하세요. `echo 값 | wrangler secret put` 처럼 파이프로 넣으면
   줄바꿈이 함께 저장될 수 있어(미검증) 401·409 의 원인이 됩니다.
 
 ## 14. 실제 운영 기능 활성화
-1. 운영 `MAIL_TO` 의 주소가 모두 `이름 <주소>` 형식이 아닌 **주소만**으로 되어 있는지 확인합니다(형식이 다르면 활성화 후 발송이 중단됩니다).
-2. `config.yaml` 의 `subscription.enabled: false` → `true` 로 바꾸는 변경을 평소 절차로 main 에 반영합니다.
-3. 다음 정기 실행 로그에서 `구독 설정 조회 완료 — 수신자 N명 / 그룹 1개 (전체 수신 N명 …)` 을 확인합니다.
-   처음에는 모든 기존 구독자가 `mode=all` 이므로 받는 메일은 전과 같습니다. 시험 주소가 MAIL_TO 에 없으면 이때 비활성화됩니다.
-4. 정상 확인 후 GitHub Variable **`SUBSCRIPTION_REQUIRED` = `true`** 로 설정합니다. 이후 실수로 `enabled` 가 `false` 가 되면 실행이 멈춥니다(전체 발송 재개 방지).
-5. 구독자에게 메일 하단 **'수신 기관 설정'** 링크로 설정할 수 있음을 안내합니다.
+
+순서가 중요합니다. **사용자가 설정을 바꿀 수 있게 되기 전에(=메일에 설정 링크가 붙기 전에) 보호장치를 먼저 켭니다.**
+설정 링크는 `enabled: true` 일 때만 메일에 붙습니다.
+
+**보호장치의 전제와 한계(먼저 이해할 것)**
+- `SUBSCRIPTION_REQUIRED` 검사는 ① main 의 Python 코드(이 기능이 들어간 버전) ② `monitor.yml` 의 `SUBSCRIPTION_REQUIRED`·
+  `SUBSCRIPTION_DB_INSTANCE` env 줄 ③ GitHub Variable — **세 가지가 모두 있어야** 작동합니다. 하나라도 없으면 조용히 꺼집니다.
+- **현재 운영 main(이 기능 이전 코드)은 `SUBSCRIPTION_REQUIRED` 를 읽지 않습니다.** 코드를 반영하기 전에 Variable 만 바꿔도 아무 효과가 없습니다.
+- main 을 이 기능 이전 코드로 되돌리면 보호장치도 함께 사라지고, MAIL_TO 전원(일시중지한 사람 포함)에게 전체 메일이 재개됩니다(아래 '롤백').
+
+### 14-A. 스테이징 검증(전환 전)
+1. 11~13단계를 모두 통과합니다(시험 주소만 동기화된 상태, 운영 메일 발송 코드는 아직 기존 그대로).
+2. 다음도 시험 주소로 확인합니다: 의안만 선택 → 점검 스크립트 `selected:assembly`, 일시중지 → `selected:일시중지`, 전체 수신 복귀.
+
+### 14-B. 준비(운영 메일에는 아직 영향 없음)
+3. 운영 `MAIL_TO` 의 주소가 모두 `이름 <주소>` 형식이 아닌 **주소만**으로 되어 있는지 확인합니다(형식이 다르면 전환 후 발송이 중단됩니다).
+4. 운영 `MAIL_TO` 값으로 11단계 점검 스크립트를 실행합니다(시험 주소가 MAIL_TO 에 없으면 이때 비활성화됩니다).
+   출력된 `구독 DB 식별자` 를 GitHub Variable **`SUBSCRIPTION_DB_INSTANCE`** 에 등록합니다.
+5. 이 기능 브랜치를 평소 절차(별도 승인)로 main 에 반영합니다. **`config.yaml` 의 `enabled: false` 그대로** 반영하므로
+   `SUBSCRIPTION_REQUIRED` 가 비어 있는 동안 운영 발송은 기존과 같습니다. 반영 후 정기 실행 1회가 정상인지 확인합니다.
+
+### 14-C. 전환(짧은 시간 안에 이어서)
+6. GitHub Variable **`SUBSCRIPTION_REQUIRED` = `true`**. 이 순간부터 `enabled: false` 인 main 은 **실행을 멈춥니다**
+   (의도된 일시 중단 — 메일·state 변경 없음, 신규 글은 미확정으로 남아 전환 후 발송).
+7. `config.yaml` 의 `subscription.enabled: true` 변경을 main 에 반영합니다. 다음 실행부터 구독 설정에 따라 발송합니다.
+   6과 7 사이가 길어지면 한 게시판의 신규가 50건(의안 75건)을 넘어 일부가 발송 없이 확정될 수 있으니 바로 이어서 진행합니다.
+8. 첫 정기 실행 로그에서 `구독 설정 조회 완료 — 수신자 N명 / 그룹 1개 (전체 수신 N명 …)` 를 확인합니다(409·실패 없음).
+   이 시점에는 모두 `mode=all` 이므로 받는 메일 내용은 전과 같고, 하단에 '수신 기관 설정' 링크가 붙습니다.
+
+### 14-D. 공개
+9. 정상 확인 후 구독자에게 링크로 설정할 수 있음을 안내합니다.
 
 ## 15. 장애 복구 및 비용 사용량 확인
 
@@ -189,19 +235,53 @@ python scripts/check_subscription_api.py
 | 설정 페이지만 하루 종일 `잠시 후 다시 시도` | 설정 변경 불가(정기 메일 영향 없음) | 전체 요청 예산(인증번호 요청 1,000·검증 2,000/일) 소진 — 공격 가능성. KST 09시 해제 |
 | 인증번호 메일이 안 옴 | 설정 변경만 불가(정기 메일 영향 없음) | Apps Script 실행 기록의 거절 코드(`bad_signature`·`quota_exhausted`·`daily_cap`) 확인 |
 | `SUBSCRIPTION_REQUIRED=true 인데 ... false` | 실행 중단(메일·state 변경 없음) | `enabled: true` 로 되돌리기 |
+| `구독 설정 누락: SUBSCRIPTION_DB_INSTANCE(...)` | 실행의 메일 보류 | 14-B-4 의 식별자를 Variable 에 등록 |
+| `HTTP 409 (instance_missing·key_changed·catalog_mismatch·preference_missing)` | 메일 보류(전원 전체 발송 방지) | 13단계 표의 조치 |
 
 장기 장애로 한 게시판의 신규가 50건(의안 75건)을 넘으면, 복구 후 최신 분만 발송되고 나머지는 기존 안전장치에 따라 확정됩니다.
 
 ### 롤백
-- **기능을 끄는 것은 장애 대응이 아닙니다.** `enabled: false` 는 사용자 선택(일시중지 포함)을 무시하고 전원에게 전체 메일을 보냅니다.
-  `SUBSCRIPTION_REQUIRED=true` 상태에서는 실행 자체가 멈춥니다.
-- **모든 메일을 잠시 멈춰야 할 때:** Cloudflare 대시보드에서 `law-rader-kr-scheduler` 의 Cron 트리거를 끄거나 GitHub Actions 의 monitor 워크플로를 비활성화합니다.
-- **구독 기능을 폐지할 때:** ① 구독자에게 사전 공지 ② 설정 페이지에서 일시중지·선택 수신 중인 사람을 확인해 필요하면 `MAIL_TO` 정리
-  ③ `SUBSCRIPTION_REQUIRED` 를 비우기 ④ `enabled: false`. 코드를 이전 버전으로 되돌리면 보호장치(`SUBSCRIPTION_REQUIRED` 검사)도 함께 사라지므로, **코드 되돌리기는 ①~③을 마친 뒤에만** 합니다.
+- **`enabled: false` 는 장애 대응이 아닙니다.** `SUBSCRIPTION_REQUIRED=true` 상태에서는 실행이 멈추고(아래 긴급 정지),
+  `SUBSCRIPTION_REQUIRED` 가 비어 있으면 사용자 선택(일시중지 포함)을 무시하고 전원에게 전체 메일을 보냅니다.
+- **긴급 정지(모든 메일을 잠시 멈춤):** 가장 단순한 방법은 `SUBSCRIPTION_REQUIRED=true` 인 상태에서 `enabled: false` 를 main 에
+  반영하는 것입니다(실행이 시작 직후 멈춤, state 변경 없음). 또는 `law-rader-kr-scheduler` 의 Cron 트리거와 GitHub Actions monitor 워크플로를 끕니다.
+- **main 을 이 기능 이전 코드로 되돌릴 때(위험):** 되돌린 코드에는 보호장치가 없어 **MAIL_TO 전원에게 전체 메일이 재개**됩니다. 반드시
+  ① 긴급 정지로 먼저 발송을 멈추고 ② 구독자에게 공지하고 ③ D1 에서 일시중지·선택 수신 현황을 확인해 필요하면 MAIL_TO 를 정리한 뒤
+  ④ 코드를 되돌리고 ⑤ 발송을 재개합니다. 가능하면 되돌리기 대신 문제 부분만 고치는 반영(fix-forward)을 우선합니다.
+
+### D1 백업·복구(무료)
+[공식 문서](https://developers.cloudflare.com/d1/reference/time-travel/) 기준으로 D1 은 Time Travel(시점 복원)이 항상 켜져 있으며,
+[무료 플랜 보존 기간은 7일](https://developers.cloudflare.com/d1/platform/limits/)(유료 30일)입니다.
+
+1. **저장 엔진 확인:** `npx wrangler d1 info law-rader-subscription` → `version` 이 `production` 이어야 Time Travel 대상입니다.
+2. **사용 가능 여부 확인(읽기 전용):** `npx wrangler d1 time-travel info law-rader-subscription` → 현재 bookmark 가 출력되면 사용 가능합니다.
+3. **복원:** `npx wrangler d1 time-travel restore law-rader-subscription --timestamp=<UNIX 초 또는 RFC3339>`
+   - **운영자 승인 후에만** 실행합니다. 복원은 DB 를 **제자리에서 덮어쓰고** 진행 중인 쿼리를 취소합니다 — 그 순간의 동기화는
+     실패해 해당 실행의 메일이 보류되고, 복원 시점 이후에 저장된 설정·세션은 사라집니다.
+   - 복원 결과로 출력되는 이전 bookmark 로 되돌릴 수 있습니다. 10분에 10회까지 가능합니다.
+   - 복원 직후 11단계 점검 스크립트로 `구독 DB 식별자` 가 Variable 과 같은지 확인합니다.
+4. **DB 내부 데이터 오류 vs DB 삭제·교체:** Time Travel 은 **같은 DB 안에서** 과거 시점으로 되돌립니다(행 삭제·잘못된 수정 복구용).
+   DB 자체를 삭제하거나 다른 DB 로 바꾼 경우 그 이전 데이터를 Time Travel 로 되살릴 수 있는지는 공식 문서로 확인하지 못했습니다.
+   이에 대비해 월 1회 정도 `npx wrangler d1 export law-rader-subscription --remote --output=<경로>` 로 SQL 백업을 받아 둡니다
+   (export 중에는 다른 요청이 막히므로 정기 실행 시간 밖에 — 예: 평일 KST 18:30 이후·주말 — 수행).
+5. **백업 파일 취급:** 이메일 원문은 없지만 구독자 식별자(가명정보)·수신 설정·세션 해시가 들어 있어 **개인정보로 취급**합니다.
+   저장소·채팅·메일에 올리지 않고, 암호화된 저장소에 보관하며, 보관 기간(예: 3개월)이 지나면 삭제합니다.
+
+### 의도적 변경 절차
+- **기관 제거:** 그 기관을 고른 구독자가 있으면 `catalog_mismatch` 로 발송이 멈춥니다(조용히 넓히거나 좁히지 않음). 제거 전에
+  ① 영향 인원 확인 `npx wrangler d1 execute law-rader-subscription --remote --command "SELECT count(*) FROM preferences p, json_each(p.agencies) a WHERE a.value = '기관ID'"`
+  ② 해당 구독자에게 공지 ③ 선택 목록에서 그 기관만 빼기(그 기관만 골랐던 사람은 '일시중지'가 됨 — 공지에 포함)
+  `UPDATE preferences SET agencies = (SELECT json_group_array(value) FROM json_each(preferences.agencies) WHERE value <> '기관ID'), version = version + 1 WHERE EXISTS (SELECT 1 FROM json_each(preferences.agencies) WHERE value = '기관ID')`
+  ④ 그다음 `config.yaml` 에서 기관을 제거합니다.
+- **D1 을 의도적으로 새로 만들 때:** 기존 설정은 사라집니다(공지 필요, 또는 export 백업에서 복원). `SUBSCRIPTION_DB_INSTANCE` 를 비우면
+  `SUBSCRIPTION_REQUIRED=true` 상태에서는 발송이 멈추므로, 새 D1 마이그레이션 → 점검 스크립트로 새 식별자 확인 → Variable 갱신을 바로 이어서 합니다.
+- **설정 유실(`preference_missing`)을 복원하지 않고 해소해야 할 때:** 해당 구독자를 '전체 수신'으로 되돌리는 결정이므로 본인에게 알린 뒤
+  `UPDATE subscribers SET pref_saved = 0 WHERE subscriber NOT IN (SELECT subscriber FROM preferences)` 를 실행합니다.
 
 ## HMAC 키(`SUBSCRIBER_HASH_KEY`) 정책
 - 최초 설정 후 **고정**합니다. 실제 값은 Cloudflare Secret 과 GitHub Secret 에만 두며 git 추적 파일·문서·채팅에 기록하지 않습니다.
-- 키를 바꾸면 모든 구독자의 식별자가 바뀌어 **저장된 기관 선택이 전부 '모든 기관 수신'으로 초기화**됩니다. 조용한 키 교체는 금지합니다.
+- 키를 바꾸면 모든 구독자의 식별자가 바뀝니다. 한쪽만 바뀌면 `hash_key_mismatch`, 두 곳이 함께 바뀌면 `key_changed`(D1 에 남은 최초 키 확인값과
+  비교)로 **발송이 멈춥니다** — 저장된 선택이 '모든 기관 수신'으로 조용히 초기화되지는 않습니다. 조용한 키 교체는 금지합니다.
 - 유출이 의심되면 즉시 교체하지 말고, 설정을 보존하는 별도 마이그레이션(이전 키·새 키 식별자 대응표 생성 → D1 일괄 변환)을 먼저 준비합니다.
   현재 버전에는 자동 키 회전 기능이 없습니다.
 
