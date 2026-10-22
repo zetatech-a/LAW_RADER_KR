@@ -5,7 +5,7 @@
 // 실패는 절대 200 으로 응답하지 않는다(Python 은 200 이외를 모두 발송 중단으로 처리한다).
 // 로그에는 건수만 남기고 식별자·토큰은 남기지 않는다.
 
-import { sha256Hex, timingSafeEqual } from "./crypto";
+import { hmacHex, sha256Hex, timingSafeEqual } from "./crypto";
 import { strongSecret, type Env } from "./env";
 import { HttpError, json, nowSec, readJson } from "./http";
 import { CorruptPreference, effectivePreference } from "./preferences-model";
@@ -16,6 +16,8 @@ const MAX_SUBSCRIBERS = 5000;
 const MAX_AGENCIES = 50;
 const SUBSCRIBER_RE = /^[0-9a-f]{64}$/;
 export const AGENCY_ID_RE = /^[a-z][a-z0-9_]{0,31}$/;
+/** Python src/subscription.py KEY_CHECK_MESSAGE 와 같은 고정 문구. */
+export const KEY_CHECK_MESSAGE = "lrk-subscriber-key-check-v1";
 
 interface Agency {
   id: string;
@@ -23,6 +25,7 @@ interface Agency {
 }
 
 interface SyncRequest {
+  keyCheck: string;
   subscribers: string[];
   agencies: Agency[];
 }
@@ -47,6 +50,9 @@ export function validateSyncRequest(body: unknown): SyncRequest {
   if (typeof version !== "number" || !Number.isInteger(version) || version !== API_VERSION) {
     bad("unsupported_api_version");
   }
+
+  const keyCheck = obj.key_check;
+  if (typeof keyCheck !== "string" || !SUBSCRIBER_RE.test(keyCheck)) bad("bad_key_check");
 
   const subscribers = obj.subscribers;
   if (!Array.isArray(subscribers) || subscribers.length === 0) bad("empty_subscribers");
@@ -76,7 +82,7 @@ export function validateSyncRequest(body: unknown): SyncRequest {
     seenIds.add(id as string);
     parsed.push({ id: id as string, name: trimmed });
   }
-  return { subscribers: subs as string[], agencies: parsed };
+  return { keyCheck: keyCheck as string, subscribers: subs as string[], agencies: parsed };
 }
 
 // 고정 개수의 집합 단위 SQL. 구독자 수와 무관하게 batch 1회(= D1 호출 1회)이며, 목록은 JSON
@@ -127,6 +133,15 @@ export async function handleSyncAndResolve(request: Request, env: Env): Promise<
   const type = request.headers.get("Content-Type") ?? "";
   if (!/^application\/json(\s*;|$)/i.test(type)) throw new HttpError(415, "unsupported_media_type");
   const req = validateSyncRequest(await readJson(request, MAX_BODY_BYTES));
+  // 두 곳(GitHub·Worker)에 등록한 SUBSCRIBER_HASH_KEY 가 다르면 모든 식별자가 새 구독자로 보여
+  // 기존 구독자는 비활성화되고 전원이 mode=all 로 응답된다(사용자 선택이 조용히 무시됨).
+  // DB 를 건드리기 전에 키 일치를 확인하고, 다르면 성공으로 응답하지 않는다.
+  if (!strongSecret(env.SUBSCRIBER_HASH_KEY)) throw new HttpError(500, "server_misconfigured");
+  const expectedCheck = await hmacHex(env.SUBSCRIBER_HASH_KEY, KEY_CHECK_MESSAGE);
+  if (!timingSafeEqual(req.keyCheck, expectedCheck)) {
+    console.error("sync: subscriber hash key mismatch");
+    throw new HttpError(409, "hash_key_mismatch");
+  }
 
   const now = nowSec();
   const subsJson = JSON.stringify(req.subscribers);

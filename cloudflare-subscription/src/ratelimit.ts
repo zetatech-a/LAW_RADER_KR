@@ -68,10 +68,15 @@ export async function bump(env: Env, windows: Window[], now: number): Promise<nu
   return results.map((r) => r.results?.[0]?.count ?? Number.POSITIVE_INFINITY);
 }
 
-/** 창의 현재 값(올리지 않음). */
-export async function peek(env: Env, w: Window, now: number): Promise<number> {
-  const row = await env.DB.prepare(SQL_PEEK)
-    .bind(await bucketKey(env, w), windowStart(now, w.seconds))
-    .first<{ count: number }>();
-  return row?.count ?? 0;
+/**
+ * 여러 창의 현재 값을 읽기만 한다(batch 1회). 이미 한도에 걸린 요청을 D1 에 '쓰기 전에' 거르는
+ * 데 쓴다 — 거절될 요청까지 카운터를 올리면 공격 한 IP 로도 D1 무료 쓰기 한도(하루 10만 행)를
+ * 소진시켜, fail-closed 인 정기 메일까지 멈출 수 있다.
+ */
+export async function peekMany(env: Env, windows: Window[], now: number): Promise<number[]> {
+  const stmts = await Promise.all(
+    windows.map(async (w) => env.DB.prepare(SQL_PEEK).bind(await bucketKey(env, w), windowStart(now, w.seconds))),
+  );
+  const results = await env.DB.batch<{ count: number }>(stmts);
+  return results.map((r) => r.results?.[0]?.count ?? 0);
 }

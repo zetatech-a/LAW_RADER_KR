@@ -43,6 +43,12 @@ def test_python_matches_shared_vectors(case):
         assert subscriber_hash(case["input"], VECTORS["key"]) == case["hash"]
 
 
+def test_python_key_check_matches_shared_vector():
+    from src.subscription import key_check
+
+    assert key_check(VECTORS["key"]) == VECTORS["key_check"]
+
+
 # --------------------------------------------------------------------------
 # 로컬 Worker 실연동(선택)
 # --------------------------------------------------------------------------

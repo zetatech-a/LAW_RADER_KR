@@ -12,7 +12,13 @@ describe("Python 과 같은 정규화·식별자(공통 벡터)", () => {
       }
     });
   }
+  it("key_check 도 Python 과 같다", async () => {
+    const { hmacHex } = await import("../src/crypto");
+    const { KEY_CHECK_MESSAGE } = await import("../src/internal");
+    expect(await hmacHex(vectors.key, KEY_CHECK_MESSAGE)).toBe(vectors.key_check);
+  });
   it("벡터에 유효·무효 사례가 모두 있다", () => {
+
     expect(vectors.cases.filter((c) => c.hash !== null).length).toBeGreaterThanOrEqual(5);
     expect(vectors.cases.filter((c) => c.hash === null).length).toBeGreaterThanOrEqual(5);
   });

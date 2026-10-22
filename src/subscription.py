@@ -47,6 +47,10 @@ _MODES = frozenset({MODE_ALL, MODE_SELECTED})
 _SUBSCRIBER_RE = re.compile(r"^[0-9a-f]{64}$")
 # HMAC 키 최소 길이(문자). 짧은 키는 주소 사전 대입으로 식별자를 되돌릴 여지를 키운다.
 MIN_HASH_KEY_CHARS = 32
+# 키 일치 확인용 고정 문구. key_check = HMAC(SUBSCRIBER_HASH_KEY, 이 문구) 를 함께 보내면 Worker 가
+# 자기 키로 같은 값을 계산해 비교한다 — 두 곳에 등록한 키가 다르면 모든 식별자가 '새 구독자'로
+# 보여 전원 mode=all 로 응답되는(사용자 선택이 조용히 무시되는) 사고를 409 로 막는다.
+KEY_CHECK_MESSAGE = "lrk-subscriber-key-check-v1"
 # 응답 본문 상한. 수신자 수 × 기관 수 규모면 충분하다 — 비정상 응답을 통째로 읽지 않는다.
 _MAX_RESPONSE_BYTES = 1_000_000
 
@@ -154,6 +158,11 @@ def _unique_recipients(recipients: list[str], key: str) -> list[tuple[str, str]]
     return pairs
 
 
+def key_check(key: str) -> str:
+    """HMAC-SHA256(key, KEY_CHECK_MESSAGE) 소문자 hex — 키 자체는 드러내지 않는다."""
+    return hmac.new(key.encode("utf-8"), KEY_CHECK_MESSAGE.encode("ascii"), hashlib.sha256).hexdigest()
+
+
 def build_request(sub: SubscriptionConfig, subscriber_ids: list[str]) -> dict:
     """POST /internal/sync-and-resolve 요청 본문.
 
@@ -161,6 +170,7 @@ def build_request(sub: SubscriptionConfig, subscriber_ids: list[str]) -> dict:
     """
     return {
         "api_version": API_VERSION,
+        "key_check": key_check(sub.subscriber_hash_key),
         "subscribers": sorted(set(subscriber_ids)),
         "agencies": [{"id": a.id, "name": a.name} for a in sub.agencies],
     }

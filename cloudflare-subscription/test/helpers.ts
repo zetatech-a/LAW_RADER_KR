@@ -7,6 +7,7 @@ import { vi } from "vitest";
 import { hmacHex, subscriberId } from "../src/crypto";
 import type { Env } from "../src/env";
 import worker from "../src/index";
+import { KEY_CHECK_MESSAGE } from "../src/internal";
 import { canonicalOtpMessage } from "../src/mailer";
 import { resetMemoryLimiter } from "../src/ratelimit";
 
@@ -56,7 +57,8 @@ export const sid = (email: string) => subscriberId(email.trim().toLowerCase(), e
 
 export async function syncRequest(emails: string[], catalog = CATALOG, overrides: Record<string, unknown> = {}) {
   const subscribers = (await Promise.all(emails.map(sid))).sort();
-  return { api_version: 1, subscribers, agencies: catalog, ...overrides };
+  const key_check = await hmacHex(env.SUBSCRIBER_HASH_KEY, KEY_CHECK_MESSAGE);
+  return { api_version: 1, key_check, subscribers, agencies: catalog, ...overrides };
 }
 
 export async function sync(emails: string[], catalog = CATALOG, opts: CallOptions = {}): Promise<Response> {

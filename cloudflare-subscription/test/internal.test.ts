@@ -1,6 +1,8 @@
 // POST /internal/sync-and-resolve — Python API 계약 v1 호환성.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
+import { hmacHex } from "../src/crypto";
+import { KEY_CHECK_MESSAGE } from "../src/internal";
 import { CATALOG, call, env, login, resetDb, sid, sync, syncRequest } from "./helpers";
 
 beforeEach(resetDb);
@@ -40,6 +42,37 @@ describe("인증", () => {
       headers: { Authorization: "Bearer " },
     });
     expect(res.status).toBe(500);
+    expect(await count("SELECT count(*) AS n FROM subscribers")).toBe(0);
+  });
+});
+
+describe("구독자 식별 키 일치 확인(key_check)", () => {
+  it("GitHub 와 Worker 의 SUBSCRIBER_HASH_KEY 가 다르면 409 — 성공으로 응답하지 않고 DB 도 그대로", async () => {
+    await sync(["paused@example.com", "asm@example.com"]);
+    await setPref("paused@example.com", "selected", []);
+    await setPref("asm@example.com", "selected", ["assembly"]);
+    const before = (await env.DB.prepare("SELECT * FROM subscribers ORDER BY subscriber").all()).results;
+    // Python 쪽에 다른 키가 등록된 상황: 식별자와 key_check 가 모두 그 키로 계산된다.
+    const wrongKey = "a-different-key-pasted-in-github-0123456789";
+    const res = await post({
+      api_version: 1,
+      key_check: await hmacHex(wrongKey, KEY_CHECK_MESSAGE),
+      subscribers: [await hmacHex(wrongKey, "paused@example.com"), await hmacHex(wrongKey, "asm@example.com")].sort(),
+      agencies: CATALOG,
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "hash_key_mismatch" });
+    expect((await env.DB.prepare("SELECT * FROM subscribers ORDER BY subscriber").all()).results).toEqual(before);
+    expect(await count("SELECT count(*) AS n FROM preferences")).toBe(2);
+  });
+
+  it("key_check 누락·형식 오류는 400, Worker 키가 없으면 500", async () => {
+    const base = await syncRequest(["a@example.com"]);
+    const { key_check: _omit, ...missing } = base;
+    expect(await (await post(missing)).json()).toEqual({ error: "bad_key_check" });
+    expect(await (await post({ ...base, key_check: "ABC" })).json()).toEqual({ error: "bad_key_check" });
+    const noKey = await post(base, { env: { ...env, SUBSCRIBER_HASH_KEY: "" } as Env });
+    expect(noKey.status).toBe(500);
     expect(await count("SELECT count(*) AS n FROM subscribers")).toBe(0);
   });
 });

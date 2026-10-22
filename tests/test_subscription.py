@@ -284,6 +284,11 @@ def test_request_payload_contains_hashes_and_catalog_only(monkeypatch):
     fetch_preferences(_sub(), ids)
     payload = captured["json"]
     assert payload["api_version"] == API_VERSION
+    # 키 일치 확인값: 키 자체가 아니라 HMAC(키, 고정 문구)
+    assert payload["key_check"] == hmac.new(
+        KEY.encode(), b"lrk-subscriber-key-check-v1", hashlib.sha256
+    ).hexdigest()
+    assert KEY not in json.dumps(payload)
     assert payload["subscribers"] == sorted(set(ids))       # 정렬·중복 제거
     assert payload["agencies"] == [{"id": a.id, "name": a.name} for a in AGENCIES]
     assert "@" not in json.dumps(payload, ensure_ascii=False)  # 평문 주소 없음

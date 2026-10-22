@@ -22,7 +22,7 @@ import {
   sessionCookie,
 } from "./http";
 import { sendOtpMail } from "./mailer";
-import { bump, peek, type Window } from "./ratelimit";
+import { bump, peekMany, type Window } from "./ratelimit";
 
 export const OTP_TTL_SEC = 10 * 60;
 export const OTP_MAX_ATTEMPTS = 5;
@@ -32,9 +32,15 @@ export const LIMITS = {
   ipPerHour: 10,
   globalSendsPerDay: 30,
   verifyPerIpHour: 20,
+  // 계정 단위 D1 무료 쓰기 한도 보호용 전체 예산(UTC 하루). 이 이상은 설정 페이지만 하루 잠기고
+  // 정기 메일 동기화(D1)는 영향을 받지 않는다. 정상 사용량(하루 수십 건)보다 넉넉히 크다.
+  otpRequestsPerDay: 1_000,
+  verifyRequestsPerDay: 2_000,
 } as const;
 const MAX_BODY_BYTES = 2048;
 const GLOBAL_SENDS: Window = { kind: "otp_sent_global", subject: "", seconds: 86_400 };
+const GLOBAL_OTP_REQUESTS: Window = { kind: "otp_requests_global", subject: "", seconds: 86_400 };
+const GLOBAL_VERIFY_REQUESTS: Window = { kind: "verify_requests_global", subject: "", seconds: 86_400 };
 
 function assertSecrets(env: Env): void {
   if (!strongSecret(env.SERVER_SECRET) || !strongSecret(env.SUBSCRIBER_HASH_KEY)) {
@@ -50,22 +56,31 @@ export async function handleOtpRequest(request: Request, env: Env, ctx: Executio
   if (!email) throw new HttpError(400, "invalid_email");
 
   const now = nowSec();
-  const ip = clientIp(request);
-  const [per15m, perDay, perIp] = await bump(
+  const ipHour: Window = { kind: "otp_ip_hour", subject: clientIp(request), seconds: 3_600 };
+  const email15m: Window = { kind: "otp_email_15m", subject: email, seconds: 900 };
+  const emailDay: Window = { kind: "otp_email_day", subject: email, seconds: 86_400 };
+  // 1) 읽기만: 이미 막힌 요청은 D1 에 쓰지 않는다(무료 쓰기 한도 보호). 구독자 여부와 무관하게 같다.
+  const [ipSoFar, email15mSoFar, emailDaySoFar, sentToday, requestsToday] = await peekMany(
     env,
-    [
-      { kind: "otp_email_15m", subject: email, seconds: 900 },
-      { kind: "otp_email_day", subject: email, seconds: 86_400 },
-      { kind: "otp_ip_hour", subject: ip, seconds: 3_600 },
-    ],
+    [ipHour, email15m, emailDay, GLOBAL_SENDS, GLOBAL_OTP_REQUESTS],
     now,
   );
-  const sentToday = await peek(env, GLOBAL_SENDS, now);
+  if (
+    ipSoFar >= LIMITS.ipPerHour ||
+    email15mSoFar >= LIMITS.emailPer15m ||
+    emailDaySoFar >= LIMITS.emailPerDay ||
+    sentToday >= LIMITS.globalSendsPerDay ||
+    requestsToday >= LIMITS.otpRequestsPerDay
+  ) {
+    throw new HttpError(429, "rate_limited");
+  }
+  // 2) 원자적으로 올린 뒤 다시 확인(동시 요청이 사전 검사를 함께 통과한 경우).
+  const [per15m, perDay, perIp, requests] = await bump(env, [email15m, emailDay, ipHour, GLOBAL_OTP_REQUESTS], now);
   if (
     per15m > LIMITS.emailPer15m ||
     perDay > LIMITS.emailPerDay ||
     perIp > LIMITS.ipPerHour ||
-    sentToday >= LIMITS.globalSendsPerDay
+    requests > LIMITS.otpRequestsPerDay
   ) {
     throw new HttpError(429, "rate_limited");
   }
@@ -117,8 +132,16 @@ export async function handleOtpVerify(request: Request, env: Env): Promise<Respo
   if (!email || typeof code !== "string" || !/^\d{6}$/.test(code)) throw new HttpError(400, "invalid_input");
 
   const now = nowSec();
-  const [perIp] = await bump(env, [{ kind: "verify_ip_hour", subject: clientIp(request), seconds: 3_600 }], now);
-  if (perIp > LIMITS.verifyPerIpHour) throw new HttpError(429, "rate_limited");
+  const verifyIp: Window = { kind: "verify_ip_hour", subject: clientIp(request), seconds: 3_600 };
+  // 읽기만 먼저 — 이미 막힌 요청은 D1 에 쓰지 않는다.
+  const [ipSoFar, verifiesToday] = await peekMany(env, [verifyIp, GLOBAL_VERIFY_REQUESTS], now);
+  if (ipSoFar >= LIMITS.verifyPerIpHour || verifiesToday >= LIMITS.verifyRequestsPerDay) {
+    throw new HttpError(429, "rate_limited");
+  }
+  const [perIp, verifies] = await bump(env, [verifyIp, GLOBAL_VERIFY_REQUESTS], now);
+  if (perIp > LIMITS.verifyPerIpHour || verifies > LIMITS.verifyRequestsPerDay) {
+    throw new HttpError(429, "rate_limited");
+  }
 
   const sid = await subscriberId(email, env.SUBSCRIBER_HASH_KEY);
   // 비교 전에 시도 횟수를 먼저 원자적으로 올린다 — 병렬 요청으로 5회 제한을 넘을 수 없다.

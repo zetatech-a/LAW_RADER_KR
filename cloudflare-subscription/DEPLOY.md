@@ -37,6 +37,9 @@ LAW RADER KR 기존 구독자가 이메일 인증 후 받을 기관을 고르는
 
 ## 1. Cloudflare 무료 계정 준비
 1. https://dash.cloudflare.com 에서 가입합니다. **결제 수단을 등록하지 않습니다**(무료 한도를 넘으면 오류가 날 뿐 자동 과금되지 않습니다).
+   **기존 `law-rader-kr-scheduler` 가 있는 계정과 다른, 새 무료 계정을 권장합니다.** Workers·D1 무료 한도는 계정 단위라,
+   공개 설정 페이지에 요청이 몰려 한도가 소진되면 같은 계정의 예약 실행 Worker 까지 영향을 받을 수 있습니다
+   (예약 실행이 요청 한도에 어떻게 집계되는지는 공식 문서로 확인하지 못했습니다).
 2. 왼쪽 메뉴 **Workers & Pages** 를 한 번 열어 workers.dev 하위 도메인을 정합니다(예: `myname`). 주소는 `https://law-rader-subscription.myname.workers.dev` 형태가 됩니다.
 3. 터미널:
    ```bash
@@ -153,7 +156,10 @@ python scripts/check_subscription_api.py
 
 ## 13. Python 구독 API 연동 테스트
 - 11·12단계의 `scripts/check_subscription_api.py` 는 정기 실행과 **같은 코드**로 동기화·검증·그룹화를 수행합니다(메일·state 변경 없음).
-- 실패 시 원인 코드: `HTTP 401`(토큰 불일치) · `HTTP 500`(Worker Secret 누락·짧음) · `응답에서 구독자 N명 누락`(계약 위반) · `시간 초과`.
+- 실패 시 원인 코드: `HTTP 401`(토큰 불일치) · **`HTTP 409`(GitHub 와 Worker 의 `SUBSCRIBER_HASH_KEY` 가 다름 — 두 곳에 같은 값을 다시 등록)** ·
+  `HTTP 500`(Worker Secret 누락·짧음) · `응답에서 구독자 N명 누락`(계약 위반) · `시간 초과`.
+- Secret 은 `wrangler secret put` 의 **대화형 프롬프트로 입력**하세요. `echo 값 | wrangler secret put` 처럼 파이프로 넣으면
+  줄바꿈이 함께 저장될 수 있어(미검증) 401·409 의 원인이 됩니다.
 
 ## 14. 실제 운영 기능 활성화
 1. 운영 `MAIL_TO` 의 주소가 모두 `이름 <주소>` 형식이 아닌 **주소만**으로 되어 있는지 확인합니다(형식이 다르면 활성화 후 발송이 중단됩니다).
@@ -179,6 +185,8 @@ python scripts/check_subscription_api.py
 |---|---|---|
 | Actions 로그 `구독 설정 조회 실패(...)` | **해당 실행의 메일 보류**(전체 발송으로 복귀하지 않음). 신규 글은 미확정으로 남아 복구 후 발송 | Worker 상태·Secret 확인. 복구되면 다음 실행이 자동 발송 |
 | `HTTP 503`·D1 오류 | 위와 같음 | D1 무료 한도 초과면 KST 09시에 자동 해제. 대시보드에서 이상 요청 확인 |
+| `HTTP 409`(hash_key_mismatch) | 해당 실행의 메일 보류(전원 전체 발송 방지) | GitHub Secret 과 Worker Secret 의 `SUBSCRIBER_HASH_KEY` 를 같은 값으로 다시 등록 |
+| 설정 페이지만 하루 종일 `잠시 후 다시 시도` | 설정 변경 불가(정기 메일 영향 없음) | 전체 요청 예산(인증번호 요청 1,000·검증 2,000/일) 소진 — 공격 가능성. KST 09시 해제 |
 | 인증번호 메일이 안 옴 | 설정 변경만 불가(정기 메일 영향 없음) | Apps Script 실행 기록의 거절 코드(`bad_signature`·`quota_exhausted`·`daily_cap`) 확인 |
 | `SUBSCRIPTION_REQUIRED=true 인데 ... false` | 실행 중단(메일·state 변경 없음) | `enabled: true` 로 되돌리기 |
 

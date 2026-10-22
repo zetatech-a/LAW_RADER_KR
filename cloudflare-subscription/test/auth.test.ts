@@ -128,6 +128,34 @@ describe("인증번호 요청", () => {
     expect(mail.sent).toHaveLength(0);
   });
 
+  it("한도에 걸린 뒤의 요청은 D1 에 쓰지 않는다(무료 쓰기 한도 소진 방지)", async () => {
+    freezeInDay(7_200 + 60);
+    stubAppsScript();
+    for (let i = 0; i < LIMITS.ipPerHour; i++) await requestOtp(`u${i}@example.com`, "198.51.100.9");
+    const snapshot = async () => JSON.stringify((await env.DB.prepare("SELECT * FROM rate_limits ORDER BY bucket, window_start").all()).results);
+    const before = await snapshot();
+    for (let i = 0; i < 20; i++) {
+      expect((await requestOtp(`flood${i}@example.com`, "198.51.100.9")).status).toBe(429);
+    }
+    expect(await snapshot()).toBe(before);
+  });
+
+  it("전체 하루 요청 예산을 넘으면 구독자·비구독자 모두 429 이고 쓰기 없음", async () => {
+    freezeInDay(3_600);
+    await sync(["member@example.com"]);
+    const now = Math.floor(Date.now() / 1000);
+    const start = now - (now % 86_400);
+    await env.DB.prepare("INSERT INTO rate_limits VALUES ('otp_requests_global', ?1, ?2, ?3)")
+      .bind(start, LIMITS.otpRequestsPerDay, start + 86_400).run();
+    const mail = stubAppsScript();
+    const rows = () => count("SELECT count(*) AS n FROM rate_limits");
+    const before = await rows();
+    expect((await requestOtp("member@example.com", "192.0.2.1")).status).toBe(429);
+    expect((await requestOtp("stranger@example.com", "192.0.2.2")).status).toBe(429);
+    expect(await rows()).toBe(before);
+    expect(mail.sent).toHaveLength(0);
+  });
+
   it("Apps Script 실패(ok:false·HTTP 오류·네트워크)여도 사용자 응답은 같고 로그에 개인정보 없음", async () => {
     await sync(["member@example.com"]);
     const errors = vi.spyOn(console, "error");
@@ -262,6 +290,23 @@ describe("인증번호 검증과 세션", () => {
       statuses.push((await verify("stranger@example.com", "123456", "198.51.100.200")).status);
     }
     expect(statuses.at(-1)).toBe(429);
+  });
+
+  it("검증도 한도에 걸린 뒤에는 쓰지 않고, 전체 하루 검증 예산을 넘으면 429", async () => {
+    freezeInDay(7_200 + 60);
+    await sync(["user@example.com"]);
+    for (let i = 0; i < LIMITS.verifyPerIpHour; i++) await verify("stranger@example.com", "123456", "198.51.100.8");
+    const snapshot = async () => JSON.stringify((await env.DB.prepare("SELECT * FROM rate_limits ORDER BY bucket").all()).results);
+    const before = await snapshot();
+    for (let i = 0; i < 10; i++) expect((await verify("stranger@example.com", "123456", "198.51.100.8")).status).toBe(429);
+    expect(await snapshot()).toBe(before);
+
+    const now = Math.floor(Date.now() / 1000);
+    const start = now - (now % 86_400);
+    await env.DB.prepare(
+      "INSERT INTO rate_limits VALUES ('verify_requests_global', ?1, ?2, ?3) ON CONFLICT DO UPDATE SET count = ?2",
+    ).bind(start, LIMITS.verifyRequestsPerDay, start + 86_400).run();
+    expect((await verify("user@example.com", "123456", "192.0.2.77")).status).toBe(429);
   });
 
   it("세션은 30분 후 만료", async () => {

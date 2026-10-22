@@ -374,6 +374,7 @@ npm run deploy -- --secrets-file .dev.vars
 ```json
 {
   "api_version": 1,
+  "key_check": "9b2e…(HMAC-SHA256(SUBSCRIBER_HASH_KEY, \"lrk-subscriber-key-check-v1\") hex 64자)",
   "subscribers": [
     "1f0c…(HMAC-SHA256 hex 64자, 정렬·중복 제거)",
     "9a7e…"
@@ -407,11 +408,16 @@ npm run deploy -- --secrets-file .dev.vars
 - `mode` 는 `all`/`selected` 만. `mode=all` 이면 `agencies` 는 빈 목록이어야 합니다.
   `selected` + 빈 목록은 정상(일시중지)입니다. 기관 ID 는 요청 카탈로그에 있는 것만, 중복 없이.
 - `api_version` 은 정수 1. 그 밖의 최상위 키는 무시합니다(하위 호환 확장용).
+- `key_check` 는 Python 과 Worker 에 등록한 `SUBSCRIBER_HASH_KEY` 가 같은지 확인하는 값입니다(키 자체가 아님).
+  Worker 가 자기 키로 계산한 값과 다르면 DB 를 건드리지 않고 `409 hash_key_mismatch` 로 거절합니다 —
+  키가 다르면 모든 식별자가 '새 구독자'로 보여 전원 `mode=all` 로 응답되는(일시중지·선택이 조용히 무시되는)
+  사고를 막기 위한 장치입니다(Phase 2.5 검수에서 추가).
 - 응답 본문 1 MB 초과, 200 이외 상태(리다이렉트 포함)는 오류입니다. 타임아웃은 `subscription.timeout_sec`.
 
 Worker 구현(`cloudflare-subscription/src/internal.ts`)이 지키는 것:
 
-1. 토큰을 상수 시간으로 비교하고, 실패하면 401 을 반환하며 아무것도 쓰지 않는다.
+1. 토큰을 상수 시간으로 비교하고, 실패하면 401 을 반환하며 아무것도 쓰지 않는다. `key_check` 가
+   다르면 409, 없거나 형식이 틀리면 400(모두 쓰기 없음).
 2. 요청 전체를 먼저 검증한다(버전, 빈 목록 금지 → 400, 64자 hex, 중복 금지, 기관 ID 형식).
    하나라도 틀리면 **쓰기 없이** 4xx.
 3. 동기화는 **차분만** 쓴다: 새 식별자 INSERT, 활성 상태가 바뀐 것만 UPDATE, 카탈로그는 바뀐 경우만
@@ -444,7 +450,11 @@ Worker API(`cloudflare-subscription/src/index.ts`):
 **전에** 원자적으로 올리고, 성공 시 행 삭제로 소비해 병렬 요청에도 세션은 1개만 생깁니다.
 
 **요청 제한**: isolate 메모리 IP 제한(분당 30회, D1 이전 1차 차단 — 최선 노력) → D1 고정 창 카운터(이메일 15분 3회·
-하루 5회, IP 시간당 10회, 검증 IP 시간당 20회, 전체 발송 하루 30통). 카운터 키는 HMAC 이라 원문이 없습니다.
+하루 5회, IP 시간당 10회, 검증 IP 시간당 20회, 전체 발송 하루 30통, 전체 요청 예산 하루 인증번호 요청 1,000건·
+검증 2,000건). 카운터 키는 HMAC 이라 원문이 없습니다. **이미 한도에 걸린 요청은 읽기만 하고 D1 에 쓰지 않습니다** —
+거절될 요청까지 카운터를 올리면 공격 IP 하나로 D1 무료 쓰기 한도를 소진시켜 정기 메일(fail-closed)까지 멈출 수
+있기 때문입니다(Phase 2.5 검수에서 수정). 전체 요청 예산을 넘으면 그날은 설정 페이지만 잠기고 정기 메일 동기화는
+D1 쓰기 여유를 유지합니다.
 Cloudflare Rate Limiting 바인딩은 무료 플랜 제공 여부를 공식 문서로 확인하지 못해 쓰지 않습니다.
 
 **세션·웹 보안**: 256비트 토큰(D1 에는 SHA-256), 절대 만료 30분, 구독자당 1개.
