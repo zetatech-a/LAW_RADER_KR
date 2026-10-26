@@ -63,8 +63,10 @@ npx wrangler d1 create law-rader-subscription
 ```bash
 npx wrangler d1 migrations apply law-rader-subscription --remote
 ```
-**확인:** `0001_init.sql ✅`. 대시보드 **Storage & Databases → D1 → law-rader-subscription → Tables** 에
-`subscribers, agencies, preferences, otp_challenges, sessions, rate_limits` 가 보입니다.
+**확인:** `0001_init.sql ✅` 다음에 `0002_integrity.sql ✅` 가 순서대로 나옵니다(파일 이름 순으로 적용되며, 0002 는 0001 이 만든
+`subscribers` 에 열을 추가하므로 순서를 바꿀 수 없습니다). 대시보드 **Storage & Databases → D1 → law-rader-subscription → Tables** 에
+`subscribers, agencies, preferences, otp_challenges, sessions, rate_limits, service_meta` 가 보입니다.
+`npx wrangler d1 migrations list law-rader-subscription --remote` 가 `✅ No migrations to apply!` 를 출력하면 모두 적용된 것입니다.
 
 ## 4. Worker 환경변수·Secret 등록
 1. `wrangler.jsonc` 의 `PUBLIC_ORIGIN` 을 1단계에서 정한 실제 주소로 바꿉니다.
