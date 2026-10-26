@@ -341,6 +341,21 @@ def test_api_failure_sends_nothing_skips_llm_and_keeps_state(tmp_path, monkeypat
     assert ctx.state_path.read_bytes() == ctx.before  # seen·큐·재조회 메타 모두 불변
 
 
+def test_api_failure_keeps_only_first_baseline_written_before_the_check(tmp_path, monkeypatch):
+    """'state 불변'의 정확한 범위(Phase 2.7). 처음 기준선을 잡는 소스는 기존 동작대로 구독 API 조회보다 먼저
+    기준선을 저장한다 — 메일로 보내지 않는 글이라 발송 대상과 무관하다. 신규 글의 seen·큐는 확정하지 않는다."""
+    pipc = "pipc_notice"
+    news = {**MIXED_NEWS, pipc: [_post(pipc, "p1", "개인정보위 · 공지")]}
+    ctx = _run(tmp_path, monkeypatch, worker=_FakeWorker(status=503), news=news,
+               argv_extra=["--only", f"{ONLY},{pipc}"])
+    assert ctx.rc == 1 and ctx.sends == [] and ctx.summarize_calls == 0
+    st = ctx.state
+    assert st.is_baselined(pipc) and st.seen_ids(pipc) == {"p1"}     # 기준선만 저장
+    assert st.seen_ids(FSC) == {"old"} and st.seen_ids(FSS) == {"old"}  # 신규는 미확정
+    assert st.seen_ids(ASSEMBLY_SOURCE_KEY) == {"old"}
+    assert st.pending_detail(ASSEMBLY_SOURCE_KEY) == {}
+
+
 def test_missing_subscription_settings_fail_closed(tmp_path, monkeypatch):
     ctx = _run(tmp_path, monkeypatch, news=MIXED_NEWS, env={"SUBSCRIPTION_API_TOKEN": None})
     assert ctx.rc == 1

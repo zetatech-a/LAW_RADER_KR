@@ -102,13 +102,31 @@ describe("DEPLOY.md 의 운영자 SQL 이 실제로 동작한다", () => {
     expect(by[await sid("fa@example.com")]).toMatchObject({ mode: "selected", agencies: ["fsc"] });
   });
 
-  it("설정 유실 해소 SQL: pref_saved 를 내리면 그 구독자는 전체 수신으로 정상 응답", async () => {
-    await sync(["lost@example.com"]);
-    await env.DB.prepare("UPDATE subscribers SET pref_saved = 1").run();
-    expect((await sync(["lost@example.com"])).status).toBe(409);
-    await env.DB.prepare("UPDATE subscribers SET pref_saved = 0 WHERE subscriber NOT IN (SELECT subscriber FROM preferences)").run();
-    const res = await sync(["lost@example.com"]);
+  it("설정 유실 해소 SQL(Phase 2.7): 유실된 구독자는 일시중지로 복구되고 전체 수신으로 넓혀지지 않는다", async () => {
+    const emails = ["lost@example.com", "kept@example.com", "fresh@example.com"];
+    await sync(emails);
+    await setPref("kept@example.com", "selected", ["fsc"]);
+    await env.DB.prepare("UPDATE subscribers SET pref_saved = 1 WHERE subscriber IN (?1, ?2)")
+      .bind(await sid("lost@example.com"), await sid("kept@example.com")).run();
+    expect((await sync(emails)).status).toBe(409); // lost@ 의 설정 행이 없음 → preference_missing
+    // DEPLOY.md '의도적 변경 절차 — 설정 유실' ①·② 그대로
+    const affected = await env.DB.prepare(
+      "SELECT count(*) AS n FROM subscribers WHERE pref_saved = 1 AND subscriber NOT IN (SELECT subscriber FROM preferences)",
+    ).first<{ n: number }>();
+    expect(affected?.n).toBe(1);
+    await env.DB.prepare(
+      "INSERT INTO preferences (subscriber, mode, agencies, version, updated_at) SELECT subscriber, 'selected', '[]', 1, CAST(strftime('%s', 'now') AS INTEGER) FROM subscribers WHERE pref_saved = 1 AND subscriber NOT IN (SELECT subscriber FROM preferences)",
+    ).run();
+    const res = await sync(emails);
     expect(res.status).toBe(200);
-    expect((await res.json<any>()).subscribers[0]).toMatchObject({ mode: "all" });
+    const by = Object.fromEntries((await res.json<any>()).subscribers.map((x: any) => [x.subscriber, x]));
+    expect(by[await sid("lost@example.com")]).toMatchObject({ mode: "selected", agencies: [] }); // 일시중지
+    expect(by[await sid("kept@example.com")]).toMatchObject({ mode: "selected", agencies: ["fsc"] }); // 손대지 않음
+    expect(by[await sid("fresh@example.com")]).toMatchObject({ mode: "all", agencies: [] }); // 진짜 신규는 그대로
+    expect(await count("SELECT count(*) AS n FROM subscribers WHERE pref_saved = 1")).toBe(2); // 저장 이력 보존
+    // 본인은 설정 화면에서 다시 고를 수 있다.
+    const cookie = await login("lost@example.com", emails.filter((e) => e !== "lost@example.com"));
+    const put = await call("PUT", "/api/preferences", { cookie, body: { mode: "all", agencies: [], version: 1 } });
+    expect(put.status).toBe(200);
   });
 });

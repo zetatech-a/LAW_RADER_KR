@@ -191,7 +191,7 @@ python scripts/check_subscription_api.py
 - `SUBSCRIPTION_REQUIRED` 검사는 ① main 의 Python 코드(이 기능이 들어간 버전) ② `monitor.yml` 의 `SUBSCRIPTION_REQUIRED`·
   `SUBSCRIPTION_DB_INSTANCE` env 줄 ③ GitHub Variable — **세 가지가 모두 있어야** 작동합니다. 하나라도 없으면 조용히 꺼집니다.
 - **현재 운영 main(이 기능 이전 코드)은 `SUBSCRIPTION_REQUIRED` 를 읽지 않습니다.** 코드를 반영하기 전에 Variable 만 바꿔도 아무 효과가 없습니다.
-- main 을 이 기능 이전 코드로 되돌리면 보호장치도 함께 사라지고, MAIL_TO 전원(일시중지한 사람 포함)에게 전체 메일이 재개됩니다(아래 '롤백').
+- main 을 이 기능 이전 코드로 되돌리면 보호장치도 함께 사라지고, MAIL_TO 전원(일시중지한 사람 포함)에게 전체 메일이 재개됩니다(15단계 '롤백·비상 정지').
 
 ### 14-A. 스테이징 검증(전환 전)
 1. 11~13단계를 모두 통과합니다(시험 주소만 동기화된 상태, 운영 메일 발송 코드는 아직 기존 그대로).
@@ -226,11 +226,15 @@ python scripts/check_subscription_api.py
 
 정상 운영 예상치(구독자 50명 기준): Worker 요청 하루 수십~수백 건, D1 읽기 하루 수천 행, 쓰기는 거의 0행입니다.
 
+**월 0원은 '무료 한도 안에서'라는 조건이 붙은 운영 목표이지 가용성 보장이 아닙니다.** 무료 플랜은 한도를 넘어도 과금되지 않는 대신
+요청·쿼리가 실패하며, 그동안 fail-closed 정책에 따라 정기 메일이 보류됩니다(전원 발송으로 대체하지 않음). 한도·정책은 Cloudflare·Google 이
+바꿀 수 있으므로 배포 전과 월 1회 공식 문서를 다시 확인합니다.
+
 ### 장애별 대응
 | 증상 | 영향 | 조치 |
 |---|---|---|
 | Actions 로그 `구독 설정 조회 실패(...)` | **해당 실행의 메일 보류**(전체 발송으로 복귀하지 않음). 신규 글은 미확정으로 남아 복구 후 발송 | Worker 상태·Secret 확인. 복구되면 다음 실행이 자동 발송 |
-| `HTTP 503`·D1 오류 | 위와 같음 | D1 무료 한도 초과면 KST 09시에 자동 해제. 대시보드에서 이상 요청 확인 |
+| `HTTP 503`·D1 오류 | 위와 같음. 설정 페이지·인증번호도 오류 | 2026-09-01 부터 D1 무료 하루 읽기·쓰기 한도를 넘으면 쿼리가 오류로 실패합니다(저장된 데이터는 그대로, 계정 소유자에게 메일 알림). UTC 0시(KST 09시)에 자동 해제. 대시보드에서 이상 요청 확인 |
 | `HTTP 409`(hash_key_mismatch) | 해당 실행의 메일 보류(전원 전체 발송 방지) | GitHub Secret 과 Worker Secret 의 `SUBSCRIBER_HASH_KEY` 를 같은 값으로 다시 등록 |
 | 설정 페이지만 하루 종일 `잠시 후 다시 시도` | 설정 변경 불가(정기 메일 영향 없음) | 전체 요청 예산(인증번호 요청 1,000·검증 2,000/일) 소진 — 공격 가능성. KST 09시 해제 |
 | 인증번호 메일이 안 옴 | 설정 변경만 불가(정기 메일 영향 없음) | Apps Script 실행 기록의 거절 코드(`bad_signature`·`quota_exhausted`·`daily_cap`) 확인 |
@@ -240,14 +244,49 @@ python scripts/check_subscription_api.py
 
 장기 장애로 한 게시판의 신규가 50건(의안 75건)을 넘으면, 복구 후 최신 분만 발송되고 나머지는 기존 안전장치에 따라 확정됩니다.
 
-### 롤백
-- **`enabled: false` 는 장애 대응이 아닙니다.** `SUBSCRIPTION_REQUIRED=true` 상태에서는 실행이 멈추고(아래 긴급 정지),
-  `SUBSCRIPTION_REQUIRED` 가 비어 있으면 사용자 선택(일시중지 포함)을 무시하고 전원에게 전체 메일을 보냅니다.
-- **긴급 정지(모든 메일을 잠시 멈춤):** 가장 단순한 방법은 `SUBSCRIPTION_REQUIRED=true` 인 상태에서 `enabled: false` 를 main 에
-  반영하는 것입니다(실행이 시작 직후 멈춤, state 변경 없음). 또는 `law-rader-kr-scheduler` 의 Cron 트리거와 GitHub Actions monitor 워크플로를 끕니다.
-- **main 을 이 기능 이전 코드로 되돌릴 때(위험):** 되돌린 코드에는 보호장치가 없어 **MAIL_TO 전원에게 전체 메일이 재개**됩니다. 반드시
-  ① 긴급 정지로 먼저 발송을 멈추고 ② 구독자에게 공지하고 ③ D1 에서 일시중지·선택 수신 현황을 확인해 필요하면 MAIL_TO 를 정리한 뒤
-  ④ 코드를 되돌리고 ⑤ 발송을 재개합니다. 가능하면 되돌리기 대신 문제 부분만 고치는 반영(fix-forward)을 우선합니다.
+### 롤백·비상 정지
+아래 조치는 모두 **운영자 승인 후** 수행합니다(GitHub·Cloudflare·Google 설정 변경이므로).
+
+**먼저 지금이 어느 단계인지 확인합니다.** 기준은 '기관 선택(일시중지 포함)을 저장한 구독자가 있는가'입니다.
+```
+npx wrangler d1 execute law-rader-subscription --remote --command "SELECT count(*) AS n FROM preferences WHERE mode = 'selected'"
+```
+
+**(가) 도입 전 — 위 값이 0 (또는 `enabled: true` 를 아직 main 에 반영하지 않음)**
+- 모든 구독자가 사실상 '전체 수신'이므로, `enabled: false` + `SUBSCRIPTION_REQUIRED` 비움(또는 `false`)으로 되돌려도 받는 메일이 같습니다.
+  **이 경우에만** 기존 전원 발송 방식으로의 롤백을 허용합니다.
+- 확인과 되돌리기 사이에 누군가 저장할 수 있으므로 되돌린 직후 같은 명령을 한 번 더 실행합니다. 0이 아니면 (나)로 처리합니다.
+
+**(나) 도입 후 — 위 값이 1 이상**
+- **`enabled: false` + `SUBSCRIPTION_REQUIRED=false`(또는 비움)는 금지합니다.** 일시중지·선택 수신 구독자에게 고르지 않은 기관의
+  메일이 전원 발송으로 나갑니다.
+- **기본 조치는 `SUBSCRIPTION_REQUIRED=true` 를 유지한 안전 정지입니다.** 메일을 보내지 않고 기다리는 쪽이 원하지 않은 메일을 보내는 쪽보다 안전합니다.
+  1. GitHub → Actions → `LAW RADER KR monitor` → **Disable workflow**. 코드 변경 없이 schedule·workflow_dispatch(Cloudflare scheduler 호출 포함)
+     실행이 모두 멈춥니다. 필요하면 `law-rader-kr-scheduler` 의 Cron 트리거도 끕니다.
+  2. 또는 `SUBSCRIPTION_REQUIRED=true` 그대로 `config.yaml` 의 `enabled: false` 를 main 에 반영합니다(별도 승인). main 코드에 보호장치가
+     있을 때만 효과가 있으며, 실행이 시작 직후 실패(exit 1)로 끝나 15분마다 Actions 실패 알림이 옵니다.
+  - 어느 쪽이든 정지 중의 신규 글은 미확정으로 남았다가 재개 후 발송됩니다. 정지가 길어 한 게시판 신규가 50건(의안 75건)을 넘으면 최신 분만 발송됩니다.
+- **재개는 검증된 구독 기능 버전으로만** 합니다. 조건:
+  - Python(main): `SUBSCRIPTION_REQUIRED` 가드와 `SUBSCRIPTION_DB_INSTANCE` 검사가 있는 버전(이 문서와 같은 Phase 2.6 이상).
+    확인: `git grep -c "SUBSCRIPTION_REQUIRED=true 인데" <커밋> -- src/main.py` 와
+    `git grep -c "SUBSCRIPTION_REQUIRED=true 일 때 필수" <커밋> -- src/subscription.py` 가 모두 1 이상, 그 커밋에서 `pytest tests/test_subscription*.py` 통과.
+  - Worker: 카탈로그 불일치·설정 유실을 409 로 거절하는 버전(Phase 2.6 이상, `src/preferences-model.ts` 에 `CatalogMismatch` 가 있음).
+    배포할 때마다 배포한 커밋 해시를 운영 기록에 남겨 두고, `wrangler rollback` 으로 그보다 오래된 Worker 버전으로 되돌리지 않습니다
+    (Phase 2.5 이하 Worker 는 고른 기관이 카탈로그에서 빠지면 '전체 수신'으로 넓혀 응답합니다).
+  - 가능하면 이전 버전으로 되돌리기보다 문제 부분만 고치는 반영(fix-forward)을 우선합니다.
+
+**구버전 코드의 위험(반드시 이해할 것)**
+- Phase 2 이전 코드(현재 운영 main, Phase 1 커밋 포함)는 `SUBSCRIPTION_REQUIRED` 를 **아예 읽지 않습니다.** Variable 이 `true` 여도 아무 효과가 없어,
+  main 을 그런 코드로 되돌리는 순간 다음 실행부터 **MAIL_TO 전원(일시중지한 사람 포함)에게 전체 메일**이 나갑니다.
+- 그래서 (나) 단계에서 main 을 이 기능 이전 코드로 되돌리는 것은 '롤백'이 아니라 **기능 폐지**입니다. 폐지는 ① 안전 정지 ② 구독자 사전 공지
+  ③ D1 에서 일시중지·선택 수신 구독자를 확인해 필요한 주소를 `MAIL_TO` 에서 정리 ④ 코드 되돌리기 ⑤ 재개 순서로만 합니다.
+
+**안전한 코드가 없을 때의 비상 정지(운영자 승인 조치)**
+- 반영할 수 있는 검증된 코드가 없고 발송을 즉시 막아야 하면, 코드와 무관하게 막히는 수단을 씁니다.
+  1. monitor 워크플로 **Disable workflow** + scheduler Cron 트리거 끄기(위 1과 같음).
+  2. 그래도 발송 가능성이 남으면(예: 누군가 워크플로를 다시 켤 수 있음) **SMTP 자격증명 비활성화**: 발송에 쓰는 Gmail 계정에서
+     해당 앱 비밀번호를 삭제하거나, GitHub Secret `SMTP_PASSWORD` 를 지웁니다. 이후 실행은 SMTP 선점검(로그인)에서 멈추고 신규 글은 미확정으로 남습니다.
+     같은 앱 비밀번호를 쓰는 다른 용도도 함께 멈추며, 재개하려면 새 앱 비밀번호를 발급해 Secret 을 다시 등록해야 합니다.
 
 ### D1 백업·복구(무료)
 [공식 문서](https://developers.cloudflare.com/d1/reference/time-travel/) 기준으로 D1 은 Time Travel(시점 복원)이 항상 켜져 있으며,
@@ -261,22 +300,40 @@ python scripts/check_subscription_api.py
    - 복원 결과로 출력되는 이전 bookmark 로 되돌릴 수 있습니다. 10분에 10회까지 가능합니다.
    - 복원 직후 11단계 점검 스크립트로 `구독 DB 식별자` 가 Variable 과 같은지 확인합니다.
 4. **DB 내부 데이터 오류 vs DB 삭제·교체:** Time Travel 은 **같은 DB 안에서** 과거 시점으로 되돌립니다(행 삭제·잘못된 수정 복구용).
-   DB 자체를 삭제하거나 다른 DB 로 바꾼 경우 그 이전 데이터를 Time Travel 로 되살릴 수 있는지는 공식 문서로 확인하지 못했습니다.
-   이에 대비해 월 1회 정도 `npx wrangler d1 export law-rader-subscription --remote --output=<경로>` 로 SQL 백업을 받아 둡니다
-   (export 중에는 다른 요청이 막히므로 정기 실행 시간 밖에 — 예: 평일 KST 18:30 이후·주말 — 수행).
+   - DB 자체를 삭제한 경우: [2026-10-23 changelog](https://developers.cloudflare.com/changelog/post/2026-10-23-undelete-seven-day-window/) 기준
+     D1 undelete API 는 **삭제 후 7일 이내** 요청만 받고 그 뒤에는 오류를 냅니다. 무료 플랜에서의 사용 가능 여부, wrangler 명령 지원 여부,
+     복구 후 `database_id` 유지 여부는 확인하지 못했습니다. **DB 삭제는 운영자 승인 대상이며, 삭제 전에 반드시 export 백업을 받습니다.**
+   - 이에 대비해 월 1회 정도 `npx wrangler d1 export law-rader-subscription --remote --output=<경로>` 로 SQL 백업을 받아 둡니다
+     (export·import 중에는 그 DB 의 다른 요청이 막히므로 정기 실행 시간 밖에 — 예: 평일 KST 18:30 이후·주말 — 수행).
+     이 서비스는 virtual table 을 쓰지 않으므로 export 의 virtual table 제한에는 해당하지 않습니다.
+   - export 백업으로 복구할 때는 **새 D1** 을 만들어 `npx wrangler d1 execute <새 DB> --remote --file=<백업.sql>` 로 넣고,
+     `wrangler.jsonc` 의 `database_id` 를 바꿔 다시 배포합니다(운영자 승인). 백업에 `service_meta` 가 들어 있으므로 D1 식별자가 그대로여서
+     `SUBSCRIPTION_DB_INSTANCE` 를 바꿀 필요가 없습니다. 백업 시점 이후 저장된 설정은 사라지므로 해당 기간에 설정을 바꾼 구독자에게 재확인을 안내합니다.
 5. **백업 파일 취급:** 이메일 원문은 없지만 구독자 식별자(가명정보)·수신 설정·세션 해시가 들어 있어 **개인정보로 취급**합니다.
    저장소·채팅·메일에 올리지 않고, 암호화된 저장소에 보관하며, 보관 기간(예: 3개월)이 지나면 삭제합니다.
 
 ### 의도적 변경 절차
+아래는 모두 **운영 D1 을 직접 바꾸는 작업**입니다. 공통 전제: ① 운영자 승인 ② 실행 직전 백업(`wrangler d1 export`, 또는 최소한
+`npx wrangler d1 time-travel info law-rader-subscription` 으로 현재 bookmark 기록) ③ 영향 인원 확인 쿼리를 먼저 실행해 예상과 같은지 확인.
+어느 SQL 도 저장된 선택을 '전체 수신(mode=all)'으로 바꾸지 않습니다. 전체 수신으로의 변경은 본인이 설정 화면에서만 합니다.
+
 - **기관 제거:** 그 기관을 고른 구독자가 있으면 `catalog_mismatch` 로 발송이 멈춥니다(조용히 넓히거나 좁히지 않음). 제거 전에
   ① 영향 인원 확인 `npx wrangler d1 execute law-rader-subscription --remote --command "SELECT count(*) FROM preferences p, json_each(p.agencies) a WHERE a.value = '기관ID'"`
-  ② 해당 구독자에게 공지 ③ 선택 목록에서 그 기관만 빼기(그 기관만 골랐던 사람은 '일시중지'가 됨 — 공지에 포함)
+  ② 해당 구독자에게 공지 ③ 선택 목록에서 그 기관만 빼기
   `UPDATE preferences SET agencies = (SELECT json_group_array(value) FROM json_each(preferences.agencies) WHERE value <> '기관ID'), version = version + 1 WHERE EXISTS (SELECT 1 FROM json_each(preferences.agencies) WHERE value = '기관ID')`
   ④ 그다음 `config.yaml` 에서 기관을 제거합니다.
+  - 이 SQL 은 `agencies` 목록과 `version` 만 바꿉니다. `mode`·`pref_saved` 는 그대로이고 '전체 수신' 행은 대상이 아닙니다.
+    그 기관만 골랐던 사람은 **일시중지**(선택 + 빈 목록)가 되며 전체 수신으로 바뀌지 않습니다(공지에 포함). 설정 화면을 열어 둔 사람은 다시 저장할 때 '다른 곳에서 변경됨'을 봅니다.
 - **D1 을 의도적으로 새로 만들 때:** 기존 설정은 사라집니다(공지 필요, 또는 export 백업에서 복원). `SUBSCRIPTION_DB_INSTANCE` 를 비우면
   `SUBSCRIPTION_REQUIRED=true` 상태에서는 발송이 멈추므로, 새 D1 마이그레이션 → 점검 스크립트로 새 식별자 확인 → Variable 갱신을 바로 이어서 합니다.
-- **설정 유실(`preference_missing`)을 복원하지 않고 해소해야 할 때:** 해당 구독자를 '전체 수신'으로 되돌리는 결정이므로 본인에게 알린 뒤
-  `UPDATE subscribers SET pref_saved = 0 WHERE subscriber NOT IN (SELECT subscriber FROM preferences)` 를 실행합니다.
+  새 D1 에서는 모든 구독자가 신규(전체 수신)로 시작하므로, 기존에 일시중지·선택 수신이던 사람이 있었다면 사실상 (나) 단계의 기능 폐지와 같습니다 —
+  구독자 공지와 `MAIL_TO` 정리를 먼저 합니다.
+- **설정 유실(`preference_missing`):** 먼저 Time Travel 이나 export 백업으로 원래 설정을 복원합니다(위 'D1 백업·복구').
+  복원할 수 없을 때만, 유실된 구독자를 **일시중지로 복구**하고 본인에게 다시 선택해 달라고 알립니다.
+  ① 영향 인원 `SELECT count(*) AS n FROM subscribers WHERE pref_saved = 1 AND subscriber NOT IN (SELECT subscriber FROM preferences)`
+  ② `INSERT INTO preferences (subscriber, mode, agencies, version, updated_at) SELECT subscriber, 'selected', '[]', 1, CAST(strftime('%s', 'now') AS INTEGER) FROM subscribers WHERE pref_saved = 1 AND subscriber NOT IN (SELECT subscriber FROM preferences)`
+  일시중지된 구독자는 설정 화면에서 원하는 기관이나 '모든 기관 수신'을 직접 다시 고릅니다. 운영자가 `pref_saved` 를 내려
+  '전체 수신'으로 만드는 방식은 쓰지 않습니다(본인이 고르지 않은 기관의 메일이 나가기 때문).
 
 ## HMAC 키(`SUBSCRIBER_HASH_KEY`) 정책
 - 최초 설정 후 **고정**합니다. 실제 값은 Cloudflare Secret 과 GitHub Secret 에만 두며 git 추적 파일·문서·채팅에 기록하지 않습니다.
