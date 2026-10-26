@@ -15,6 +15,8 @@ cloudflare-subscription/.dev.vars
 cloudflare-subscription/.dev.vars.*
 cloudflare-subscription/.wrangler/
 cloudflare-subscription/worker-configuration.d.ts
+# 스테이징 실제 설정(계정·D1 ID·주소). 예시는 wrangler.staging.example.jsonc 로 추적한다.
+cloudflare-subscription/wrangler.staging.jsonc
 
 # 브라우저 네트워크 캡처의 원본 HAR(쿠키·토큰 포함). sanitize 된 복사본만 남긴다.
 # 스크립트가 정상 종료하면 스스로 지우지만, 중단된 경우에도 커밋되지 않도록 막는다.
