@@ -51,6 +51,18 @@ python -m src.main --dry-run --debug --only fss_press # one source, verbose
 ### Unverified sources
 - `pipc_notice` and `pipc_press` have not been verified against live HTML. Do not describe them as verified; follow README "PIPC 두 소스" before changing them.
 
+## Code Review Rules
+
+Used by automated pull request reviewers (Codex, Claude). Flag only these; leave style to CI.
+
+### Alert correctness
+- Flag any path that can email historical backlog (missing baseline handling) or backfill past `seen` items.
+- Flag changes that blur `PENDING` and `ERROR`, or adopt proposal text without the bill-ID evidence match.
+
+### Delivery and secrets
+- Flag any path where an LLM failure can stop the email from being sent.
+- Flag recipients in `config.yaml`, committed secrets, raw HAR captures, or real personal contact details in fixtures.
+
 ## Definition of done
 
 - `python -m pytest -q` passes.
