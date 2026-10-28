@@ -51,6 +51,13 @@ python -m src.main --dry-run --debug --only fss_press # one source, verbose
 ### Unverified sources
 - `pipc_notice` and `pipc_press` have not been verified against live HTML. Do not describe them as verified; follow README "PIPC 두 소스" before changing them.
 
+## Harness upkeep (every agent, every PR)
+
+- Changed commands, invariants, architecture, or configuration keys → update this file and the relevant docs in the same PR.
+- A reviewer or the owner corrected a mistake that a one-line rule would have prevented → append it under `## Lessons`.
+- A design choice a future reader needs → write it in the PR's `## 결정 사항` section (lifted into HQ weekly).
+- Task runbook for issue-driven work: `.claude/skills/issue-to-pr/SKILL.md`. Improve the runbook by PR, like code.
+
 ## Code Review Rules
 
 Used by automated pull request reviewers (Codex, Claude). Flag only these; leave style to CI.
