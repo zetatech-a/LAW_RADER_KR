@@ -646,6 +646,10 @@
   },
   "fss_sanction": {
     "seen": [
+      "exam:202500363_1",
+      "exam:202500059_1",
+      "exam:202500058_1",
+      "exam:202400672_1",
       "exam:202400328_1",
       "exam:202200142_1",
       "exam:202500199_5",
@@ -760,6 +764,9 @@
   },
   "fss_mgmt_notice": {
     "seen": [
+      "file:3.경영유의사항 공개안(한화라이프랩)F.hwp",
+      "file:2.경영유의사항 공개안(아너스)F.hwp",
+      "file:1.경영유의사항 공개안(인카)F.hwp",
       "file:202500199_14_제재내용 공개(경영유의개선)_농협은행_최종.pdf",
       "file:202600246_11_202600137_경영유의사항 등 공개안_얼라이언스번스틴자산운용.pdf",
       "file:202600247_11_202600247_경영유의사항 등 공개안_맥쿼리자산운용.pdf",
@@ -3547,23 +3554,23 @@
     "pending_detail": {
       "PRC_57ADD3FE326C4C4E8C6804D17EE44A": {
         "first_seen_at": "2026-10-23T00:11:22Z",
-        "attempts": 122,
+        "attempts": 123,
         "title": "지방교부세법 일부개정법률안 (임이자의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_57ADD3FE326C4C4E8C6804D17EE44A",
         "date": "2026-10-22",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-04T08:08:48Z"
+        "last_attempt_at": "2026-11-04T08:54:08Z"
       },
       "PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6": {
         "first_seen_at": "2026-10-30T00:14:41Z",
-        "attempts": 53,
+        "attempts": 54,
         "title": "세계선거기관협의회 지원에 관한 법률폐지법률안 (송재봉의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6",
         "date": "2026-10-29",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-04T08:08:48Z"
+        "last_attempt_at": "2026-11-04T08:54:08Z"
       }
     }
   },
