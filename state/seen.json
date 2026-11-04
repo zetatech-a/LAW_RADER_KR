@@ -976,6 +976,7 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_48B81CEE9729434880C43C655CDA00",
       "PRC_C1C82FF68D614550A09A9605544601",
       "PRC_W2E6E0D9E0C2C1A7B0J6I3I1G9H8F0",
       "PRC_CA81F1D3F67449929036626248E853",
@@ -1078,7 +1079,6 @@
       "PRC_1B5F574C1632478EABE4C11D7CC61C",
       "PRC_AA22E0102B4B47FA98B8FB7EE74413",
       "PRC_0054902AFB6E4F7490169B3D345758",
-      "PRC_48B81CEE9729434880C43C655CDA00",
       "PRC_1EA54D8EDC98413FADB278A5D04F5D",
       "PRC_4C0B3241FCE5475A993619E4A83CAE",
       "PRC_5593160108654E1F9D8E7F173242B1",
@@ -3542,33 +3542,23 @@
     "pending_detail": {
       "PRC_57ADD3FE326C4C4E8C6804D17EE44A": {
         "first_seen_at": "2026-10-23T00:11:22Z",
-        "attempts": 117,
+        "attempts": 118,
         "title": "지방교부세법 일부개정법률안 (임이자의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_57ADD3FE326C4C4E8C6804D17EE44A",
         "date": "2026-10-22",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-04T04:38:51Z"
+        "last_attempt_at": "2026-11-04T05:23:58Z"
       },
       "PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6": {
         "first_seen_at": "2026-10-30T00:14:41Z",
-        "attempts": 48,
+        "attempts": 49,
         "title": "세계선거기관협의회 지원에 관한 법률폐지법률안 (송재봉의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6",
         "date": "2026-10-29",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-04T04:38:51Z"
-      },
-      "PRC_48B81CEE9729434880C43C655CDA00": {
-        "first_seen_at": "2026-11-02T00:11:32Z",
-        "attempts": 34,
-        "title": "조세특례제한법 일부개정법률안 (김성원의원 등 11인)",
-        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_48B81CEE9729434880C43C655CDA00",
-        "date": "2026-10-30",
-        "status": "pending",
-        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-04T04:38:51Z"
+        "last_attempt_at": "2026-11-04T05:23:58Z"
       }
     }
   },
