@@ -1,6 +1,7 @@
 {
   "fsc_press": {
     "seen": [
+      "path:88084",
       "path:88082",
       "path:88081",
       "path:88074",
@@ -294,6 +295,7 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:249742",
       "nttId:249736",
       "nttId:249734",
       "nttId:249719",
@@ -988,6 +990,26 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_A0B6B0016E0647C58525C5E2207503",
+      "PRC_M2K6K0G9F1F0D1E0C1D5L0L6K1I6J9",
+      "PRC_AC018A12FB1147D0B4F3E8D0C69A19",
+      "PRC_8096BF320DC94004B0909894841D80",
+      "PRC_W2V6V0D7D0C7A1B0Z4A5V4W3V0T8T0",
+      "PRC_958C95613A92460896938420014D17",
+      "PRC_C4753BA61A6B440486998BA4DC2BCF",
+      "PRC_E45B2CD967054DAF8945A2B597E080",
+      "PRC_BE934EDFA4A046BE8BDB980B3DE38C",
+      "PRC_219ABBA019684144B850C714F0C274",
+      "PRC_8EFAA17A38504361967BDF0FD887CE",
+      "PRC_352E20C33E4146D68E93E5BA69869F",
+      "PRC_BDF13AFC236E44FE976020DBBCAEE6",
+      "PRC_B1B6075EF9C444ACAB06756A9ADCEA",
+      "PRC_656EC7E4F85746C98E3852BFD4A4EB",
+      "PRC_FFC6D3CE9F1F4614B9D23F1F1EAFB2",
+      "PRC_X2X6G0G8E0F5D1C7C1K7L4J0J1I0G2",
+      "PRC_DF42C88E48A648E6994A11EB5609B0",
+      "PRC_CEBAB5B1640E4CBA9F534DC010A17A",
+      "PRC_A3339442D35F421E967A0031942029",
       "PRC_48B81CEE9729434880C43C655CDA00",
       "PRC_C1C82FF68D614550A09A9605544601",
       "PRC_W2E6E0D9E0C2C1A7B0J6I3I1G9H8F0",
@@ -3554,23 +3576,23 @@
     "pending_detail": {
       "PRC_57ADD3FE326C4C4E8C6804D17EE44A": {
         "first_seen_at": "2026-10-23T00:11:22Z",
-        "attempts": 123,
+        "attempts": 124,
         "title": "지방교부세법 일부개정법률안 (임이자의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_57ADD3FE326C4C4E8C6804D17EE44A",
         "date": "2026-10-22",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-04T08:54:08Z"
+        "last_attempt_at": "2026-11-05T00:10:44Z"
       },
       "PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6": {
         "first_seen_at": "2026-10-30T00:14:41Z",
-        "attempts": 54,
+        "attempts": 55,
         "title": "세계선거기관협의회 지원에 관한 법률폐지법률안 (송재봉의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6",
         "date": "2026-10-29",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-04T08:54:08Z"
+        "last_attempt_at": "2026-11-05T00:10:44Z"
       }
     }
   },
