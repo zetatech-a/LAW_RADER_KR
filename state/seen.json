@@ -1017,8 +1017,8 @@
   },
   "assembly_bill": {
     "seen": [
-      "PRC_I2I6Q0R7P2Q3O1M0N2V0W4U7S7T1R0",
       "PRC_0752EC0CD0F4441997ABF69D53A75F",
+      "PRC_I2I6Q0R7P2Q3O1M0N2V0W4U7S7T1R0",
       "PRC_72B130674DD8435C9A336FDA89940C",
       "PRC_025ACC75B9284CB6968F91EBF6DBC8",
       "PRC_M2K6S0T9R0R3Q1R4P1P2X3W2W8U5V1",
@@ -3692,53 +3692,43 @@
     "pending_detail": {
       "PRC_57ADD3FE326C4C4E8C6804D17EE44A": {
         "first_seen_at": "2026-10-23T00:11:22Z",
-        "attempts": 150,
+        "attempts": 151,
         "title": "지방교부세법 일부개정법률안 (임이자의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_57ADD3FE326C4C4E8C6804D17EE44A",
         "date": "2026-10-22",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-09T00:13:04Z"
+        "last_attempt_at": "2026-11-09T00:54:18Z"
       },
       "PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6": {
         "first_seen_at": "2026-10-30T00:14:41Z",
-        "attempts": 81,
+        "attempts": 82,
         "title": "세계선거기관협의회 지원에 관한 법률폐지법률안 (송재봉의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6",
         "date": "2026-10-29",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-09T00:13:04Z"
-      },
-      "PRC_0752EC0CD0F4441997ABF69D53A75F": {
-        "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 1,
-        "title": "인공지능 바이오 연구개발을 위한 바이오데이터·보건의료정보 활용 및 인공지능 바이오 연구개발 촉진에 관한 법률안 (김선민의원 등 12인)",
-        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_0752EC0CD0F4441997ABF69D53A75F",
-        "date": "2026-11-06",
-        "status": "pending",
-        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-09T00:13:04Z"
+        "last_attempt_at": "2026-11-09T00:54:18Z"
       },
       "PRC_2E33F24A5B1F47099B1A4857F2C83E": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 1,
+        "attempts": 2,
         "title": "집회 및 시위에 관한 법률 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_2E33F24A5B1F47099B1A4857F2C83E",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-09T00:13:04Z"
+        "last_attempt_at": "2026-11-09T00:54:18Z"
       },
       "PRC_6418BEFE9E284DECB1A83326CF1AEF": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 1,
+        "attempts": 2,
         "title": "인구감소지역 지원 특별법 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_6418BEFE9E284DECB1A83326CF1AEF",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-09T00:13:04Z"
+        "last_attempt_at": "2026-11-09T00:54:18Z"
       }
     }
   },
