@@ -3734,6 +3734,7 @@
   },
   "pipc_notice": {
     "seen": [
+      "nttId:12627",
       "nttId:12624",
       "nttId:12623",
       "nttId:12621",
@@ -3784,6 +3785,7 @@
   },
   "pipc_press": {
     "seen": [
+      "nttId:12628",
       "nttId:12622",
       "nttId:12617",
       "nttId:12609",
