@@ -5,6 +5,7 @@ import html
 import logging
 import os
 import smtplib
+import ssl
 import traceback
 from dataclasses import dataclass, field
 from email.message import EmailMessage
@@ -681,6 +682,19 @@ def missing_email_settings(cfg: EmailConfig) -> list[str]:
     return missing
 
 
+def _smtp_tls_context() -> ssl.SSLContext:
+    """STARTTLS 에 넘길, 서버 인증서와 호스트명을 검증하는 TLS 컨텍스트.
+
+    smtplib.SMTP.starttls() 에 context 를 주지 않으면 CPython 은
+    ssl._create_stdlib_context() 를 쓰는데, 이 컨텍스트는 verify_mode=CERT_NONE,
+    check_hostname=False 다. 암호화는 되지만 상대가 진짜 SMTP 서버인지 확인하지
+    않으므로, 경로 중간의 공격자가 서버를 사칭해 앱 비밀번호(SMTP_PASSWORD)와
+    메일 본문을 가로챌 수 있다. 그래서 시스템 신뢰 저장소로 검증하는 기본
+    컨텍스트를 명시적으로 넘긴다. 로그인·발송 두 경로가 이 함수 하나를 공유한다.
+    """
+    return ssl.create_default_context()
+
+
 def verify_smtp_login(cfg: EmailConfig) -> None:
     """실제 발송 전에 SMTP 연결·인증만 확인한다(실패 시 예외).
 
@@ -694,7 +708,7 @@ def verify_smtp_login(cfg: EmailConfig) -> None:
     수준이고, 유휴 끊김으로 발송이 실패하는 것보다 안전하다).
     """
     with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=30) as server:
-        server.starttls()
+        server.starttls(context=_smtp_tls_context())
         server.login(cfg.smtp_user, cfg.smtp_password)
 
 
@@ -783,7 +797,7 @@ def send_digest(
                         budget -= len(a.data)
 
     with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=60) as server:
-        server.starttls()
+        server.starttls(context=_smtp_tls_context())
         server.login(cfg.smtp_user, cfg.smtp_password)
         # 실제 수신자는 to_addrs(봉투)로만 전달 → To 헤더에 노출되지 않아 서로 안 보임.
         # send_message 는 '일부' 수신자만 거부되면 예외 대신 거부목록 dict 를 반환한다

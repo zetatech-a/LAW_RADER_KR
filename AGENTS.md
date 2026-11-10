@@ -47,6 +47,7 @@ python -m src.main --dry-run --debug --only fss_press # one source, verbose
 - Never put recipients in `config.yaml`; use the `MAIL_TO` secret (sent as BCC).
 - Never commit secrets, `.env`, or raw HAR captures (`tests/fixtures/_*.raw.har` contain cookies and tokens). Commit only sanitized fixtures.
 - Replace real personal contact details in captured fixtures with fake values.
+- SMTP STARTTLS must pass a verifying context (`starttls(context=ssl.create_default_context())`). A bare `starttls()` skips certificate and hostname checks in CPython and exposes `SMTP_PASSWORD`.
 
 ### Unverified sources
 - `pipc_notice` and `pipc_press` have not been verified against live HTML. Do not describe them as verified; follow README "PIPC 두 소스" before changing them.
@@ -69,6 +70,7 @@ Used by automated pull request reviewers (Codex, Claude). Flag only these; leave
 ### Delivery and secrets
 - Flag any path where an LLM failure can stop the email from being sent.
 - Flag recipients in `config.yaml`, committed secrets, raw HAR captures, or real personal contact details in fixtures.
+- Flag any SMTP/TLS connection that does not verify the server certificate and hostname (e.g. `starttls()` without a verifying `context`).
 
 ## Definition of done
 
