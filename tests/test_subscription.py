@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import smtplib
+import ssl
 import sys
 
 import pytest
@@ -564,6 +565,7 @@ class _FakeSMTP:
     sent = []
     refused = {}
     error = None
+    tls_contexts = []
 
     def __init__(self, *a, **k):
         pass
@@ -574,8 +576,9 @@ class _FakeSMTP:
     def __exit__(self, *a):
         return False
 
-    def starttls(self):
-        pass
+    def starttls(self, *, context=None):
+        # 실제 smtplib 와 같은 키워드 전용 인자. 받은 컨텍스트를 기록해 검증 TLS 를 확인한다.
+        _FakeSMTP.tls_contexts.append(context)
 
     def login(self, *a):
         pass
@@ -590,8 +593,17 @@ class _FakeSMTP:
 @pytest.fixture
 def fake_smtp(monkeypatch):
     _FakeSMTP.sent, _FakeSMTP.refused, _FakeSMTP.error = [], {}, None
+    _FakeSMTP.tls_contexts = []
     monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
     return _FakeSMTP
+
+
+def _assert_verified_tls(contexts) -> None:
+    """주소 마스킹용 try/except 안에서도 STARTTLS 가 인증서·호스트명 검증 컨텍스트로 맺어졌는지."""
+    assert contexts, "starttls 가 호출되지 않았다"
+    for ctx in contexts:
+        assert isinstance(ctx, ssl.SSLContext)
+        assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
 
 
 def test_send_digest_puts_link_from_cfg_and_logs_count_only(fake_smtp, caplog):
@@ -605,6 +617,7 @@ def test_send_digest_puts_link_from_cfg_and_logs_count_only(fake_smtp, caplog):
     assert "수신 기관 설정: https://law-rader.example.workers.dev/" in body
     assert "수신자 2명" in caplog.text
     assert "a@example.com" not in caplog.text and "b@example.com" not in caplog.text
+    _assert_verified_tls(fake_smtp.tls_contexts)
 
 
 def test_send_digest_without_url_has_no_link(fake_smtp):
@@ -636,6 +649,7 @@ def test_smtp_exceptions_are_sanitized(fake_smtp, error):
     assert "@example.com" not in str(ei.value)
     assert ei.value.__suppress_context__ is True     # 원래 예외(주소 포함)를 체인에서 끊음
     assert type(error).__name__ in str(ei.value)
+    _assert_verified_tls(fake_smtp.tls_contexts)
 
 
 # ==========================================================================
