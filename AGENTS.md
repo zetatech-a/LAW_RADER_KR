@@ -17,6 +17,7 @@ python -m src.main --dry-run --debug --only fss_press # one source, verbose
 
 - Never run `python -m src.main` **without** `--dry-run` in a dev or agent session: it sends real email and mutates `state/seen.json`.
 - Tests must not touch the network; use fixtures under `tests/fixtures/`.
+- When `cloudflare-subscription/` or `google-apps-script/` changes, also run `(cd cloudflare-subscription && npm ci && npm run check && npm test)` and `node --test google-apps-script/test/*.test.mjs` (both offline).
 
 ## Non-negotiable invariants
 
@@ -49,6 +50,14 @@ python -m src.main --dry-run --debug --only fss_press # one source, verbose
 - Replace real personal contact details in captured fixtures with fake values.
 - SMTP STARTTLS must pass a verifying context (`starttls(context=ssl.create_default_context())`). A bare `starttls()` skips certificate and hostname checks in CPython and exposes `SMTP_PASSWORD`.
 
+### Subscriber agency selection (README "구독 기관 선택", `cloudflare-subscription/DEPLOY.md`)
+- `config.yaml` `subscription.enabled` stays `false` until the documented cutover. Enabling it, and setting `SUBSCRIPTION_REQUIRED` / `SUBSCRIPTION_DB_INSTANCE`, are owner-approved operations.
+- Fail closed: when enabled, any subscription API, contract, or integrity failure sends no email and leaves new posts' `seen` and queues unconfirmed (a first-run baseline is still recorded, as before). Never fall back to sending everything to all of `MAIL_TO`.
+- Never put recipient addresses, subscriber identifiers (HMAC), or tokens in logs or exception messages; log counts and fixed reason codes only.
+- `SUBSCRIBER_HASH_KEY` is fixed after the first sync; never rotate it silently.
+- `scripts/check_subscription_api.py` performs a real sync (it deactivates subscribers missing from the given `MAIL_TO`). Run it only against staging or with explicit owner approval, never in CI.
+- Nothing deploys the Worker, D1, or Apps Script automatically; deployments and their Secrets are owner-approved manual steps.
+
 ### Unverified sources
 - `pipc_notice` and `pipc_press` have not been verified against live HTML. Do not describe them as verified; follow README "PIPC 두 소스" before changing them.
 
@@ -71,6 +80,7 @@ Used by automated pull request reviewers (Codex, Claude). Flag only these; leave
 - Flag any path where an LLM failure can stop the email from being sent.
 - Flag recipients in `config.yaml`, committed secrets, raw HAR captures, or real personal contact details in fixtures.
 - Flag any SMTP/TLS connection that does not verify the server certificate and hostname (e.g. `starttls()` without a verifying `context`).
+- Flag any path where a subscription API failure falls back to sending to all of `MAIL_TO`, or where recipient addresses or subscriber identifiers reach logs or exception messages.
 
 ## Definition of done
 
