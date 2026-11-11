@@ -206,6 +206,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 ### 3) 수신자 설정
 수신자 주소는 **저장소에 커밋하지 않습니다.** `MAIL_TO` Secret(여러 명은 `a@x.com, b@y.com`)으로만 지정하세요. 로컬 실행 시에는 `.env` 의 `MAIL_TO` 를 사용합니다(`.env` 는 커밋 제외).
 여러 명에게 보내도 **수신자끼리는 서로의 주소를 볼 수 없습니다**(BCC 방식). 메일함에는 발신자가 `LAW RADER` 로 표시됩니다.
+구독자별로 받을 기관을 고르게 하려면 아래 [구독 기관 선택](#구독-기관-선택-기본-비활성) 절을 참고하세요(기본 비활성).
 
 ### 4) 실행
 - 자동: Cloudflare Cron → GitHub `workflow_dispatch` → GitHub-hosted runner → Python 모니터 순서로 실행
@@ -256,6 +257,277 @@ npm run deploy -- --secrets-file .dev.vars
 이미 배포된 Worker의 토큰만 교체하려면 `npx wrangler secret put GITHUB_TOKEN`을 사용할 수 있습니다. 이 명령을 실행하면 Secret을 반영한 새 Worker 버전이 즉시 배포됩니다.
 
 현재 `.github/workflows/monitor.yml`의 기존 GitHub `schedule` 두 개는 Cloudflare 실운영 검증 전 임시 fallback으로 유지합니다. 검증 완료 후 별도 변경에서 제거합니다.
+
+## 구독 기관 선택 (기본 비활성)
+
+`MAIL_TO` 의 기존 구독자가 본인 인증 후 받고 싶은 기관만 고르는 기능입니다.
+
+- Python(`src/subscription.py`): 발송 전 구독 설정 조회·필터·그룹 발송(Phase 1)
+- Cloudflare Worker + D1(`cloudflare-subscription/`): 설정 페이지, 인증번호 발급·검증, 설정 저장, 내부 API(Phase 2)
+- Google Apps Script(`google-apps-script/`): 서명된 요청에 한해 인증번호 메일 발송(Phase 2)
+
+배포 절차는 **[cloudflare-subscription/DEPLOY.md](cloudflare-subscription/DEPLOY.md)**(운영자용 한국어 가이드)를 따릅니다.
+**`config.yaml` 의 `subscription.enabled` 가 `false`(기본)이면 구독 API 를 부르지 않고 지금과 똑같이 발송합니다.**
+
+### 동작 (enabled: true)
+
+1. 보낼 것(신규 또는 의안 재조회 대상)이 있으면 SMTP 선점검 직후, **AI 요약 전에** 구독 API 를
+   한 번 호출합니다(`POST /internal/sync-and-resolve`). `MAIL_TO` 주소는 HMAC 식별자로만 보냅니다.
+2. 같은 실효 설정을 가진 수신자를 한 그룹(BCC 한 통)으로 묶습니다. 전체 수신 그룹이 먼저입니다.
+3. 그룹마다 `Post.source_key` 로 신규 게시물과 의안 상세 업데이트를 거릅니다(표시명은 쓰지 않음).
+   보낼 것이 없는 그룹(일시중지, 이번에 글이 없는 기관만 고른 경우)에는 메일을 보내지 않습니다.
+4. **모든 그룹 발송이 성공한 뒤에만** 기존과 같이 `seen`·재조회 큐를 확정합니다. 받을 사람이
+   없었던 글도 seen 으로 확정됩니다 — seen 은 "이 실행의 발송 처리가 끝났다"는 전역 상태입니다.
+5. 메일 하단에 `수신 기관 설정` 링크(`SUBSCRIPTION_PAGE_URL`)가 붙습니다. 링크에는 주소·토큰이
+   없습니다(전달된 메일로 설정이 바뀌지 않도록 인증은 페이지에서 OTP 로 합니다).
+
+| 기관 ID | 표시명 | source_key |
+|---|---|---|
+| `fsc` | 금융위원회 | `fsc_press`, `fsc_legislation` |
+| `fss` | 금융감독원 | `fss_press`, `fss_admin_guidance`, `fss_rule_amendment`, `fss_sanction`, `fss_mgmt_notice` |
+| `better` | 금융규제·법령해석포털 | `better_reply` |
+| `pipc` | 개인정보보호위원회 | `pipc_notice`, `pipc_press` |
+| `assembly` | 의안정보시스템 | `assembly_bill` (의안 상세 업데이트 포함) |
+
+매핑의 단일 원천은 `config.yaml` 의 `subscription.agencies` 입니다. 켜져 있으면 활성 소스가 모두
+정확히 한 기관에 속해야 하며, 아니면 설정 오류로 실행이 멈춥니다. 구독자는 **기관 ID** 를
+저장하므로 기관에 게시판을 추가하면 그 기관을 고른 사람도 자동으로 받고, `mode=all` 은 새
+기관까지 모두 받습니다. 기관 ID 는 저장값이라 바꾸거나 지우지 마세요.
+
+| 구독 상태 | 의미 |
+|---|---|
+| `mode=all` | 모든 기관 수신 — D1 에 행이 없는 기존 구독자의 초기값 |
+| `mode=selected`, 기관 1개 이상 | 선택한 기관만 수신 |
+| `mode=selected`, 빈 목록 | 전체 알림 일시중지 |
+
+설정(값은 저장소에 두지 않음):
+
+| 이름 | 종류 | 설명 |
+|---|---|---|
+| `SUBSCRIPTION_API_URL` | Secret | 구독 API 주소(`https://…workers.dev/internal/sync-and-resolve`) |
+| `SUBSCRIPTION_API_TOKEN` | Secret | 구독 API Bearer 토큰(Worker Secret 과 같은 값) |
+| `SUBSCRIBER_HASH_KEY` | Secret | 구독자 식별자 HMAC 키, 32자 이상(Worker Secret 과 같은 값) |
+| `SUBSCRIPTION_PAGE_URL` | Variable | 메일 하단 설정 링크(`https://…workers.dev/`) |
+| `SUBSCRIPTION_REQUIRED` | Variable | 운영 보호장치. 정식 전환 **직전** `true`. `true` 인데 `enabled: false` 면 실행 중단(아래). `true`/`false`/빈값 외에는 설정 오류 |
+| `SUBSCRIPTION_DB_INSTANCE` | Variable | 운영 D1 식별자(32자 hex, 점검 스크립트 출력값). D1 재생성·교체 시 발송 중단. `SUBSCRIPTION_REQUIRED=true` 이면 필수 |
+
+### 수신자 처리 규칙
+
+| 상황 | 처리 |
+|---|---|
+| `MAIL_TO` 비어 있음 | 기존 `MAIL_TO` 누락 오류로 종료. 구독 API 를 부르지 않으며 빈 목록은 절대 보내지 않음 |
+| 형식이 잘못된 주소(공백·비ASCII·`이름 <주소>` 등) | 설정 오류로 발송 중단(주소는 로그에 남기지 않고 개수만) |
+| 중복 주소(대소문자만 다른 경우 포함) | 정규화(앞뒤 공백 제거 + ASCII 소문자) 기준 1명으로 보고 한 통만 발송 |
+| `MAIL_TO` 에 새로 추가 | D1 에 행이 없으므로 `mode=all` — 첫 동기화 때 구독자로 등록 |
+| `MAIL_TO` 에서 삭제 | 메일 대상에서 빠짐. Worker 는 그 구독자를 비활성(soft)으로 표시하고 로그인 세션·인증번호를 즉시 삭제, 설정은 보존 |
+| 삭제 후 재등록 | 비활성 → 활성 복귀, 보존된 설정 재적용 |
+| 최초 동기화 전 | D1 에 구독자가 없으므로 아무도 인증번호를 받을 수 없음(신규 가입 불가) |
+
+비활성화는 **로그인 가능 여부에만** 영향을 줍니다. 발송 대상은 언제나 그 실행의 `MAIL_TO` 이므로,
+`MAIL_TO` 를 실수로 줄였다가 되돌려도 설정은 사라지지 않습니다.
+
+동기화 시점: 보낼 것이 있는 실행은 발송 직전에(fail-closed), **보낼 것이 없는 정기 실행도 매번**
+같은 API 로 동기화합니다(Phase 2). 그래서 `MAIL_TO` 에서 뺀 사람의 설정 페이지 접근은 다음 정기
+실행(최대 약 15분)에 막힙니다. 발송 없는 실행의 동기화 실패는 경고만 남기고 메일·state·실행 결과를
+바꾸지 않습니다(다음 발송 실행이 fail-closed 로 드러냅니다). `--dry-run` 은 동기화하지 않습니다.
+
+### 장애 정책
+
+- **구독 API 장애·계약 위반**(연결 실패, 타임아웃, HTTP 200 외 응답, 리다이렉트, 잘못된 JSON,
+  버전 불일치, 구독자 누락·중복, 알 수 없는 mode·기관 ID): 메일을 **한 통도** 보내지 않고 실패(exit 1)로
+  끝냅니다. `MAIL_TO` 전체 발송으로 되돌아가지 않으며 Gemini 도 부르지 않습니다. 신규 글의 seen·상세 재조회
+  큐·재조회 메타데이터는 확정하지 않고, 다음 실행(15분)이 처음부터 다시 시도합니다. API 호출 자체는 재시도하지 않습니다.
+  예외: 이번 실행에서 **처음 기준선을 잡은 소스**의 기준선 기록은 구독 API 조회보다 먼저 저장됩니다(기존 동작 — 기준선은
+  메일로 보내지 않는 글이므로 발송 대상과 무관하며, 워크플로가 state 를 커밋합니다). `SUBSCRIPTION_REQUIRED` 가드로 멈출 때는 수집 전이라 state 를 전혀 바꾸지 않습니다.
+- **구독 설정 누락**(기능은 켰는데 Secret 이 비었거나 https 가 아님): 위와 같이 발송 중단.
+- **그룹 일부 발송 실패**: 기존 '누락보다 중복' 정책을 유지합니다. 한 그룹이라도 실패하면 seen·큐를
+  확정하지 않으므로, 먼저 성공한 그룹은 다음 실행에서 **같은 알림을 중복 수신할 수 있습니다.**
+  로그에 `구독 그룹 i/n(라벨) 발송 실패 … 먼저 발송된 그룹 k개(수신자 m명) … 중복 수신` 이 남습니다
+  (주소·식별자 없이 인원과 기관 ID 라벨만). 같은 그룹에서 반복 실패하면 매 실행마다 앞 그룹에 중복이
+  쌓이므로 Actions 실패가 이어지면 바로 확인하세요.
+- **장기 장애 주의**: 발송이 계속 막혀 있는 동안 한 소스의 신규가 `max_new_per_source`(50, 의안 75)를
+  넘으면, 복구 후 최신 cap 건만 발송되고 나머지는 기존 안전장치에 따라 seen 처리됩니다(SMTP 장애와 같음).
+- `--dry-run` 은 구독 API 를 호출하지 않으므로 운영 D1 을 바꾸지 않습니다.
+
+### 운영 전환·롤백
+
+- **켜기**(상세: [DEPLOY.md 14단계](cloudflare-subscription/DEPLOY.md)): 스테이징 검증 → 운영 D1 식별자를
+  `SUBSCRIPTION_DB_INSTANCE` 에 등록 → 이 기능을 `enabled: false` 그대로 main 반영 → **전환 직전 `SUBSCRIPTION_REQUIRED=true`**
+  (이 순간부터 `enabled: false` 인 main 은 잠시 실행을 멈춤) → `enabled: true` 반영 → 첫 실행 확인 → 링크 안내.
+  보호장치를 사용자 설정 기능(메일 하단 링크)보다 먼저 켭니다. 첫 실행에서 기존 구독자는 모두 `mode=all` 이라 받는 내용은 전과 같습니다.
+- **보호장치의 전제**: ① main 의 Python 코드(이 기능 포함 버전) ② `monitor.yml` env 줄 ③ GitHub Variable 이 모두 있어야 작동합니다.
+  이 기능 이전의 운영 코드는 `SUBSCRIPTION_REQUIRED` 를 읽지 않으므로 Variable 만 먼저 바꿔도 효과가 없습니다.
+- **운영 보호장치**: GitHub Variable `SUBSCRIPTION_REQUIRED=true` 상태에서
+  `enabled` 가 `false` 가 되면 실행 시작 직후(수집 전) 멈추고 메일·state 를 바꾸지 않습니다(`--dry-run` 은 경고만).
+  오타(`ture`, `yes`, `1` 등)는 false 로 읽지 않고 설정 오류로 실행을 실패시킵니다. 코드를 이 장치 이전
+  버전으로 되돌리면 보호장치도 사라지므로, 되돌리기 전에 아래 폐지 절차를 먼저 마칩니다.
+- **롤백은 단계에 따라 다릅니다**(상세: [DEPLOY.md '롤백·비상 정지'](cloudflare-subscription/DEPLOY.md)).
+  - 기관 선택(일시중지 포함)을 저장한 구독자가 **없는** 도입 전에만 `enabled: false` + `SUBSCRIPTION_REQUIRED` 비움으로
+    기존 전원 발송 방식에 되돌릴 수 있습니다(받는 메일이 같으므로).
+  - 저장한 구독자가 **있으면** 그 조합은 금지입니다 — 일시중지·선택 수신 구독자에게 고르지 않은 기관의 메일이 나갑니다.
+    기본 조치는 `SUBSCRIPTION_REQUIRED=true` 를 유지한 **안전 정지**(monitor 워크플로 비활성화, 또는 `true` 상태에서 `enabled: false`)이고,
+    재개는 보호장치·D1 식별자 검사(Python)와 카탈로그 불일치 거절(Worker)이 있는 검증된 버전으로만 합니다.
+  - Worker 장애에는 끄지 말고 복구를 기다리세요(메일은 보류됐다가 복구 후 발송).
+  - 이 기능 이전 코드는 `SUBSCRIPTION_REQUIRED` 를 아예 읽지 않으므로, 그런 코드로 되돌리는 것은 롤백이 아니라 기능 폐지입니다.
+    폐지는 ① 안전 정지 ② 구독자 사전 공지 ③ D1 에서 일시중지·선택 구독자를 확인해 필요한 주소를 `MAIL_TO` 에서 정리
+    ④ 코드 되돌리기 순서로만 합니다. 검증된 코드가 없으면 워크플로 비활성화·SMTP 자격증명 비활성화(운영자 승인)로 멈춥니다.
+- **HMAC 키 정책**: `SUBSCRIBER_HASH_KEY` 는 최초 설정 후 고정합니다. 실제 값은 Cloudflare·GitHub Secret 에만
+  두고 git 추적 파일에 기록하지 않습니다. 키를 바꾸면 모든 식별자가 바뀝니다. 한쪽만 바뀌면 `hash_key_mismatch`,
+  두 곳이 함께 바뀌면 `key_changed` 로 발송이 멈추며(저장된 선택이 `mode=all` 로 조용히 초기화되지는 않음),
+  조용한 교체는 금지합니다. 유출 시에는 설정을 보존하는 별도 마이그레이션을 먼저 준비합니다
+  (현재 버전에 자동 키 회전 기능은 없습니다).
+
+### Python ↔ Worker API 계약 (v1)
+
+`POST /internal/sync-and-resolve` · `Authorization: Bearer <SUBSCRIPTION_API_TOKEN>` ·
+`Content-Type: application/json`
+
+요청(Python → Worker):
+
+```json
+{
+  "api_version": 1,
+  "key_check": "9b2e…(HMAC-SHA256(SUBSCRIBER_HASH_KEY, \"lrk-subscriber-key-check-v1\") hex 64자)",
+  "subscribers": [
+    "1f0c…(HMAC-SHA256 hex 64자, 정렬·중복 제거)",
+    "9a7e…"
+  ],
+  "agencies": [
+    {"id": "fsc", "name": "금융위원회"},
+    {"id": "fss", "name": "금융감독원"},
+    {"id": "better", "name": "금융규제·법령해석포털"},
+    {"id": "pipc", "name": "개인정보보호위원회"},
+    {"id": "assembly", "name": "의안정보시스템"}
+  ]
+}
+```
+
+`instance`(선택): 운영자가 `SUBSCRIPTION_DB_INSTANCE` 에 등록한 D1 식별자(32자 hex). 있으면 Worker 의 D1 과 같은지 확인합니다.
+
+응답(Worker → Python, HTTP 200):
+
+```json
+{
+  "api_version": 1,
+  "instance": "3f9c…(이 D1 의 식별자 32자 hex)",
+  "subscribers": [
+    {"subscriber": "1f0c…", "mode": "all", "agencies": []},
+    {"subscriber": "9a7e…", "mode": "selected", "agencies": ["fsc", "assembly"]}
+  ]
+}
+```
+
+- 식별자 = `HMAC-SHA256(SUBSCRIBER_HASH_KEY, 정규화 주소)` 소문자 hex. 정규화 = 앞뒤 공백 제거 +
+  ASCII 소문자(비ASCII 주소는 거부 — Python 과 JavaScript 의 대소문자 변환 차이를 없애기 위함).
+- 응답 `subscribers` 는 **목록**입니다(JSON 객체는 중복 키를 감지할 수 없음). 요청한 식별자마다
+  정확히 1개 — 누락·중복·요청하지 않은 식별자는 Python 이 오류로 처리합니다.
+- `mode` 는 `all`/`selected` 만. `mode=all` 이면 `agencies` 는 빈 목록이어야 합니다.
+  `selected` + 빈 목록은 정상(일시중지)입니다. 기관 ID 는 요청 카탈로그에 있는 것만, 중복 없이.
+- `api_version` 은 정수 1. 그 밖의 최상위 키는 무시합니다(하위 호환 확장용). Python 은 `SUBSCRIPTION_DB_INSTANCE` 가
+  설정돼 있으면 응답 `instance` 가 같은지도 확인합니다.
+- **무결성 거절(Phase 2.6, 모두 409·쓰기 없음 — Python 은 발송 중단):** `instance_missing`(Python 이 식별자를 기대하는데 D1 에
+  없음 = D1 재생성·교체 의심) · `instance_mismatch`(다른 D1) · `key_changed`(최초 동기화 때와 다른 키 — GitHub·Worker 키가 함께 바뀜) ·
+  `catalog_mismatch`(구독자가 고른 기관이 카탈로그에서 빠짐) · `preference_missing`(설정을 저장한 적 있는 구독자의 설정 행이 없음).
+  어느 경우든 기본값 `mode=all` 로 조용히 돌아가지 않습니다. Python 오류 메시지에 사유 코드가 함께 표시됩니다(예: `HTTP 409 (catalog_mismatch)`).
+- `key_check` 는 Python 과 Worker 에 등록한 `SUBSCRIBER_HASH_KEY` 가 같은지 확인하는 값입니다(키 자체가 아님).
+  Worker 가 자기 키로 계산한 값과 다르면 DB 를 건드리지 않고 `409 hash_key_mismatch` 로 거절합니다 —
+  키가 다르면 모든 식별자가 '새 구독자'로 보여 전원 `mode=all` 로 응답되는(일시중지·선택이 조용히 무시되는)
+  사고를 막기 위한 장치입니다(Phase 2.5 검수에서 추가).
+- 응답 본문 1 MB 초과, 200 이외 상태(리다이렉트 포함)는 오류입니다. 타임아웃은 `subscription.timeout_sec`.
+
+Worker 구현(`cloudflare-subscription/src/internal.ts`)이 지키는 것:
+
+1. 토큰을 상수 시간으로 비교하고, 실패하면 401 을 반환하며 아무것도 쓰지 않는다. `key_check` 가
+   다르면 409, 없거나 형식이 틀리면 400(모두 쓰기 없음).
+2. 요청 전체를 먼저 검증한다(버전, 빈 목록 금지 → 400, 64자 hex, 중복 금지, 기관 ID 형식).
+   하나라도 틀리면 **쓰기 없이** 4xx.
+3. 동기화는 **차분만** 쓴다: 새 식별자 INSERT, 활성 상태가 바뀐 것만 UPDATE, 카탈로그는 바뀐 경우만
+   upsert. 변화가 없는 실행은 쓰기 0건이어야 한다(15분마다 호출되므로).
+4. 모든 쓰기를 하나의 `D1 batch` 로 실행한다(트랜잭션 — 중간 실패 시 전체 롤백). 실패하면 5xx 를
+   반환해 Python 이 발송을 중단하게 한다. 부분 동기화로 기존 구독자가 비활성화되는 일이 없어야 한다.
+5. 구독자가 고른 기관 중 하나라도 이번 요청 카탈로그에 없으면 **전체 수신으로 넓히지도, 조용히 좁히지도 않고**
+   `409 catalog_mismatch` 로 거절한다(쓰기 없음, 저장된 선택 보존 — 기관을 되돌리면 그대로 복원). 일시중지(`selected` + 빈 목록)는
+   정상이다. 기관을 없애야 하면 DEPLOY.md '기관 제거' 절차로 해당 선택을 먼저 정리한다. (Phase 2 의 '선택이 비면 mode=all' 규칙은
+   원하지 않은 기관의 메일을 보낼 수 있어 Phase 2.6 에서 폐기했다.)
+6. D1 에는 평문 이메일을 저장하지 않는다(식별자만). 로그에도 토큰·식별자를 남기지 않는다.
+
+### 설정 서비스 구현 (Phase 2)
+
+Worker API(`cloudflare-subscription/src/index.ts`):
+
+| 메서드 · 경로 | 인증 | 설명 |
+|---|---|---|
+| `GET /` · `/app.js` · `/app.css` | — | 설정 페이지(프레임워크·외부 스크립트 없음, 기관 목록은 D1 카탈로그로 그림) |
+| `POST /api/otp/request` `{email}` | Origin | 항상 `202 {"ok":true}`(등록 여부 비노출). 활성 구독자일 때만 응답 뒤 인증번호 발급·메일 요청 |
+| `POST /api/otp/verify` `{email, code}` | Origin | 성공 시 `200` + `__Host-lrk_session` 쿠키. 실패는 사유와 무관하게 `400 invalid_code` |
+| `GET /api/preferences` | 세션 | `{mode, agencies, version, catalog, session_expires_at}` (실효 설정 = 다음 발송에 적용될 상태) |
+| `PUT /api/preferences` `{mode, agencies, version}` | 세션 + Origin | 본인 설정만 저장. 읽은 `version` 이 아니면 `409 version_conflict` + 최신 상태 |
+| `POST /api/logout` | Origin | 세션 삭제·쿠키 제거 |
+| `POST /internal/sync-and-resolve` | Bearer | Python 전용, 위 계약 v1 |
+
+오류 응답은 `{"error":"코드"}` 와 알맞은 상태코드이며 실패를 200 으로 가장하지 않습니다.
+
+**인증번호**: 6자리(`crypto.getRandomValues` + 거부 표본추출), 10분, 5회, 일회용, 재발급 시 이전 번호 무효
+(구독자당 1행). D1 에는 `HMAC(SERVER_SECRET, "otp:{식별자}:{salt}:{번호}")` 만 저장합니다. 시도 횟수는 비교
+**전에** 원자적으로 올리고, 성공 시 행 삭제로 소비해 병렬 요청에도 세션은 1개만 생깁니다.
+
+**요청 제한**: isolate 메모리 IP 제한(분당 30회, D1 이전 1차 차단 — 최선 노력) → D1 고정 창 카운터(이메일 15분 3회·
+하루 5회, IP 시간당 10회, 검증 IP 시간당 20회, 전체 발송 하루 30통, 전체 요청 예산 하루 인증번호 요청 1,000건·
+검증 2,000건). 카운터 키는 HMAC 이라 원문이 없습니다. **이미 한도에 걸린 요청은 읽기만 하고 D1 에 쓰지 않습니다** —
+거절될 요청까지 카운터를 올리면 공격 IP 하나로 D1 무료 쓰기 한도를 소진시켜 정기 메일(fail-closed)까지 멈출 수
+있기 때문입니다(Phase 2.5 검수에서 수정). 전체 요청 예산을 넘으면 그날은 설정 페이지만 잠기고 정기 메일 동기화는
+D1 쓰기 여유를 유지합니다.
+Cloudflare Rate Limiting 바인딩은 무료 플랜 제공 여부를 공식 문서로 확인하지 못해 쓰지 않습니다.
+
+**세션·웹 보안**: 256비트 토큰(D1 에는 SHA-256), 절대 만료 30분, 구독자당 1개.
+`__Host-lrk_session; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=1800`. 상태 변경 API 는 `Origin` 이
+`PUBLIC_ORIGIN` 과 정확히 같고 `Content-Type: application/json` 일 때만 받습니다(CORS 헤더 없음).
+모든 응답에 CSP(`default-src 'none'; script-src 'self'; …; frame-ancestors 'none'`), `Cache-Control: no-store`,
+`nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. 화면은 서버 데이터를 `textContent` 로만 넣습니다.
+세션 확인 때마다 구독자 활성 여부를 함께 확인합니다.
+
+**Apps Script 호출 보호** — 공식 문서로 확인한 제약:
+[Web Apps](https://developers.google.com/apps-script/guides/web) /
+[Event Objects](https://developers.google.com/apps-script/guides/triggers/events) 의 `doPost(e)` 이벤트 객체에는
+수신 요청 헤더 필드가 없으므로 인증 정보는 본문에 넣습니다.
+
+- 본문: `{"v":1,"ts":<unix초>,"nonce":"<32자 hex>","to":"<정규화 주소>","code":"<6자리>","sig":"<hex>"}`,
+  `sig = HMAC-SHA256(공유 Secret, "LRK-OTP-v1\n{ts}\n{nonce}\n{to}\n{code}")` — 수신자와 메일 내용(번호)에 대한 서명.
+  공유 Secret 은 Worker Secret 과 Apps Script **스크립트 속성** `OTP_SHARED_SECRET` 에만 둡니다.
+- Apps Script 순서: 본문 형식 → 서명(상수 시간) → `ts` ±300초 → `LockService` 직렬화 → **`PropertiesService`(영속)**
+  nonce 재사용 검사 → 자체 상한(하루 30통·수신자별 5통) → `MailApp.getRemainingDailyQuota()` 예비분 확인 →
+  nonce·카운터를 **발송 전에** 기록 → `MailApp.sendEmail()`. 서명이 틀린 요청은 nonce 저장소도 건드리지 않습니다.
+- `CacheService` 는 쓰지 않습니다([공식 문서](https://developers.google.com/apps-script/reference/cache/cache)상 만료 전 삭제 가능).
+  스크립트 속성은 값 9KB·저장소 500KB 한도라 15분 지난 nonce 와 지난 날짜 카운터를 매 요청 정리합니다.
+- 웹앱 응답은 [공식 문서](https://developers.google.com/apps-script/guides/content)상 `script.googleusercontent.com` 의
+  일회용 주소로 리다이렉트되므로 Worker 는 `redirect: "follow"` 로 따라가 JSON 본문의 `ok` 로만 판정합니다.
+  **이 리다이렉트·응답 동작은 실제 Google 서버로 검증하지 못했으므로 배포 시 DEPLOY.md 8단계로 확인합니다.**
+
+**발송량** — [Apps Script 할당량](https://developers.google.com/apps-script/guides/services/quotas):
+일반 Gmail 계정의 `MailApp` 수신자 한도는 하루 100명입니다. 자체 상한(하루 30통)으로 여유를 둡니다. 정기
+모니터링 메일(Gmail SMTP)은 별도 경로이지만 같은 계정이면 계정 평판을 공유할 수 있어(공식 수치 미확인)
+**인증번호 전용 무료 Gmail 계정**으로 Apps Script 를 배포하는 것을 권장합니다.
+
+### 무료 운영 제약 (월 추가 비용 0원)
+
+- [Workers Free](https://developers.cloudflare.com/workers/platform/limits/): 하루 요청 100,000건(UTC 자정
+  초기화, 초과 시 Error 1027), 요청당 CPU 10ms, 외부 subrequest 50개. 해시·HMAC 수준 연산만 하고 PBKDF2 같은
+  무거운 연산은 쓰지 않습니다. 무료 `workers.dev` 주소를 씁니다(별도 도메인 없음).
+- [D1 Free](https://developers.cloudflare.com/d1/platform/pricing/): 하루 읽기 500만 행·쓰기 10만 행(UTC 자정
+  초기화). 2026-09-01 부터 초과 시 쿼리가 오류로 실패합니다(자동 과금·자동 전환 없음).
+  **D1 이 한도로 실패하면 구독 API 도 실패하고, fail-closed 정책상 정기 메일 전체가 UTC 자정까지 보류됩니다.**
+  그래서 OTP 엔드포인트는 D1 쓰기 전에 요청 제한을 걸고, 동기화는 차분만 씁니다.
+- Apps Script: 위 `MailApp` 하루 100명. 유료 서비스·Resend·도메인 구매는 사용하지 않습니다.
+- Workers·D1 무료 한도는 **계정 단위**입니다. 공개 페이지를 대량으로 두드려 한도를 소진시키면 구독 API 도
+  실패해 정기 메일이 보류될 수 있습니다(fail-closed). D1 쓰기는 '막힌 요청은 쓰지 않음 + 전체 요청 예산'으로 보호하지만,
+  **Workers 하루 요청 한도(100,000건)는 Worker 코드가 실행되기 전에 집계되므로 코드로 막을 수 없습니다.** 구독 Worker 를 별도 무료
+  계정에 두면 예약 실행 Worker(scheduler)는 보호되지만, 구독 Worker 자신의 한도 소진 → 내부 동기화 실패 → 그날 KST 09시까지 정기 메일
+  보류라는 구조적 위험은 남습니다(유료 기능 없이 완전히 없애는 방법은 없음). DEPLOY.md 15단계로 사용량을 확인하세요.
+- D1 은 무료 플랜에서도 Time Travel(최근 7일 시점 복원)이 됩니다. 삭제된 DB 의 undelete 는 삭제 후 7일 이내 요청만
+  받습니다(2026-10-23 changelog). 복원·백업 절차와 주의사항은 DEPLOY.md 'D1 백업·복구'.
+- **월 0원은 무료 한도 안에서라는 조건이 붙은 운영 목표이지 가용성 보장이 아닙니다.** 한도를 넘으면 과금 대신 요청·쿼리가
+  실패하고, 그동안 정기 메일은 보류됩니다(전원 발송으로 대체하지 않음).
+- 수치는 2026-10 기준 공식 문서 확인 값이며 바뀔 수 있습니다. 배포 전에 다시 확인하세요.
 
 ## 주요 설정값 (`config.yaml`)
 
@@ -397,7 +669,17 @@ python scripts/send_test_email.py
 
 # 테스트
 python -m pytest -q
+
+# 구독 설정 Worker 테스트(workerd + 로컬 D1, 외부 호출 없음)
+cd cloudflare-subscription && npm ci && npm run check && npm test && cd ..
+
+# 인증번호 메일 Apps Script 테스트(Node 대역, 실제 Google 서비스 호출 없음)
+node --test google-apps-script/test/*.test.mjs
 ```
+
+로컬 Worker 와 Python 의 실제 HTTP 연동 테스트(`tests/test_subscription_contract.py` 의 E2E)는
+`wrangler dev` 로 로컬 Worker 를 띄우고 `LRK_WORKER_E2E_URL`(127.0.0.1 만 허용)·`LRK_WORKER_E2E_TOKEN`·
+`LRK_WORKER_E2E_HASH_KEY` 를 지정했을 때만 실행됩니다(지정하지 않으면 skip).
 
 ## 소스 점검 (파서가 깨졌을 때)
 
@@ -440,10 +722,13 @@ config.yaml                 # 수신자·발송옵션·모니터링 대상 목�
   monitor.yml               # Dispatch 실행(수집→메일→state 커밋)
   verify.yml                # 수동 소스 점검
 cloudflare-scheduler/       # Cron Trigger 및 GitHub Dispatch Worker
+cloudflare-subscription/    # 수신 기관 설정 Worker + D1 마이그레이션 + 테스트(DEPLOY.md 배포 가이드)
+google-apps-script/         # 인증번호 메일 발송 전용 Apps Script 웹앱 + Node 테스트
 src/
   main.py                   # 오케스트레이션(수집→신규판별→enrich→메일→저장)
   config.py  fetcher.py     # 설정 로딩 / HTTP 세션(재시도·한글 인코딩·첨부 용량 제한)
   state.py   notifier.py    # 신규 판별 상태(원자적 저장) / 이메일 렌더·발송
+  subscription.py           # 구독 API 조회·검증, 수신자 그룹화, 기관별 필터(기본 비활성)
   summarizer.py             # 일반 게시물 3줄 요약(1건당 1회, 실패 시 원문 발췌 폴백)
   assembly_summary.py       # 계류의안 배치 3줄 요약(최대 25건/요청, BILL_ID 로 매핑,
                             #   배치별 공정 시간배분 + 호출 텔레메트리)
@@ -460,6 +745,7 @@ src/
 state/seen.json             # 이미 본 글 ID (자동 커밋)
 scripts/
   send_test_email.py        # SMTP 설정 확인
+  check_subscription_api.py # 구독 API 연동 점검(동기화 + 그룹 요약, 메일·state 변경 없음)
   preview_fss_rule.py       # 세칙·행정지도 예고 1건 단건 점검·메일 미리보기(발송·state·Gemini 없음)
   verify_sources.py         # 소스 점검(목록/상세를 구분해 판정)
   capture_assembly_network.py  # [진단] 의안 상세 XHR 캡처(Playwright, HAR·JS 분석)

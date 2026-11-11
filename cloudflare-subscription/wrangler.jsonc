@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // 구독자별 수신 기관 설정 Worker. 기존 cloudflare-scheduler(GitHub Actions 실행 권한 보유)와
+  // 분리된 별도 Worker다 — 공개 엔드포인트가 PAT 를 가진 Worker 와 섞이지 않게 한다.
+  "name": "law-rader-subscription",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-28",
+  // 무료 workers.dev 주소로 공개한다(별도 도메인 없음). 미리보기 URL 은 쓰지 않는다.
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    // 설정 페이지의 정확한 출처(Origin). 배포 후 실제 workers.dev 주소로 바꿔야 한다.
+    // 이 값과 다른 Origin 의 변경 요청은 모두 거절된다(값이 틀리면 로그인 자체가 실패 = 안전한 실패).
+    "PUBLIC_ORIGIN": "https://law-rader-subscription.YOUR-SUBDOMAIN.workers.dev"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "law-rader-subscription",
+      // `wrangler d1 create law-rader-subscription` 이 출력한 ID 로 바꾼다(비밀값 아님).
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    // 만료된 인증번호·세션·요청 제한 기록 정리(매일 KST 03:17).
+    "crons": ["17 18 * * *"]
+  }
+  // Secret(값은 여기 쓰지 않는다 — `wrangler secret put` 으로만 등록):
+  //   INTERNAL_API_TOKEN, SUBSCRIBER_HASH_KEY, SERVER_SECRET,
+  //   APPS_SCRIPT_URL, APPS_SCRIPT_SHARED_SECRET
+}

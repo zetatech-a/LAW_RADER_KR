@@ -1,0 +1,12 @@
+{
+  "_comment": "Worker(mailer.ts)와 Apps Script(Code.gs)가 같은 서명 규칙을 쓰는지 양쪽 테스트가 함께 검사하는 고정 요청. 테스트 전용 비밀값.",
+  "secret": "test-apps-script-secret-0123456789abcdef",
+  "request": {
+    "v": 1,
+    "ts": 1800000000,
+    "nonce": "0123456789abcdef0123456789abcdef",
+    "to": "user@example.com",
+    "code": "123456",
+    "sig": "1933a663764aa93aa8936f44e058d066a98ddd9c17191deed18ced12d39a146d"
+  }
+}
