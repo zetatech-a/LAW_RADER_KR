@@ -320,6 +320,7 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:249882",
       "nttId:249868",
       "nttId:249867",
       "nttId:249862",
@@ -1079,6 +1080,36 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_41EEED926CCA4C5BB5DB11203108FC",
+      "PRC_1C4DC2B8D5B243A286FD49A981578F",
+      "PRC_E9013CD8B0A34331936D1EC398C586",
+      "PRC_DB5D6D6280D243FEAE6427F408610E",
+      "PRC_726B3B4461B941039697B3B682D870",
+      "PRC_D8728D544D0240DBBACABB74BFC37C",
+      "PRC_97D7CD38A6E74E8F87A2C886A11DE3",
+      "PRC_140519A1055B4DF49ADED34F3AC327",
+      "PRC_83FF686D1AAD4E87A128BE89D7C761",
+      "PRC_34DA4D8E36F949548A64AA499713D0",
+      "PRC_116C8EA3E83844DA88C69163EA6F92",
+      "PRC_Y2Y6W0X9V2W1S0S9Q4P0P0O6O8W6X2",
+      "PRC_DD40A0A4FF144FDB860E52FFBC8157",
+      "PRC_EDC78FC076384C1CBCBB065C12FC3D",
+      "PRC_BEAB9FA9791F49978149EC7920354B",
+      "PRC_DF27E5284D71408FA38ABC0019DB4E",
+      "PRC_4D001F67E789466F8DF8D6968837F3",
+      "PRC_03C0ED0C30CE4F288AEA6A9179C285",
+      "PRC_80E8575D3CA6490C8AB2B25CE1C092",
+      "PRC_6A14CD55B76A494A80F51DB9FB0817",
+      "PRC_B8CB3783D9A7494581BDE8EF5AE240",
+      "PRC_P2Q6O0P9W0X3V1W6U0T0T5P2P1O6P4",
+      "PRC_9D26EDE08C7A40D090D66D42A907EF",
+      "PRC_DDC8E4D7C7954002A66FB56417F75B",
+      "PRC_E8E8723128F3427C9895EEC419F29B",
+      "PRC_8468425D2E9B485F8FBA6EDD4C2537",
+      "PRC_363D7C1D505C4833879949DCD13525",
+      "PRC_38655702A95446689CDD46846A3080",
+      "PRC_5EE3CFEA09AE4EAB8B949901372F9E",
+      "PRC_830B9AA4D72843F48F51A1927D933E",
       "PRC_60EA805AABE24F48AB48F3C63A84E4",
       "PRC_5234DC1C1D6D4E1A98BE6DB14EFA35",
       "PRC_B99D2BE165E3436F8B9C768BA1AA07",
@@ -4003,53 +4034,53 @@
     "pending_detail": {
       "PRC_57ADD3FE326C4C4E8C6804D17EE44A": {
         "first_seen_at": "2026-10-23T00:11:22Z",
-        "attempts": 227,
+        "attempts": 228,
         "title": "지방교부세법 일부개정법률안 (임이자의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_57ADD3FE326C4C4E8C6804D17EE44A",
         "date": "2026-10-22",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-16T08:53:19Z"
+        "last_attempt_at": "2026-11-17T00:11:01Z"
       },
       "PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6": {
         "first_seen_at": "2026-10-30T00:14:41Z",
-        "attempts": 158,
+        "attempts": 159,
         "title": "세계선거기관협의회 지원에 관한 법률폐지법률안 (송재봉의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6",
         "date": "2026-10-29",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-16T08:53:19Z"
+        "last_attempt_at": "2026-11-17T00:11:01Z"
       },
       "PRC_2E33F24A5B1F47099B1A4857F2C83E": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 78,
+        "attempts": 79,
         "title": "집회 및 시위에 관한 법률 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_2E33F24A5B1F47099B1A4857F2C83E",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-16T08:53:19Z"
+        "last_attempt_at": "2026-11-17T00:11:01Z"
       },
       "PRC_6418BEFE9E284DECB1A83326CF1AEF": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 78,
+        "attempts": 79,
         "title": "인구감소지역 지원 특별법 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_6418BEFE9E284DECB1A83326CF1AEF",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-16T08:53:19Z"
+        "last_attempt_at": "2026-11-17T00:11:01Z"
       },
       "PRC_4936A5C31EE64424AE7CD8BA455349": {
         "first_seen_at": "2026-11-13T00:13:16Z",
-        "attempts": 26,
+        "attempts": 27,
         "title": "지방세특례제한법 일부개정법률안 (채현일의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_4936A5C31EE64424AE7CD8BA455349",
         "date": "2026-11-12",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-16T08:53:19Z"
+        "last_attempt_at": "2026-11-17T00:11:01Z"
       }
     }
   },
