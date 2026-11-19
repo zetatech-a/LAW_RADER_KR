@@ -15,6 +15,8 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import LLMConfig, SourceConfig
@@ -24,6 +26,9 @@ from src.scrapers.base import CollectResult
 from src.scrapers.pipc import PipcBoardScraper
 from src.state import State
 from src.summarizer import Summarizer, ai_target_count, summarize_posts
+
+# 출고 config.yaml 의 구독 기능과 무관한 기존 전체 발송 경로를 검증한다(tests/conftest.py legacy_delivery).
+pytestmark = pytest.mark.usefixtures("legacy_delivery")
 
 PIPC_KEYS = ("pipc_notice", "pipc_press")
 PIPC_NAMES = {"pipc_notice": "개인정보위 · 공지사항", "pipc_press": "개인정보위 · 보도자료"}

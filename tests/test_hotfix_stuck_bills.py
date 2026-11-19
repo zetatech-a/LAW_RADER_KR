@@ -14,11 +14,16 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.models import ASSEMBLY_SOURCE_KEY, ProposalContentStatus as S
 from src.state import EXCLUDED_DETAIL_KEY, MAX_PER_SOURCE, PENDING_DETAIL_KEY, State
 from test_phase2_orchestration import OLD, PRESS_KEY, _bill, _run
+
+# 출고 config.yaml 의 구독 기능과 무관한 기존 전체 발송 경로를 검증한다(tests/conftest.py legacy_delivery).
+pytestmark = pytest.mark.usefixtures("legacy_delivery")
 
 REPO_STATE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "seen.json"

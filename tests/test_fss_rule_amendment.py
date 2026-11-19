@@ -20,6 +20,9 @@ from src.scrapers.fss import FssBoardScraper
 from src.scrapers.fss_rule import extract_rule_sections, is_complete
 from src.summarizer import Summarizer, ai_target_count
 
+# 출고 config.yaml 의 구독 기능과 무관한 기존 전체 발송 경로를 검증한다(tests/conftest.py legacy_delivery).
+pytestmark = pytest.mark.usefixtures("legacy_delivery")
+
 PURPOSE, CONTENT, DEADLINE, CONTACT = FSS_RULE_SECTION_TITLES
 FIXTURES = Path(__file__).parent / "fixtures" / "fss_rule"
 LIVE_4405 = FIXTURES / "live" / "lrgSlno_4405.html"

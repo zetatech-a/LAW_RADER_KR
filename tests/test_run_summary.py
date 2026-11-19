@@ -12,6 +12,9 @@ from src.main import _DetailStats, _log_ai_summary, _log_detail_summary
 from src.models import Post
 from src.summarizer import ai_target_count
 
+# 출고 config.yaml 의 구독 기능과 무관한 기존 전체 발송 경로를 검증한다(tests/conftest.py legacy_delivery).
+pytestmark = pytest.mark.usefixtures("legacy_delivery")
+
 
 def _log_run_summary(cfg, posts, detail, assembly) -> None:
     """두 집계를 이어서 부르는 테스트 편의 함수.
