@@ -30,6 +30,9 @@ from src.summarizer import (
     summarize_posts,
 )
 
+# 출고 config.yaml 의 구독 기능과 무관한 기존 전체 발송 경로를 검증한다(tests/conftest.py legacy_delivery).
+pytestmark = pytest.mark.usefixtures("legacy_delivery")
+
 
 def _cfg(**over) -> LLMConfig:
     base = dict(
