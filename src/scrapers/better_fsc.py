@@ -38,10 +38,13 @@
 밑에 보내는 것이 본문이 비는 것보다 훨씬 나쁘므로 fail-open 하지 않는다. 반대로 identity 확인에 성공한 뒤의 본문
 파싱·첨부 실패에서는 링크를 되돌리지 않는다(그 상세가 이 글의 것임은 이미 확인됐다).
 
-상세 페이지에서는 질의요지·회답·이유를 뽑아 post.body 에 담는다. **세 항목이 모두
-있을 때만** 담는다 — 회답이 빠진 질의만으로 3줄 요약을 만들면 결론을 지어낸 요약이
-메일에 실린다. 하나라도 없으면 body 를 비워 두고(요약 대상에서 제외) 어떤 항목이
-없는지 warning 을 남긴다. 첨부 수집은 그와 무관하게 계속한다.
+상세 페이지에서는 질의요지·회답·이유를 뽑아 post.body 에 담는다. **질의요지·회답은
+필수, 이유는 선택**이다 — 회답이 빠진 질의만으로 3줄 요약을 만들면 결론을 지어낸 요약이
+메일에 실리므로, 질의요지·회답 중 하나라도 없으면 body 를 비워 두고(요약 대상에서 제외)
+어떤 항목이 없는지 warning 을 남긴다. 반면 포털에는 이유 칸이 비어 있는 회신이 실제로
+있으므로, 질의요지·회답이 모두 있으면 있는 항목만 원래 순서로 담는다. 없는 이유를 지어
+넣지 않고 [이유] 표식 자체를 생략한다. 이유 칸이 있는데 비어 있으면 info, 이유 라벨을
+찾지 못하면 '마크업 확인 필요' warning 으로 구분해 남긴다. 첨부 수집은 그와 무관하게 계속한다.
 
 details 에는 담지 않는다. summarizer 의 실제 호출 경로(_summarize_general)는 details
 를 보지 않고 _prepare_body(=body 길이)만으로 대상을 고르므로 details 를 채워도 요약
@@ -83,6 +86,10 @@ _NAV_PARAMS = ("stNo", "muNo", "muGpNo")
 
 # 상세에서 뽑을 항목. 리스트 순서가 곧 body 출력 순서다.
 _BODY_LABELS = ("질의요지", "회답", "이유")
+
+# body 를 만들기 위해 반드시 있어야 하는 항목. 회답 없는 질의만으로 요약하면 결론을
+# 지어내므로 두 항목은 필수다. '이유'는 포털에서 비어 있는 회신이 있어 선택 항목이다.
+_REQUIRED_BODY_LABELS = ("질의요지", "회답")
 
 # 상세 URL 파일명 → 목록의 구분. 목록 record 와 상세 endpoint 가 같은 유형을 가리키는지
 # 확인하는 데 쓴다(_identity_ok).
@@ -355,7 +362,7 @@ class BetterReplyScraper(BaseScraper):
 
     # --- 상세 수집 ---
     def enrich(self, post: Post) -> None:
-        """상세에서 질의요지·회답·이유와 첨부를 채운다.
+        """상세에서 질의요지·회답·이유와 첨부를 채운다(질의요지·회답 필수, 이유 선택).
 
         post.url 의 상세 주소는 아직 라이브 확인되지 않은 dataIdx 매핑으로 만든
         **후보(provisional)** 다. 그 응답이 이 게시물의 것임을 확인하기 전까지는 사용자에게
@@ -400,9 +407,10 @@ class BetterReplyScraper(BaseScraper):
         # 사용자가 원문을 직접 볼 수 있어야 한다.
         sections = self._sections(soup)
         missing = [label for label in _BODY_LABELS if label not in sections]
-        if missing:
-            # 부분 본문은 요약 입력으로 쓰지 않는다 — 회답 없는 질의만 넘기면 Gemini 가
-            # 결론을 지어낸다. 본문을 비우면 기존 폴백(제목·링크)으로 안전하게 나간다.
+        if any(label in missing for label in _REQUIRED_BODY_LABELS):
+            # 필수 항목이 빠진 부분 본문은 요약 입력으로 쓰지 않는다 — 회답 없는 질의만
+            # 넘기면 Gemini 가 결론을 지어낸다. 본문을 비우면 기존 폴백(제목·링크)으로
+            # 안전하게 나간다. 로그에는 빠진 항목을 모두 적는다(선택 항목 포함).
             log.warning(
                 "[%s] 상세에서 %s 를 찾지 못해 본문을 비웁니다 — 마크업 확인 필요: %s",
                 self.key,
@@ -410,7 +418,24 @@ class BetterReplyScraper(BaseScraper):
                 post.url,
             )
         else:
-            post.body = "\n\n".join(f"[{label}]\n{sections[label]}" for label in _BODY_LABELS)
+            # 여기서 missing 에 남는 것은 선택 항목(이유)뿐이다. 없는 내용을 지어 넣지
+            # 않고 표식째 생략한다. 정상적인 빈 칸과 라벨·DOM 파싱 실패를 로그 수준으로
+            # 구분한다(본문은 로그에 남기지 않는다).
+            for label in missing:
+                if self._has_empty_value_cell(soup, label):
+                    log.info(
+                        "[%s] 상세의 %s 칸이 비어 있어 질의요지·회답만 본문에 담습니다: %s",
+                        self.key, label, post.url,
+                    )
+                else:
+                    log.warning(
+                        "[%s] 상세에서 %s 라벨을 찾지 못해 질의요지·회답만 본문에 담습니다 "
+                        "— 마크업 확인 필요: %s",
+                        self.key, label, post.url,
+                    )
+            post.body = "\n\n".join(
+                f"[{label}]\n{sections[label]}" for label in _BODY_LABELS if label in sections
+            )
 
         self._collect_attachments(soup, post)
         for att in post.attachments:
@@ -436,11 +461,11 @@ class BetterReplyScraper(BaseScraper):
     def enrich_succeeded(self, post: Post) -> bool:
         """이 소스의 계약상 상세 수집이 성공했는가 — 본문이 만들어졌을 때만 True.
 
-        기본 판정(본문·첨부·구조화항목 중 하나)을 그대로 쓰면, 마크업이 바뀌어 세 항목을
-        모두 놓쳤는데 첨부 링크만 살아 있는 상태가 '성공'으로 잡힌다. 그러면 질의·회답
+        기본 판정(본문·첨부·구조화항목 중 하나)을 그대로 쓰면, 마크업이 바뀌어 본문 항목을
+        놓쳤는데 첨부 링크만 살아 있는 상태가 '성공'으로 잡힌다. 그러면 질의·회답
         없이 제목과 파일만 실린 메일이 계속 나가는데도 상세 수집 통계는 초록불이라
-        고장이 묻힌다. 이 소스는 세 항목이 모두 있을 때만 body 를 만들므로 body 유무가
-        곧 계약 충족 여부다.
+        고장이 묻힌다. 이 소스는 필수 항목(질의요지·회답)이 모두 있을 때만 body 를
+        만들므로(이유는 선택) body 유무가 곧 계약 충족 여부다.
         """
         return bool(post.body)
 
@@ -749,6 +774,16 @@ class BetterReplyScraper(BaseScraper):
             dd = dt.find_next_sibling()
             if dd is not None and dd.name == "dd":
                 yield dt.get_text(" "), clean_text(dd.get_text("\n"))
+
+    @classmethod
+    def _has_empty_value_cell(cls, soup: BeautifulSoup, label: str) -> bool:
+        """라벨-값 짝(th/td, dt/dd)이 있는데 값이 비어 있는지(공백·NBSP 뿐 포함).
+
+        로그 구분 전용이다. 라이브 상세 구조에서 '이유' 칸이 정상적으로 빈 경우만
+        True 다. 라벨 자체가 없거나 heading 배치에서 내용을 못 모은 경우는 원인을
+        단정할 수 없으므로 False(호출자가 '마크업 확인 필요'로 남긴다).
+        """
+        return any(_norm_label(k) == label and not v for k, v in cls._label_pairs(soup))
 
     @classmethod
     def _heading_sections(cls, soup: BeautifulSoup) -> Iterator[tuple[str, str]]:

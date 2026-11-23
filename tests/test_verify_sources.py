@@ -374,6 +374,29 @@ def test_default_success_criterion_unchanged_for_other_scrapers():
     assert r["status"] == OK
 
 
+def test_reply_body_without_reason_is_green():
+    """이유는 선택 항목 — 질의요지·회답만 있는 표본을 거짓 부분 실패로 보고하지 않는다."""
+
+    def _enrich(p):
+        p.body = "[질의요지]\n질의\n\n[회답]\n회답"
+
+    r = _run_mixed([_reply_post(_DETAIL), _reply_post(_OPINION)], _enrich)
+    assert r["status"] == OK
+    assert r["detail_ok"] is True and r["enrich_ok"] is True
+
+
+def test_reply_body_without_answer_is_still_partial():
+    """필수 표식([회답])이 없으면 여전히 부분 실패다."""
+
+    def _enrich(p):
+        p.body = "[질의요지]\n질의\n\n[이유]\n이유"
+
+    r = _run_mixed([_reply_post(_DETAIL), _reply_post(_OPINION)], _enrich)
+    assert r["status"] == PARTIAL
+    assert r["detail_ok"] is False
+    assert "[회답]" in r["detail"]
+
+
 def test_reply_with_partial_body_is_partial():
     """세 표식이 다 없으면(부분 본문이라 body 가 비워진 경우 포함) 부분 실패다."""
 

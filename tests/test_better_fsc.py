@@ -14,6 +14,7 @@ fetcher 로 결정적으로 검증한다.
 않고 이미 쓰는 라벨-값 구조에만 얹는다.
 """
 import os
+import re
 import sys
 
 import pytest
@@ -25,6 +26,7 @@ from src.config import LLMConfig, SourceConfig
 from src.fetcher import AttachmentTooLarge
 from src.models import Post
 from src.notifier import build_html, build_text
+from src.reply_excerpt import build_reply_excerpt_rows
 from src.scrapers.better_fsc import BetterReplyScraper, _norm_ws
 from src.summarizer import Summarizer, _prepare_body
 
@@ -355,18 +357,33 @@ def test_partial_sections_leave_body_empty(caplog):
     assert _prepare_body(_llm_cfg(), post) == ""              # 요약 대상이 아니다
 
 
-def test_two_of_three_sections_still_leave_body_empty(caplog):
+def test_question_and_answer_without_reason_fill_body(caplog):
+    """이유는 선택 항목 — 질의요지·회답이 있으면 그 둘만 원래 순서로 본문을 만든다.
+
+    이유 행 자체가 없으면 정상 공란인지 마크업 변경인지 단정할 수 없으므로 본문은
+    만들되 '마크업 확인 필요' warning 을 남긴다. 없는 이유를 지어 넣지 않는다.
+    """
     sc = _scraper(_Fetcher(html=DETAIL_HTML_NO_REASON))
     post = _post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do"))
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("INFO"):
         sc.enrich(post)
-    assert post.body == ""
-    # 누락된 항목만 이름이 오른다(이미 찾은 질의요지·회답은 빠진다).
-    assert "상세에서 이유 를 찾지 못해" in caplog.text
+    assert post.body == (
+        "[질의요지]\n겸영업무 신고 대상인지 여부를 질의함.\n\n"
+        "[회답]\n신고 대상에 해당하지 않습니다."
+    )
+    assert "[이유]" not in post.body
+    assert sc.enrich_succeeded(post) is True
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "이유 라벨을 찾지 못해" in warnings[0].getMessage()
+    assert "마크업 확인 필요" in warnings[0].getMessage()
+    assert "본문을 비웁니다" not in caplog.text          # fail-closed 경로가 아니다
+    assert "신고 대상에 해당하지 않습니다" not in caplog.text  # 본문은 로그에 남기지 않는다
+    assert post.details == []
 
 
 def test_all_three_sections_fill_body():
-    """세 항목이 모두 있을 때만 본문이 채워진다(위 두 케이스와 같은 파서)."""
+    """세 항목이 모두 있으면 세 항목을 모두 원래 순서로 담는다(기존과 동일)."""
     sc = _scraper(_Fetcher(html=DETAIL_HTML))
     post = _post(LIST_URL.replace("TotalReplyList.do", "LawreqDetail.do"))
     sc.enrich(post)
@@ -2110,3 +2127,324 @@ def test_lawreq_live_fixtures_are_unaffected_by_the_table_scoping():
         assert [a.filename for a in post.attachments] == [case["attachment"]], idx
         assert case["answer_head"] in post.body, idx
         assert sc.enrich_succeeded(post) is True, idx
+
+
+# =============================================================================
+# 이유 선택 항목 — 질의요지·회답 필수 / 이유 선택
+#
+# 포털에는 이유 칸이 비어 있는 회신이 실제로 있다. 예전 계약(세 항목 모두 필수)은 그런
+# 글의 본문을 통째로 비워 AI 3줄 요약 대상에서 뺐다. 회답 없는 요약을 막는 fail-closed
+# 는 그대로 두고 이유만 선택으로 바꾼 것을 잠근다. 없는 이유를 지어 넣지 않는다.
+# =============================================================================
+_LOGGER = "src.scrapers.better_fsc"
+_Q = "겸영업무 신고 대상인지 여부를 질의함."
+_A = "신고 대상에 해당하지 않습니다."
+_TWO_SECTION_BODY = f"[질의요지]\n{_Q}\n\n[회답]\n{_A}"
+
+
+def _scraper_logs(caplog, level):
+    return [r.getMessage() for r in caplog.records if r.name == _LOGGER and r.levelname == level]
+
+
+def _table_detail(question=_Q, answer=_A, reason=None):
+    """라벨-값 표 상세. 인자가 None 이면 그 행 자체를 넣지 않는다."""
+    rows = [("질의요지", question), ("회답", answer), ("이유", reason)]
+    cells = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in rows if v is not None)
+    return f"""
+<div id="content"><h2>겸영업무 해당 여부</h2><table><tbody>
+  <tr><th>회신일</th><td>2026-08-20</td></tr>
+  {cells}
+</tbody></table></div>
+"""
+
+
+# --- 1. 이유 칸이 있는데 비어 있음(정상 공란) ---
+@pytest.mark.parametrize(
+    "cell",
+    ["", "   \n\t  ", "&nbsp;", "<p>&nbsp; &nbsp;</p>", "　"],
+    ids=["empty", "whitespace", "nbsp", "p_nbsp", "ideographic_space"],
+)
+def test_blank_reason_cell_builds_question_and_answer_body(cell, caplog):
+    sc = _scraper(_Fetcher(html=_table_detail(reason=cell)))
+    post = _post(_detail())
+    with caplog.at_level("INFO"):
+        sc.enrich(post)
+    assert post.body == _TWO_SECTION_BODY            # 있는 항목만, 원래 순서로
+    assert sc.enrich_succeeded(post) is True
+    assert post.url == _detail()
+    infos = _scraper_logs(caplog, "INFO")
+    assert any("이유 칸이 비어 있어" in m for m in infos)
+    assert _scraper_logs(caplog, "WARNING") == []    # 정상 공란은 경보가 아니다
+    assert not any(_A in m for m in infos)           # 본문은 로그에 남기지 않는다
+
+
+# --- 2. 필수 항목(질의요지·회답) 누락은 여전히 fail-closed ---
+@pytest.mark.parametrize(
+    "html, label",
+    [
+        (_table_detail(answer=None, reason="은행법 제28조에 따릅니다."), "회답"),
+        (_table_detail(answer="&nbsp;", reason="은행법 제28조에 따릅니다."), "회답"),
+        (_table_detail(answer=None, reason=None), "회답"),
+        (_table_detail(question=None, reason="은행법 제28조에 따릅니다."), "질의요지"),
+    ],
+    ids=["no_answer_row", "blank_answer_cell", "question_only", "no_question_row"],
+)
+def test_missing_required_section_keeps_fail_closed(html, label, caplog):
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _post(_detail())
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == ""
+    assert sc.enrich_succeeded(post) is False
+    warnings = _scraper_logs(caplog, "WARNING")
+    assert any(label in m and "본문을 비웁니다" in m for m in warnings)
+    assert _prepare_body(_llm_cfg(), post) == ""      # 요약 대상이 아니다
+    assert post.url == _detail()                       # identity 통과 후 실패라 링크는 유지
+
+    summarizer = Summarizer(_llm_cfg())
+    called: list[int] = []
+    summarizer._generate = lambda *a, **kw: called.append(1) or _envelope("{}")
+    assert summarizer.summarize_all({post.source_name: [post]}) == 0
+    assert called == []
+
+
+# --- 3. heading 배치에서 이유가 없으면 회답이 마지막 항목 — 경계가 그대로 적용된다 ---
+DETAIL_HTML_HEADING_NO_REASON = DETAIL_HTML_HEADING.replace(
+    "    <h4>□ 이유</h4>\n    <p>전자금융거래법상 제한 규정이 없습니다.</p>\n", ""
+)
+
+
+def test_heading_layout_without_reason_bounds_the_answer():
+    assert "□ 이유" not in DETAIL_HTML_HEADING_NO_REASON       # fixture 전제
+    fetcher = _Fetcher(html=DETAIL_HTML_HEADING_NO_REASON)
+    sc = _scraper(fetcher)
+    post = _opinion_post()
+    sc.enrich(post)
+    assert post.body == "[질의요지]\n전자금융업자의 겸영 가능 여부\n\n[회답]\n가능합니다."
+    for garbage in ("회신문_전자금융.hwp", "목록", "URL 복사", "1234-5678", "대표전화"):
+        assert garbage not in post.body, garbage
+    assert [a.filename for a in post.attachments] == ["회신문_전자금융.hwp"]
+    assert post.attachments[0].data == b"HWP"
+
+
+# --- 4. 실제 축약 DOM 에서 이유 행 제거 / 이유 칸 공란 ---
+_REASON_ROW = re.compile(
+    r'\s*<tr>\s*<th class="bc-blue" scope="row">\s*이유\s*</th>.*?</tr>', re.S
+)
+_REASON_CELL = re.compile(r'(<td class="bc-blue">).*?(</td>)', re.S)
+
+
+def _without_reason(html, mode):
+    if mode == "row_removed":
+        out, n = _REASON_ROW.subn("", html)
+    else:
+        out, n = _REASON_CELL.subn(r"\1&nbsp;\2", html)
+    assert n == 1                                      # fixture 전제: 이유 행이 정확히 하나
+    return out
+
+
+def _reasonless_case(name, mode):
+    if name == "lawreq_5450":
+        html, post = _live_html("5450"), _live_post("5450")
+        case = {
+            "attachment": LIVE_CASES["5450"]["attachment"],
+            "answer_head": LIVE_CASES["5450"]["answer_head"],
+            "link": "lawreqIdx=5450",
+            "reason_text": "이러한 규정의 취지를 감안할 경우",
+        }
+    else:
+        html, post = _opinion_html(), _opinion_live_post()
+        case = {
+            "attachment": OPINION_CASE["attachment"],
+            "answer_head": "□ 질의하신 평가방법을 적용하는 것에 대하여 별도의 조치를 취하지 않을 예정입니다.",
+            "link": f"opinionIdx={OPINION_CASE['idx']}",
+            "reason_text": "집합투자재산평가위원회가 충실의무를 준수하여",
+        }
+    assert case["reason_text"] in html                 # 원래 fixture 에는 이유가 있다
+    return _without_reason(html, mode), post, case
+
+
+_REASONLESS = pytest.mark.parametrize(
+    "name, mode",
+    [(n, m) for n in ("lawreq_5450", "opinion_2285") for m in ("row_removed", "cell_blank")],
+)
+
+
+@_REASONLESS
+def test_reasonless_live_detail_builds_body_and_keeps_attachment(name, mode, caplog):
+    html, post, case = _reasonless_case(name, mode)
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    detail_url = post.url
+    with caplog.at_level("INFO"):
+        sc.enrich(post)
+
+    assert post.url == detail_url                      # identity 통과 — 링크 유지
+    assert post.body.startswith("[질의요지]\n")
+    assert post.body.index("[질의요지]") < post.body.index("[회답]")
+    assert "[이유]" not in post.body                   # 이유 표식을 지어내지 않는다
+    assert case["reason_text"] not in post.body
+    assert case["answer_head"] in post.body
+    assert sc.enrich_succeeded(post) is True
+    assert post.details == []
+    assert [a.filename for a in post.attachments] == [case["attachment"]]
+    assert post.attachments[0].data == b"HWP"
+    assert len(fetcher.downloaded) == 1
+
+    # 정상 공란(칸은 있는데 비어 있음)은 info, 라벨 자체가 없으면 warning.
+    reason_logs = [
+        r.levelname for r in caplog.records if r.name == _LOGGER and "이유" in r.getMessage()
+    ]
+    assert reason_logs == (["INFO"] if mode == "cell_blank" else ["WARNING"])
+
+
+@_REASONLESS
+def test_reasonless_live_detail_goes_through_the_real_general_summary_path(name, mode):
+    html, post, case = _reasonless_case(name, mode)
+    _scraper(_Fetcher(html=html)).enrich(post)
+
+    cfg = _llm_cfg()
+    assert cfg.min_body_chars == 80                    # 전역 기준은 그대로
+    assert len(_prepare_body(cfg, post)) >= cfg.min_body_chars
+
+    summarizer = Summarizer(cfg)
+    prompts: list[str] = []
+
+    def _generate(prompt, deadline=None, **kw):
+        prompts.append(prompt)
+        return _envelope('{"summary": ["질의 요지 정리", "회답 결론 정리", "적용 범위 정리"]}')
+
+    summarizer._generate = _generate
+    assert summarizer.summarize_all({post.source_name: [post]}) == 1
+    assert len(prompts) == 1                           # 이 글로 실제 호출이 정확히 1회
+    assert "[질의요지]" in prompts[0] and "[회답]" in prompts[0]
+    assert "[이유]" not in prompts[0] and case["reason_text"] not in prompts[0]
+    assert post.summary == ["질의 요지 정리", "회답 결론 정리", "적용 범위 정리"]
+
+    mail_html = build_html({post.source_name: [post]})
+    mail_text = build_text({post.source_name: [post]})
+    for line in post.summary:
+        assert line in mail_html and line in mail_text
+    assert case["attachment"] in mail_html and case["attachment"] in mail_text
+    assert case["link"] in mail_text                   # 검증된 상세 링크가 그대로 나간다
+
+
+# --- 5. Gemini 실패 시 두 섹션 원문 발췌에서 회답이 유실되지 않는다 ---
+@pytest.mark.parametrize("name", ["lawreq_5450", "opinion_2285"])
+def test_reasonless_post_keeps_the_answer_when_gemini_fails(name):
+    html, post, case = _reasonless_case(name, "cell_blank")
+    _scraper(_Fetcher(html=html)).enrich(post)
+
+    summarizer = Summarizer(_llm_cfg())
+    calls: list[int] = []
+
+    def _fail(prompt, deadline=None, **kw):
+        calls.append(1)
+        raise OSError("network down")
+
+    summarizer._generate = _fail
+    assert summarizer.summarize_all({post.source_name: [post]}) == 0   # 예외가 새지 않는다
+    assert len(calls) == 1 and post.summary == []
+
+    question = " ".join(post.body.split("[회답]\n", 1)[0].split("[질의요지]\n", 1)[1].split())
+    answer = " ".join(post.body.split("[회답]\n", 1)[1].split())
+    for rendered in (build_html({post.source_name: [post]}), build_text({post.source_name: [post]})):
+        assert f"질의요지: {question}" in rendered
+        assert f"회답: {answer}" in rendered          # 회답 원문이 그대로 남는다
+        assert "이유:" not in rendered
+        assert "AI 3줄 요약" not in rendered
+        assert case["attachment"] in rendered
+
+
+# --- 6. 이유가 없어도 identity 실패는 여전히 차단 ---
+def test_reasonless_detail_of_another_post_is_still_rejected(caplog):
+    html, _, _ = _reasonless_case("lawreq_5450", "cell_blank")
+    fetcher = _Fetcher(html=html)
+    sc = _scraper(fetcher)
+    post = _live_post("5449")              # 목록은 5449 인데 상세는 5450(다른 사건)
+    with caplog.at_level("WARNING"):
+        sc.enrich(post)
+    assert post.body == "" and post.attachments == []
+    assert fetcher.downloaded == []
+    assert post.url == LIST_URL
+    assert "다른 게시물이므로" in caplog.text
+
+    summarizer = Summarizer(_llm_cfg())
+    called: list[int] = []
+    summarizer._generate = lambda *a, **kw: called.append(1) or _envelope("{}")
+    assert summarizer.summarize_all({post.source_name: [post]}) == 0
+    assert called == []
+
+
+# --- 7. 원문 발췌의 완전 구조 판별(require_complete=True) ---
+@pytest.mark.parametrize(
+    "body, roles",
+    [
+        (_TWO_SECTION_BODY, ["질의요지", "회답"]),
+        (_TWO_SECTION_BODY + "\n\n[이유]\n은행법 제28조에 따릅니다.", ["질의요지", "회답", "이유"]),
+    ],
+    ids=["question_answer", "question_answer_reason"],
+)
+def test_complete_reply_excerpt_accepts_both_scraper_shapes(body, roles):
+    rows = build_reply_excerpt_rows(body, require_complete=True)
+    assert [role for role, _ in rows] == roles
+    assert rows[0] == ("질의요지", _Q)
+    assert rows[1] == ("회답", _A)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"[질의요지]\n{_Q}",
+        f"[질의요지]\n{_Q}\n[이유]\n제28조에 따릅니다.",
+        f"[회답]\n{_A}\n[질의요지]\n{_Q}",
+        f"[질의요지]\n{_Q}\n[이유]\n제28조에 따릅니다.\n[회답]\n{_A}",
+        f"[질의요지]\n{_Q}\n[회답]\n",
+        f"[질의요지]\n{_Q}\n[회답]\n---",
+        f"[질의요지]\n \n[회답]\n{_A}",
+        f"{_TWO_SECTION_BODY}\n[이유]\n",
+        f"{_TWO_SECTION_BODY}\n[이유]\n ",
+        f"{_TWO_SECTION_BODY}\n[회답]\n추가 회답입니다.",
+        f"[질의요지] {_Q}\n[회답]\n{_A}",
+        f"머리말입니다.\n{_TWO_SECTION_BODY}",
+        "금융위원회는 오늘 보도자료를 배포했다. 회답과 이유를 함께 안내한다.",
+    ],
+    ids=[
+        "question_only", "answer_missing", "answer_first", "reason_before_answer",
+        "empty_answer", "symbol_only_answer", "nbsp_question", "empty_reason_marker",
+        "nbsp_reason", "duplicate_answer", "inline_label_content", "not_starting_with_marker",
+        "generic_body",
+    ],
+)
+def test_incomplete_reply_excerpt_is_rejected(body):
+    assert build_reply_excerpt_rows(body, require_complete=True) == []
+
+
+# --- 8. 같은 실행의 다른 소스는 영향이 없다 ---
+def test_other_sources_are_unaffected_in_the_same_run():
+    html, post, _ = _reasonless_case("lawreq_5450", "cell_blank")
+    _scraper(_Fetcher(html=html)).enrich(post)
+    press = Post(
+        source_key="fsc_press", source_name="금융위원회 · 보도자료", post_id="p1",
+        title="대부업 공시 강화", url="https://www.fsc.go.kr/no010101/1",
+        body="금융위원회는 2027년 1월 1일부터 대부업자의 최고금리 공시 의무를 강화한다. " * 3,
+    )
+    short = Post(
+        source_key="fsc_press", source_name="금융위원회 · 보도자료", post_id="p2",
+        title="짧은 공지", url="https://www.fsc.go.kr/no010101/2", body="짧은 공지입니다.",
+    )
+    assert build_reply_excerpt_rows(press.body, require_complete=True) == []
+
+    summarizer = Summarizer(_llm_cfg())
+    prompts: list[str] = []
+
+    def _generate(prompt, deadline=None, **kw):
+        prompts.append(prompt)
+        return _envelope('{"summary": ["첫째", "둘째", "셋째"]}')
+
+    summarizer._generate = _generate
+    ok = summarizer.summarize_all({post.source_name: [post], press.source_name: [press, short]})
+    assert ok == 2 and len(prompts) == 2               # 회신 1건 + 보도자료 1건
+    assert post.summary and press.summary
+    assert short.summary == []                          # 80자 미만 규칙은 그대로

@@ -183,7 +183,7 @@ def _general_excerpt(p: Post) -> _GeneralExcerpt:
         return _GeneralExcerpt()
     try:
         if not has_oversized_token(normalize_lines(p.body)):
-            # key는 사용자 설정값이다. scraper가 보장하는 완전한 Q/A/이유 구조로 판별한다.
+            # key는 사용자 설정값이다. scraper가 보장하는 질의요지→회답(→이유) 구조로 판별한다.
             rows = build_reply_excerpt_rows(p.body, require_complete=True)
             if rows:
                 return _GeneralExcerpt([f"{role}: {sentence}" for role, sentence in rows])
