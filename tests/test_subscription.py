@@ -126,12 +126,13 @@ def _write_config(tmp_path, mutate):
 # ==========================================================================
 # 설정
 # ==========================================================================
-def test_shipped_config_is_disabled_and_maps_every_enabled_source_once(monkeypatch):
+def test_shipped_config_is_enabled_and_maps_every_enabled_source_once(monkeypatch):
+    # Phase 4E 운영 활성화: 출고 설정은 켜져 있고, 켜져 있으면 설정 링크를 싣는다.
+    # 다시 false 로 바꾸는 것은 DEPLOY.md §15 롤백 조건(기관 선택 저장자 0명)에서만 허용된다.
     monkeypatch.setenv("SUBSCRIPTION_PAGE_URL", "https://x.workers.dev/")
     cfg = load_config("config.yaml")
-    assert cfg.subscription.enabled is False
-    # 꺼져 있으면 env 가 있어도 링크를 싣지 않는다(설정이 반영되지 않는 링크 금지).
-    assert cfg.email.preferences_url == ""
+    assert cfg.subscription.enabled is True
+    assert cfg.email.preferences_url == "https://x.workers.dev/"
     assert [a.id for a in cfg.subscription.agencies] == list(AGENCY_ORDER)
     # 켜는 순간 요구되는 완전성 검증을 출고 설정이 이미 통과해야 한다.
     validate_agency_mapping(cfg.subscription.agencies, cfg.sources, require_complete=True)
@@ -196,6 +197,7 @@ def test_enabled_requires_every_enabled_source_mapped(tmp_path):
 
 def test_incomplete_mapping_is_allowed_while_disabled(tmp_path):
     def mutate(raw):
+        raw["subscription"]["enabled"] = False
         raw["subscription"]["agencies"][3]["sources"] = ["pipc_notice"]
     assert load_config(_write_config(tmp_path, mutate)).subscription.enabled is False
 

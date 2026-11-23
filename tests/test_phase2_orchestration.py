@@ -22,6 +22,9 @@ from src.models import ASSEMBLY_SOURCE_KEY, Post, ProposalContentStatus as S
 from src.scrapers.base import CollectResult
 from src.state import State
 
+# 출고 config.yaml 의 구독 기능과 무관한 기존 전체 발송 경로를 검증한다(tests/conftest.py legacy_delivery).
+pytestmark = pytest.mark.usefixtures("legacy_delivery")
+
 ASSEMBLY_NAME = "의안정보시스템 · 계류의안"
 PRESS_KEY = "fss_press"
 OLD = "2020-01-01T00:00:00Z"      # 아주 오래된 시각 → 항상 due

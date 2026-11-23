@@ -16,7 +16,7 @@ python -m src.main --dry-run --debug --only fss_press # one source, verbose
 ```
 
 - Never run `python -m src.main` **without** `--dry-run` in a dev or agent session: it sends real email and mutates `state/seen.json`.
-- Tests must not touch the network; use fixtures under `tests/fixtures/`.
+- Tests must not touch the network; use fixtures under `tests/fixtures/`. `tests/conftest.py` clears `MAIL_TO`/`SUBSCRIPTION_*` from the shell for every test; legacy-pipeline modules opt into the full-send path with `pytestmark = pytest.mark.usefixtures("legacy_delivery")`.
 - When `cloudflare-subscription/` or `google-apps-script/` changes, also run `(cd cloudflare-subscription && npm ci && npm run check && npm test)` and `node --test google-apps-script/test/*.test.mjs` (both offline).
 
 ## Non-negotiable invariants
@@ -51,7 +51,7 @@ python -m src.main --dry-run --debug --only fss_press # one source, verbose
 - SMTP STARTTLS must pass a verifying context (`starttls(context=ssl.create_default_context())`). A bare `starttls()` skips certificate and hostname checks in CPython and exposes `SMTP_PASSWORD`.
 
 ### Subscriber agency selection (README "구독 기관 선택", `cloudflare-subscription/DEPLOY.md`)
-- `config.yaml` `subscription.enabled` stays `false` until the documented cutover. Enabling it, and setting `SUBSCRIPTION_REQUIRED` / `SUBSCRIPTION_DB_INSTANCE`, are owner-approved operations.
+- `config.yaml` `subscription.enabled` is `true` in production since the Phase 4E cutover, with `SUBSCRIPTION_REQUIRED=true` and `SUBSCRIPTION_DB_INSTANCE` set. Setting it back to `false`, or clearing either Variable, returns to full send and is an owner-approved operation allowed only when D1 shows zero `selected` preferences **and** saving preferences can be blocked or reliably controlled from that check until the rollback is complete (`cloudflare-subscription/DEPLOY.md` §15). `enabled: false` alone is never evidence that a rollback is safe; if saving cannot be controlled, use the monitor safe stop and fix-forward instead.
 - Fail closed: when enabled, any subscription API, contract, or integrity failure sends no email and leaves new posts' `seen` and queues unconfirmed (a first-run baseline is still recorded, as before). Never fall back to sending everything to all of `MAIL_TO`.
 - Never put recipient addresses, subscriber identifiers (HMAC), or tokens in logs or exception messages; log counts and fixed reason codes only.
 - `SUBSCRIBER_HASH_KEY` is fixed after the first sync; never rotate it silently.

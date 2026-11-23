@@ -206,7 +206,7 @@ Note: RADER is an intentional acronym, not a misspelling of RADAR.
 ### 3) 수신자 설정
 수신자 주소는 **저장소에 커밋하지 않습니다.** `MAIL_TO` Secret(여러 명은 `a@x.com, b@y.com`)으로만 지정하세요. 로컬 실행 시에는 `.env` 의 `MAIL_TO` 를 사용합니다(`.env` 는 커밋 제외).
 여러 명에게 보내도 **수신자끼리는 서로의 주소를 볼 수 없습니다**(BCC 방식). 메일함에는 발신자가 `LAW RADER` 로 표시됩니다.
-구독자별로 받을 기관을 고르게 하려면 아래 [구독 기관 선택](#구독-기관-선택-기본-비활성) 절을 참고하세요(기본 비활성).
+구독자별로 받을 기관을 고르게 하려면 아래 [구독 기관 선택](#구독-기관-선택-운영-활성) 절을 참고하세요(운영 활성 — 설정하지 않은 구독자는 모든 기관 수신).
 
 ### 4) 실행
 - 자동: Cloudflare Cron → GitHub `workflow_dispatch` → GitHub-hosted runner → Python 모니터 순서로 실행
@@ -258,7 +258,7 @@ npm run deploy -- --secrets-file .dev.vars
 
 현재 `.github/workflows/monitor.yml`의 기존 GitHub `schedule` 두 개는 Cloudflare 실운영 검증 전 임시 fallback으로 유지합니다. 검증 완료 후 별도 변경에서 제거합니다.
 
-## 구독 기관 선택 (기본 비활성)
+## 구독 기관 선택 (운영 활성)
 
 `MAIL_TO` 의 기존 구독자가 본인 인증 후 받고 싶은 기관만 고르는 기능입니다.
 
@@ -267,7 +267,8 @@ npm run deploy -- --secrets-file .dev.vars
 - Google Apps Script(`google-apps-script/`): 서명된 요청에 한해 인증번호 메일 발송(Phase 2)
 
 배포 절차는 **[cloudflare-subscription/DEPLOY.md](cloudflare-subscription/DEPLOY.md)**(운영자용 한국어 가이드)를 따릅니다.
-**`config.yaml` 의 `subscription.enabled` 가 `false`(기본)이면 구독 API 를 부르지 않고 지금과 똑같이 발송합니다.**
+**운영 `config.yaml` 은 Phase 4E 부터 `subscription.enabled: true` 입니다.** `false` 이면 구독 API 를 부르지 않고 `MAIL_TO` 전원에게 발송하므로,
+되돌리기(전체 발송 복귀)는 D1 에서 선택 설정 0건을 실제로 확인하고, 확인 시점부터 복귀 후까지 설정 저장을 차단하거나 변경 여부를 확실히 통제할 수 있을 때만 검토합니다. 통제할 수 없으면 복귀하지 않고 안전 정지·fix-forward 를 우선합니다.
 
 ### 동작 (enabled: true)
 
@@ -362,8 +363,9 @@ npm run deploy -- --secrets-file .dev.vars
   오타(`ture`, `yes`, `1` 등)는 false 로 읽지 않고 설정 오류로 실행을 실패시킵니다. 코드를 이 장치 이전
   버전으로 되돌리면 보호장치도 사라지므로, 되돌리기 전에 아래 폐지 절차를 먼저 마칩니다.
 - **롤백은 단계에 따라 다릅니다**(상세: [DEPLOY.md '롤백·비상 정지'](cloudflare-subscription/DEPLOY.md)).
-  - 기관 선택(일시중지 포함)을 저장한 구독자가 **없는** 도입 전에만 `enabled: false` + `SUBSCRIPTION_REQUIRED` 비움으로
-    기존 전원 발송 방식에 되돌릴 수 있습니다(받는 메일이 같으므로).
+  - 기관 선택(일시중지 포함)을 저장한 구독자가 **없음을 D1 에서 확인**했고, 확인 이후 복귀가 끝날 때까지 설정 저장을 차단하거나
+    변경 여부를 확실히 통제할 수 있을 때만 `enabled: false` + `SUBSCRIPTION_REQUIRED` 비움으로 기존 전원 발송 방식에 되돌릴 수 있습니다.
+    `enabled: false`(또는 활성화 미반영)라는 이유만으로는 판단하지 않으며, 저장을 통제할 수 없으면 아래 안전 정지와 fix-forward 를 우선합니다.
   - 저장한 구독자가 **있으면** 그 조합은 금지입니다 — 일시중지·선택 수신 구독자에게 고르지 않은 기관의 메일이 나갑니다.
     기본 조치는 `SUBSCRIPTION_REQUIRED=true` 를 유지한 **안전 정지**(monitor 워크플로 비활성화, 또는 `true` 상태에서 `enabled: false`)이고,
     재개는 보호장치·D1 식별자 검사(Python)와 카탈로그 불일치 거절(Worker)이 있는 검증된 버전으로만 합니다.
@@ -728,7 +730,7 @@ src/
   main.py                   # 오케스트레이션(수집→신규판별→enrich→메일→저장)
   config.py  fetcher.py     # 설정 로딩 / HTTP 세션(재시도·한글 인코딩·첨부 용량 제한)
   state.py   notifier.py    # 신규 판별 상태(원자적 저장) / 이메일 렌더·발송
-  subscription.py           # 구독 API 조회·검증, 수신자 그룹화, 기관별 필터(기본 비활성)
+  subscription.py           # 구독 API 조회·검증, 수신자 그룹화, 기관별 필터(운영 활성)
   summarizer.py             # 일반 게시물 3줄 요약(1건당 1회, 실패 시 원문 발췌 폴백)
   assembly_summary.py       # 계류의안 배치 3줄 요약(최대 25건/요청, BILL_ID 로 매핑,
                             #   배치별 공정 시간배분 + 호출 텔레메트리)

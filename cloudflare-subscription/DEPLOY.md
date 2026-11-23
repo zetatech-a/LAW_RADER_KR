@@ -254,10 +254,12 @@ python scripts/check_subscription_api.py
 npx wrangler d1 execute law-rader-subscription --remote --command "SELECT count(*) AS n FROM preferences WHERE mode = 'selected'"
 ```
 
-**(가) 도입 전 — 위 값이 0 (또는 `enabled: true` 를 아직 main 에 반영하지 않음)**
+**(가) 도입 전 — 위 값이 0 임을 실제로 확인(필수). `enabled: true` 미반영·`enabled: false` 라는 이유만으로는 판단하지 않음**
 - 모든 구독자가 사실상 '전체 수신'이므로, `enabled: false` + `SUBSCRIPTION_REQUIRED` 비움(또는 `false`)으로 되돌려도 받는 메일이 같습니다.
   **이 경우에만** 기존 전원 발송 방식으로의 롤백을 허용합니다.
 - 확인과 되돌리기 사이에 누군가 저장할 수 있으므로 되돌린 직후 같은 명령을 한 번 더 실행합니다. 0이 아니면 (나)로 처리합니다.
+- 설정 페이지는 계속 열려 있어 확인 이후에도 저장이 생길 수 있습니다. 확인 시점부터 복귀가 끝날 때까지(복귀 후 계속) 설정 저장을 차단하거나
+  변경 여부를 확실히 통제할 수 없으면 이 롤백을 하지 않고 (나)의 안전 정지와 fix-forward 를 우선합니다.
 
 **(나) 도입 후 — 위 값이 1 이상**
 - **`enabled: false` + `SUBSCRIPTION_REQUIRED=false`(또는 비움)는 금지합니다.** 일시중지·선택 수신 구독자에게 고르지 않은 기관의
