@@ -332,6 +332,9 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:249959",
+      "nttId:249960",
+      "nttId:249958",
       "nttId:249953",
       "nttId:249949",
       "nttId:249944",
@@ -1127,6 +1130,49 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_5300C3442AF840F79FA9277D74433E",
+      "PRC_31C48590147C4D42A2A25E26A76A13",
+      "PRC_33FC0F94505541C4B70802224551C8",
+      "PRC_5505A286CBEB4EEDA1D35DC4C24023",
+      "PRC_I2I6H0H8D1E4C1A5B3A1A1I0G0H6F3",
+      "PRC_9D5D5B17191E4D3C9E9339F60E07D6",
+      "PRC_9F77E9D9DFDB4ACF9A61B6BA46ACB8",
+      "PRC_41B88A5110DF4A63829D6137C402E9",
+      "PRC_25BFDE0F3A4D498D9C07C8C84B76EB",
+      "PRC_78C9FFABDF4E4669B4F74B4C0C5DFB",
+      "PRC_4E85201894E041B3A9EAAC087BE10D",
+      "PRC_CFDE0A2943CA446C9F351FF11F19EA",
+      "PRC_CBEB5DFF3AE54419B9F4EAA00BF27D",
+      "PRC_358C490ABC1A44F3899156CB60E8F9",
+      "PRC_0C30DABE75764409B91A124DEE172E",
+      "PRC_E8DA759E1F4E4565B656BBDEAED36C",
+      "PRC_3C61AB4E581D46A8916F6C3F986E55",
+      "PRC_CDFCAB5D730E4A6CAFA151C54BB254",
+      "PRC_F562F54E1EE049D098D0F92DE36B1B",
+      "PRC_FD5D545F40DA4B7980217EBD51A23C",
+      "PRC_780C4409348F4B69AF50D68E17FEF9",
+      "PRC_CE958208B5B54E518F2917436A3580",
+      "PRC_E2F5D0E5C2D0B1C0J3I5J4H6H7F7G3",
+      "PRC_6D466AB5BB1543758493A249CB7112",
+      "PRC_6D47BD95D83F44248C7066DA7DEB11",
+      "PRC_E9A1368B778B4B61B8215419554F94",
+      "PRC_A12532E6BB604274942874213FBC7B",
+      "PRC_A4AF465664314002BC53DF70A8E7F0",
+      "PRC_DA2197A68174459486954786FF48D3",
+      "PRC_B797B14D460546F3BD492A708EDA2D",
+      "PRC_1799BD52D51147FA9A48F605FEC1D8",
+      "PRC_O2N6O0V9W1V6V1T4U1T3O5P2N0O6M2",
+      "PRC_5AC66EA376094682A32B6337D26350",
+      "PRC_B8096982A034497FA82EB729F29D45",
+      "PRC_60425FC22E284FA2804E59BCD0D367",
+      "PRC_E7EEB457632C41BC9FBCBCC0802FBF",
+      "PRC_361A8E3EADB344F8834892B944EDDC",
+      "PRC_0D514C58EEFB469DB192DAC94BC6A7",
+      "PRC_B80CF63C2D034AB88ED8DAFFAC1416",
+      "PRC_C5BC3487100C42649C469C5D938A5A",
+      "PRC_FD782A395850404CB363BC90155FA2",
+      "PRC_4A3858CE813B42E8B5AAA14521A627",
+      "PRC_9D3AF8E8C89647809A94ABEEAAD2FB",
       "PRC_84A0D714C34447BF81068E30094228",
       "PRC_52237568E09747118402679FEDA8B0",
       "PRC_4810C3DCF4D946E985E77CFED78E2D",
@@ -4334,53 +4380,63 @@
     "pending_detail": {
       "PRC_57ADD3FE326C4C4E8C6804D17EE44A": {
         "first_seen_at": "2026-10-23T00:11:22Z",
-        "attempts": 293,
+        "attempts": 294,
         "title": "지방교부세법 일부개정법률안 (임이자의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_57ADD3FE326C4C4E8C6804D17EE44A",
         "date": "2026-10-22",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-23T09:08:45Z"
+        "last_attempt_at": "2026-11-24T00:13:30Z"
       },
       "PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6": {
         "first_seen_at": "2026-10-30T00:14:41Z",
-        "attempts": 224,
+        "attempts": 225,
         "title": "세계선거기관협의회 지원에 관한 법률폐지법률안 (송재봉의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6",
         "date": "2026-10-29",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-23T09:08:45Z"
+        "last_attempt_at": "2026-11-24T00:13:30Z"
       },
       "PRC_2E33F24A5B1F47099B1A4857F2C83E": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 144,
+        "attempts": 145,
         "title": "집회 및 시위에 관한 법률 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_2E33F24A5B1F47099B1A4857F2C83E",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-23T09:08:45Z"
+        "last_attempt_at": "2026-11-24T00:13:30Z"
       },
       "PRC_6418BEFE9E284DECB1A83326CF1AEF": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 144,
+        "attempts": 145,
         "title": "인구감소지역 지원 특별법 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_6418BEFE9E284DECB1A83326CF1AEF",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-23T09:08:45Z"
+        "last_attempt_at": "2026-11-24T00:13:30Z"
       },
       "PRC_4936A5C31EE64424AE7CD8BA455349": {
         "first_seen_at": "2026-11-13T00:13:16Z",
-        "attempts": 92,
+        "attempts": 93,
         "title": "지방세특례제한법 일부개정법률안 (채현일의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_4936A5C31EE64424AE7CD8BA455349",
         "date": "2026-11-12",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-23T09:08:45Z"
+        "last_attempt_at": "2026-11-24T00:13:30Z"
+      },
+      "PRC_B797B14D460546F3BD492A708EDA2D": {
+        "first_seen_at": "2026-11-24T00:13:30Z",
+        "attempts": 1,
+        "title": "정보통신망 이용촉진 및 정보보호 등에 관한 법률 일부개정법률안 (이주희의원 등 19인)",
+        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_B797B14D460546F3BD492A708EDA2D",
+        "date": "2026-11-23",
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-11-24T00:13:30Z"
       }
     }
   },
