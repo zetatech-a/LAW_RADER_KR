@@ -749,6 +749,7 @@
   },
   "fss_sanction": {
     "seen": [
+      "exam:202500489_1",
       "exam:202500505_1",
       "exam:202500508_1",
       "exam:202400624_1",
@@ -894,6 +895,7 @@
   },
   "fss_mgmt_notice": {
     "seen": [
+      "file:(주)강남캐피탈대부_경영유의 개선사항 공개안.hwp",
       "file:202400547_13_삼성화재해상보험㈜ 경영유의개선사항 공개안.pdf",
       "file:202400547_12_삼성화재해상보험㈜ 경영유의개선사항 공개안.pdfx.hwp",
       "file:202400207_13_제재내용 공개 표준안(경영유의개선).pdf",
@@ -1141,6 +1143,55 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_B797B14D460546F3BD492A708EDA2D",
+      "PRC_4E3D8C8D66A34AF493B1E75CCABA04",
+      "PRC_96FE3F4ACD03433183814B3542129E",
+      "PRC_B520105C819445A7866C6DEDAB674F",
+      "PRC_CABBB701DC2144B0915FDA1F16D835",
+      "PRC_2F1EB503E4574386BCEA79482B69CB",
+      "PRC_D8D861DE130E4A2B866872AEEC8949",
+      "PRC_8445BFF91E03428FAA4CD11C17C07F",
+      "PRC_9EBA667158BF4104B390BED1343DC2",
+      "PRC_DE1CA1D93DB646128E66F9CF2BE042",
+      "PRC_647E0AD363DB4C9883E5123305313F",
+      "PRC_73D6149C19604D678F8B27107230CD",
+      "PRC_469118E37EA24DCB8A1B2BAEB58EF2",
+      "PRC_6623A5288B2E4B8CBA6DB6267CB77A",
+      "PRC_0A04CFAE88364640A8B52B0885D522",
+      "PRC_19357B21B48E468D82AEF200567C40",
+      "PRC_8DF9264F55C34C788C1F35C710169C",
+      "PRC_FBD568ABB6594AB99849E62C1F6AE2",
+      "PRC_DE47D0EBC57D4BDC9DD776BC635F36",
+      "PRC_BF0755827361413687ED19279B9245",
+      "PRC_983BBF1C8AF94459A4019BE8113224",
+      "PRC_0D5F101FB4D1490C8D31E6BC8822F0",
+      "PRC_A3B08EEF871D4E11AF3E69C34B9597",
+      "PRC_0C0D639593364595A0DFE9596731D1",
+      "PRC_EE6DD189C1EF48D284957D17933881",
+      "PRC_9CC825560FD247A3A1CF61C74E4406",
+      "PRC_3FB7C20EFF7E4361A65B3420BF41CE",
+      "PRC_9204B44EDA3C4F7EBDB9CD0E5C5D0D",
+      "PRC_A3DAE65CF9784DEF9E6C792ECF92E7",
+      "PRC_9840B58FFA01443BA712FF09F4F2E7",
+      "PRC_F3D9F897DA6E46B4958FA04445D1C1",
+      "PRC_1148F40950244675A5620AC8B69A8F",
+      "PRC_CC54263ABE3D4FFBBE84B1C6261F5C",
+      "PRC_15A73CD004AE4110A6AB7CBC427494",
+      "PRC_AFB73182FFE14E7E90EAD9D74E2A09",
+      "PRC_8B23A85A851F4358A6604853288B6B",
+      "PRC_EFB2530F99DC446693B5823E3EB450",
+      "PRC_90CD05C6A6524289A2C083908D0A80",
+      "PRC_475E3C5798B04E5599F94447B7F3E0",
+      "PRC_2A52456E551441A38F35D795E8E931",
+      "PRC_2A0D81A7AC064DADBC3572A798AC57",
+      "PRC_B0A9F5A257FE4A519BBFCC734D24D6",
+      "PRC_ED983E5F4969407AA789940BADA880",
+      "PRC_FA928665E1744D849D3CC73C61559B",
+      "PRC_F56B77E55A2F437DA9C7080D5EF2E1",
+      "PRC_82AFB0286F674956AD63B14E4E434B",
+      "PRC_4ED2C98B5390489984BAF020B8287B",
+      "PRC_S2A6B0Z7Z3X0W1X6F0F7D1C4D2B1C1",
+      "PRC_82767C35932B47F1B9CC5499E91A1E",
       "PRC_5300C3442AF840F79FA9277D74433E",
       "PRC_31C48590147C4D42A2A25E26A76A13",
       "PRC_33FC0F94505541C4B70802224551C8",
@@ -1170,7 +1221,6 @@
       "PRC_A12532E6BB604274942874213FBC7B",
       "PRC_A4AF465664314002BC53DF70A8E7F0",
       "PRC_DA2197A68174459486954786FF48D3",
-      "PRC_B797B14D460546F3BD492A708EDA2D",
       "PRC_1799BD52D51147FA9A48F605FEC1D8",
       "PRC_O2N6O0V9W1V6V1T4U1T3O5P2N0O6M2",
       "PRC_5AC66EA376094682A32B6337D26350",
@@ -4391,63 +4441,73 @@
     "pending_detail": {
       "PRC_57ADD3FE326C4C4E8C6804D17EE44A": {
         "first_seen_at": "2026-10-23T00:11:22Z",
-        "attempts": 306,
+        "attempts": 307,
         "title": "지방교부세법 일부개정법률안 (임이자의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_57ADD3FE326C4C4E8C6804D17EE44A",
         "date": "2026-10-22",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-24T08:54:05Z"
+        "last_attempt_at": "2026-11-25T00:14:29Z"
       },
       "PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6": {
         "first_seen_at": "2026-10-30T00:14:41Z",
-        "attempts": 237,
+        "attempts": 238,
         "title": "세계선거기관협의회 지원에 관한 법률폐지법률안 (송재봉의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6",
         "date": "2026-10-29",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-24T08:54:05Z"
+        "last_attempt_at": "2026-11-25T00:14:29Z"
       },
       "PRC_2E33F24A5B1F47099B1A4857F2C83E": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 157,
+        "attempts": 158,
         "title": "집회 및 시위에 관한 법률 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_2E33F24A5B1F47099B1A4857F2C83E",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-24T08:54:05Z"
+        "last_attempt_at": "2026-11-25T00:14:29Z"
       },
       "PRC_6418BEFE9E284DECB1A83326CF1AEF": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 157,
+        "attempts": 158,
         "title": "인구감소지역 지원 특별법 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_6418BEFE9E284DECB1A83326CF1AEF",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-24T08:54:05Z"
+        "last_attempt_at": "2026-11-25T00:14:29Z"
       },
       "PRC_4936A5C31EE64424AE7CD8BA455349": {
         "first_seen_at": "2026-11-13T00:13:16Z",
-        "attempts": 105,
+        "attempts": 106,
         "title": "지방세특례제한법 일부개정법률안 (채현일의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_4936A5C31EE64424AE7CD8BA455349",
         "date": "2026-11-12",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-24T08:54:05Z"
+        "last_attempt_at": "2026-11-25T00:14:29Z"
       },
-      "PRC_B797B14D460546F3BD492A708EDA2D": {
-        "first_seen_at": "2026-11-24T00:13:30Z",
-        "attempts": 13,
-        "title": "정보통신망 이용촉진 및 정보보호 등에 관한 법률 일부개정법률안 (이주희의원 등 19인)",
-        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_B797B14D460546F3BD492A708EDA2D",
-        "date": "2026-11-23",
+      "PRC_DE47D0EBC57D4BDC9DD776BC635F36": {
+        "first_seen_at": "2026-11-25T00:14:29Z",
+        "attempts": 1,
+        "title": "게임콘텐츠산업의 국가전략적 육성에 관한 특별법안 (김성회의원 등 11인)",
+        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_DE47D0EBC57D4BDC9DD776BC635F36",
+        "date": "2026-11-24",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-24T08:54:05Z"
+        "last_attempt_at": "2026-11-25T00:14:29Z"
+      },
+      "PRC_A3B08EEF871D4E11AF3E69C34B9597": {
+        "first_seen_at": "2026-11-25T00:14:29Z",
+        "attempts": 1,
+        "title": "성매매방지 및 피해자보호 등에 관한 법률 일부개정법률안 (박지혜의원 등 10인)",
+        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A3B08EEF871D4E11AF3E69C34B9597",
+        "date": "2026-11-24",
+        "status": "pending",
+        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
+        "last_attempt_at": "2026-11-25T00:14:29Z"
       }
     }
   },
