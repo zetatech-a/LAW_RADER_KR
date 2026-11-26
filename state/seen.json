@@ -346,6 +346,7 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:250028",
       "nttId:250026",
       "nttId:250024",
       "nttId:250022",
@@ -4611,13 +4612,13 @@
       },
       "PRC_F36C30AC80C14FCA824E69B5A78ABD": {
         "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 1,
+        "attempts": 2,
         "title": "상법 일부개정법률안 (김용민의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_F36C30AC80C14FCA824E69B5A78ABD",
         "date": "2026-11-25",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
+        "last_attempt_at": "2026-11-26T01:09:59Z"
       }
     }
   },
@@ -4677,6 +4678,8 @@
   },
   "pipc_press": {
     "seen": [
+      "nttId:12670",
+      "nttId:12669",
       "nttId:12667",
       "nttId:12664",
       "nttId:12663",
