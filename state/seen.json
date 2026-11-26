@@ -1166,6 +1166,7 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_4BACFC98096F426CB11D62C0FD91E0",
       "PRC_4DDDEEE8A8E4440D8E7D15BD5D097E",
       "PRC_FA52516788F54FCAB91DF61E7E09BF",
       "PRC_762E961AB26546FFBA2867D07F835C",
@@ -1173,7 +1174,6 @@
       "PRC_777C2AC8E31244CE84812312BDEE9C",
       "PRC_K2J6H0H8F2H5O1P2N4L3M2L5L9H4F5",
       "PRC_F162C226EEB147E5858FCF0FDAEF8D",
-      "PRC_4BACFC98096F426CB11D62C0FD91E0",
       "PRC_E3FED092BC494EA7908CBB363E42DA",
       "PRC_3F5D6C33850441EA9815BF24D1C6D2",
       "PRC_4A2FBA992C224934B7D2BEC82D25B0",
@@ -4521,103 +4521,93 @@
     "pending_detail": {
       "PRC_57ADD3FE326C4C4E8C6804D17EE44A": {
         "first_seen_at": "2026-10-23T00:11:22Z",
-        "attempts": 320,
+        "attempts": 321,
         "title": "지방교부세법 일부개정법률안 (임이자의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_57ADD3FE326C4C4E8C6804D17EE44A",
         "date": "2026-10-22",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
+        "last_attempt_at": "2026-11-26T00:54:34Z"
       },
       "PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6": {
         "first_seen_at": "2026-10-30T00:14:41Z",
-        "attempts": 251,
+        "attempts": 252,
         "title": "세계선거기관협의회 지원에 관한 법률폐지법률안 (송재봉의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6",
         "date": "2026-10-29",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
+        "last_attempt_at": "2026-11-26T00:54:34Z"
       },
       "PRC_2E33F24A5B1F47099B1A4857F2C83E": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 171,
+        "attempts": 172,
         "title": "집회 및 시위에 관한 법률 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_2E33F24A5B1F47099B1A4857F2C83E",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
+        "last_attempt_at": "2026-11-26T00:54:34Z"
       },
       "PRC_6418BEFE9E284DECB1A83326CF1AEF": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 171,
+        "attempts": 172,
         "title": "인구감소지역 지원 특별법 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_6418BEFE9E284DECB1A83326CF1AEF",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
+        "last_attempt_at": "2026-11-26T00:54:34Z"
       },
       "PRC_4936A5C31EE64424AE7CD8BA455349": {
         "first_seen_at": "2026-11-13T00:13:16Z",
-        "attempts": 119,
+        "attempts": 120,
         "title": "지방세특례제한법 일부개정법률안 (채현일의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_4936A5C31EE64424AE7CD8BA455349",
         "date": "2026-11-12",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
+        "last_attempt_at": "2026-11-26T00:54:34Z"
       },
       "PRC_DE47D0EBC57D4BDC9DD776BC635F36": {
         "first_seen_at": "2026-11-25T00:14:29Z",
-        "attempts": 14,
+        "attempts": 15,
         "title": "게임콘텐츠산업의 국가전략적 육성에 관한 특별법안 (김성회의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_DE47D0EBC57D4BDC9DD776BC635F36",
         "date": "2026-11-24",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
+        "last_attempt_at": "2026-11-26T00:54:34Z"
       },
       "PRC_A3B08EEF871D4E11AF3E69C34B9597": {
         "first_seen_at": "2026-11-25T00:14:29Z",
-        "attempts": 14,
+        "attempts": 15,
         "title": "성매매방지 및 피해자보호 등에 관한 법률 일부개정법률안 (박지혜의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A3B08EEF871D4E11AF3E69C34B9597",
         "date": "2026-11-24",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
+        "last_attempt_at": "2026-11-26T00:54:34Z"
       },
       "PRC_762E961AB26546FFBA2867D07F835C": {
         "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 1,
+        "attempts": 2,
         "title": "전자장치 부착 등에 관한 법률 일부개정법률안 (남인순의원 등 12인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_762E961AB26546FFBA2867D07F835C",
         "date": "2026-11-25",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
-      },
-      "PRC_4BACFC98096F426CB11D62C0FD91E0": {
-        "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 1,
-        "title": "정보통신망 이용촉진 및 정보보호 등에 관한 법률 일부개정법률안 (한준호의원 등 13인)",
-        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_4BACFC98096F426CB11D62C0FD91E0",
-        "date": "2026-11-25",
-        "status": "pending",
-        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
+        "last_attempt_at": "2026-11-26T00:54:34Z"
       },
       "PRC_5CAE06BB69A9435CBEAB70EF6D30E8": {
         "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 1,
+        "attempts": 2,
         "title": "상가건물 임대차보호법 일부개정법률안 (김용민의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_5CAE06BB69A9435CBEAB70EF6D30E8",
         "date": "2026-11-25",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T00:14:32Z"
+        "last_attempt_at": "2026-11-26T00:54:34Z"
       },
       "PRC_F36C30AC80C14FCA824E69B5A78ABD": {
         "first_seen_at": "2026-11-26T00:14:32Z",
