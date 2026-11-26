@@ -347,6 +347,8 @@
   },
   "fss_press": {
     "seen": [
+      "nttId:250030",
+      "nttId:250029",
       "nttId:250028",
       "nttId:250026",
       "nttId:250024",
@@ -4523,103 +4525,103 @@
     "pending_detail": {
       "PRC_57ADD3FE326C4C4E8C6804D17EE44A": {
         "first_seen_at": "2026-10-23T00:11:22Z",
-        "attempts": 323,
+        "attempts": 324,
         "title": "지방교부세법 일부개정법률안 (임이자의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_57ADD3FE326C4C4E8C6804D17EE44A",
         "date": "2026-10-22",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T02:24:15Z"
+        "last_attempt_at": "2026-11-26T03:10:23Z"
       },
       "PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6": {
         "first_seen_at": "2026-10-30T00:14:41Z",
-        "attempts": 254,
+        "attempts": 255,
         "title": "세계선거기관협의회 지원에 관한 법률폐지법률안 (송재봉의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6",
         "date": "2026-10-29",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T02:24:15Z"
+        "last_attempt_at": "2026-11-26T03:10:23Z"
       },
       "PRC_2E33F24A5B1F47099B1A4857F2C83E": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 174,
+        "attempts": 175,
         "title": "집회 및 시위에 관한 법률 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_2E33F24A5B1F47099B1A4857F2C83E",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T02:24:15Z"
+        "last_attempt_at": "2026-11-26T03:10:23Z"
       },
       "PRC_6418BEFE9E284DECB1A83326CF1AEF": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 174,
+        "attempts": 175,
         "title": "인구감소지역 지원 특별법 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_6418BEFE9E284DECB1A83326CF1AEF",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T02:24:15Z"
+        "last_attempt_at": "2026-11-26T03:10:23Z"
       },
       "PRC_4936A5C31EE64424AE7CD8BA455349": {
         "first_seen_at": "2026-11-13T00:13:16Z",
-        "attempts": 122,
+        "attempts": 123,
         "title": "지방세특례제한법 일부개정법률안 (채현일의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_4936A5C31EE64424AE7CD8BA455349",
         "date": "2026-11-12",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T02:24:15Z"
+        "last_attempt_at": "2026-11-26T03:10:23Z"
       },
       "PRC_DE47D0EBC57D4BDC9DD776BC635F36": {
         "first_seen_at": "2026-11-25T00:14:29Z",
-        "attempts": 17,
+        "attempts": 18,
         "title": "게임콘텐츠산업의 국가전략적 육성에 관한 특별법안 (김성회의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_DE47D0EBC57D4BDC9DD776BC635F36",
         "date": "2026-11-24",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T02:24:15Z"
+        "last_attempt_at": "2026-11-26T03:10:23Z"
       },
       "PRC_A3B08EEF871D4E11AF3E69C34B9597": {
         "first_seen_at": "2026-11-25T00:14:29Z",
-        "attempts": 17,
+        "attempts": 18,
         "title": "성매매방지 및 피해자보호 등에 관한 법률 일부개정법률안 (박지혜의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_A3B08EEF871D4E11AF3E69C34B9597",
         "date": "2026-11-24",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T02:24:15Z"
+        "last_attempt_at": "2026-11-26T03:10:23Z"
       },
       "PRC_762E961AB26546FFBA2867D07F835C": {
         "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 4,
+        "attempts": 5,
         "title": "전자장치 부착 등에 관한 법률 일부개정법률안 (남인순의원 등 12인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_762E961AB26546FFBA2867D07F835C",
         "date": "2026-11-25",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T02:24:15Z"
+        "last_attempt_at": "2026-11-26T03:10:23Z"
       },
       "PRC_5CAE06BB69A9435CBEAB70EF6D30E8": {
         "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 4,
+        "attempts": 5,
         "title": "상가건물 임대차보호법 일부개정법률안 (김용민의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_5CAE06BB69A9435CBEAB70EF6D30E8",
         "date": "2026-11-25",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T02:24:15Z"
+        "last_attempt_at": "2026-11-26T03:10:23Z"
       },
       "PRC_F36C30AC80C14FCA824E69B5A78ABD": {
         "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 4,
+        "attempts": 5,
         "title": "상법 일부개정법률안 (김용민의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_F36C30AC80C14FCA824E69B5A78ABD",
         "date": "2026-11-25",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T02:38:39Z"
+        "last_attempt_at": "2026-11-26T03:10:23Z"
       }
     }
   },
@@ -4679,6 +4681,7 @@
   },
   "pipc_press": {
     "seen": [
+      "nttId:12668",
       "nttId:12670",
       "nttId:12669",
       "nttId:12667",
