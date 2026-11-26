@@ -4613,13 +4613,13 @@
       },
       "PRC_F36C30AC80C14FCA824E69B5A78ABD": {
         "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 3,
+        "attempts": 4,
         "title": "상법 일부개정법률안 (김용민의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_F36C30AC80C14FCA824E69B5A78ABD",
         "date": "2026-11-25",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-26T01:53:52Z"
+        "last_attempt_at": "2026-11-26T02:38:39Z"
       }
     }
   },
