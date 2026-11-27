@@ -1184,6 +1184,9 @@
   },
   "assembly_bill": {
     "seen": [
+      "PRC_EA82D25C7FC248BB8B2DD07AC26C04",
+      "PRC_0CC2C6DEB2124AB8AC4F4393D8B77C",
+      "PRC_3752C639830F4062B745C904E4D2E3",
       "PRC_9BDE7419B04949A790EBDD0345F9F2",
       "PRC_ACAA2BB3B54B4EBA8F184CF95134A5",
       "PRC_CBA5A3622FE947D4A19A82774C7CB5",
@@ -1204,10 +1207,7 @@
       "PRC_5F4D5E9145874D989764FAFBAC0023",
       "PRC_973CEC93F2EB4CD2A67ECFD0669231",
       "PRC_9240482FE4634BD6BDC001A18BEEDD",
-      "PRC_0CC2C6DEB2124AB8AC4F4393D8B77C",
       "PRC_B40F7D39FE36487BA444478597673D",
-      "PRC_EA82D25C7FC248BB8B2DD07AC26C04",
-      "PRC_3752C639830F4062B745C904E4D2E3",
       "PRC_27BF66CB87CF4E41B8602658B34863",
       "PRC_F247D8AEFA8541309BD3F287D4D603",
       "PRC_E2F6D0C9C0A4B1J0K2I9I5H8F0G7C9",
@@ -4596,13 +4596,13 @@
     "pending_detail": {
       "PRC_57ADD3FE326C4C4E8C6804D17EE44A": {
         "first_seen_at": "2026-10-23T00:11:22Z",
-        "attempts": 334,
+        "attempts": 335,
         "title": "지방교부세법 일부개정법률안 (임이자의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_57ADD3FE326C4C4E8C6804D17EE44A",
         "date": "2026-10-22",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-27T00:54:13Z"
+        "last_attempt_at": "2026-11-27T01:39:25Z"
       },
       "PRC_A2A6I0J8H2G0G1E1F5N7O5M7K1L5K6": {
         "first_seen_at": "2026-10-30T00:14:41Z",
@@ -4616,33 +4616,33 @@
       },
       "PRC_2E33F24A5B1F47099B1A4857F2C83E": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 185,
+        "attempts": 186,
         "title": "집회 및 시위에 관한 법률 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_2E33F24A5B1F47099B1A4857F2C83E",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-27T00:54:13Z"
+        "last_attempt_at": "2026-11-27T01:39:25Z"
       },
       "PRC_6418BEFE9E284DECB1A83326CF1AEF": {
         "first_seen_at": "2026-11-09T00:13:04Z",
-        "attempts": 185,
+        "attempts": 186,
         "title": "인구감소지역 지원 특별법 일부개정법률안 (임이자의원 등 11인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_6418BEFE9E284DECB1A83326CF1AEF",
         "date": "2026-11-06",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-27T00:54:13Z"
+        "last_attempt_at": "2026-11-27T01:39:25Z"
       },
       "PRC_4936A5C31EE64424AE7CD8BA455349": {
         "first_seen_at": "2026-11-13T00:13:16Z",
-        "attempts": 133,
+        "attempts": 134,
         "title": "지방세특례제한법 일부개정법률안 (채현일의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_4936A5C31EE64424AE7CD8BA455349",
         "date": "2026-11-12",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-27T00:54:13Z"
+        "last_attempt_at": "2026-11-27T01:39:25Z"
       },
       "PRC_DE47D0EBC57D4BDC9DD776BC635F36": {
         "first_seen_at": "2026-11-25T00:14:29Z",
@@ -4666,33 +4666,33 @@
       },
       "PRC_762E961AB26546FFBA2867D07F835C": {
         "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 15,
+        "attempts": 16,
         "title": "전자장치 부착 등에 관한 법률 일부개정법률안 (남인순의원 등 12인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_762E961AB26546FFBA2867D07F835C",
         "date": "2026-11-25",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-27T00:54:13Z"
+        "last_attempt_at": "2026-11-27T01:39:25Z"
       },
       "PRC_5CAE06BB69A9435CBEAB70EF6D30E8": {
         "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 15,
+        "attempts": 16,
         "title": "상가건물 임대차보호법 일부개정법률안 (김용민의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_5CAE06BB69A9435CBEAB70EF6D30E8",
         "date": "2026-11-25",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-27T00:54:13Z"
+        "last_attempt_at": "2026-11-27T01:39:25Z"
       },
       "PRC_F36C30AC80C14FCA824E69B5A78ABD": {
         "first_seen_at": "2026-11-26T00:14:32Z",
-        "attempts": 14,
+        "attempts": 15,
         "title": "상법 일부개정법률안 (김용민의원 등 10인)",
         "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_F36C30AC80C14FCA824E69B5A78ABD",
         "date": "2026-11-25",
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-27T00:14:44Z"
+        "last_attempt_at": "2026-11-27T01:39:25Z"
       },
       "PRC_973CEC93F2EB4CD2A67ECFD0669231": {
         "first_seen_at": "2026-11-27T00:14:44Z",
@@ -4704,16 +4704,6 @@
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
         "last_attempt_at": "2026-11-27T01:09:14Z"
       },
-      "PRC_0CC2C6DEB2124AB8AC4F4393D8B77C": {
-        "first_seen_at": "2026-11-27T00:14:44Z",
-        "attempts": 2,
-        "title": "게임산업진흥에 관한 법률 일부개정법률안 (조계원의원 등 10인)",
-        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_0CC2C6DEB2124AB8AC4F4393D8B77C",
-        "date": "2026-11-26",
-        "status": "pending",
-        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-27T00:54:13Z"
-      },
       "PRC_B40F7D39FE36487BA444478597673D": {
         "first_seen_at": "2026-11-27T00:14:44Z",
         "attempts": 2,
@@ -4723,26 +4713,6 @@
         "status": "pending",
         "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
         "last_attempt_at": "2026-11-27T01:09:14Z"
-      },
-      "PRC_EA82D25C7FC248BB8B2DD07AC26C04": {
-        "first_seen_at": "2026-11-27T00:14:44Z",
-        "attempts": 1,
-        "title": "역사문화권 정비 등에 관한 특별법 일부개정법률안 (조계원의원 등 11인)",
-        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_EA82D25C7FC248BB8B2DD07AC26C04",
-        "date": "2026-11-26",
-        "status": "pending",
-        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-27T00:14:44Z"
-      },
-      "PRC_3752C639830F4062B745C904E4D2E3": {
-        "first_seen_at": "2026-11-27T00:14:44Z",
-        "attempts": 2,
-        "title": "문화유산의 보존 및 활용에 관한 법률 일부개정법률안 (조계원의원 등 11인)",
-        "url": "https://likms.assembly.go.kr/bill/bi/billDetailPage.do?billId=PRC_3752C639830F4062B745C904E4D2E3",
-        "date": "2026-11-26",
-        "status": "pending",
-        "note": "billInfo.do 정상 응답에 제안이유 섹션이 아직 없음",
-        "last_attempt_at": "2026-11-27T00:54:13Z"
       }
     }
   },
